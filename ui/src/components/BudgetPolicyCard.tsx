@@ -18,8 +18,33 @@ function parseDollarInput(value: string) {
   return Math.round(parsed * 100);
 }
 
-function windowLabel(windowKind: BudgetPolicySummary["windowKind"]) {
-  return windowKind === "lifetime" ? "Lifetime budget" : "Monthly UTC budget";
+function parsePercentInput(value: string) {
+  const normalized = value.trim();
+  if (normalized.length === 0) return 0;
+  const parsed = Number(normalized);
+  if (!Number.isInteger(parsed) || parsed < 0 || parsed > 100) return null;
+  return parsed;
+}
+
+export function isSubscriptionBudget(summary: Pick<BudgetPolicySummary, "metric">) {
+  return summary.metric === "subscription_percent";
+}
+
+function formatPercent(value: number) {
+  return `${value}%`;
+}
+
+export function windowLabel(windowKind: BudgetPolicySummary["windowKind"]) {
+  switch (windowKind) {
+    case "lifetime":
+      return "Lifetime budget";
+    case "provider_session":
+      return "Provider session window";
+    case "provider_week":
+      return "Provider weekly window";
+    default:
+      return "Monthly UTC budget";
+  }
 }
 
 function statusTone(status: BudgetPolicySummary["status"]) {
@@ -41,13 +66,16 @@ export function BudgetPolicyCard({
   compact?: boolean;
   variant?: "card" | "plain";
 }) {
-  const [draftBudget, setDraftBudget] = useState(centsInputValue(summary.amount));
+  const percentMode = isSubscriptionBudget(summary);
+  const toInputValue = percentMode ? String : centsInputValue;
+  const formatAmount = percentMode ? formatPercent : formatCents;
+  const [draftBudget, setDraftBudget] = useState(toInputValue(summary.amount));
 
   useEffect(() => {
-    setDraftBudget(centsInputValue(summary.amount));
-  }, [summary.amount]);
+    setDraftBudget(toInputValue(summary.amount));
+  }, [summary.amount, toInputValue]);
 
-  const parsedDraft = parseDollarInput(draftBudget);
+  const parsedDraft = percentMode ? parsePercentInput(draftBudget) : parseDollarInput(draftBudget);
   const canSave = typeof parsedDraft === "number" && parsedDraft !== summary.amount && Boolean(onSave);
   const progress = summary.amount > 0 ? Math.min(100, summary.utilizationPercent) : 0;
   const StatusIcon = summary.status === "hard_stop" ? ShieldAlert : summary.status === "warning" ? AlertTriangle : Wallet;
@@ -57,7 +85,7 @@ export function BudgetPolicyCard({
     <div className="grid gap-6 sm:grid-cols-2">
       <div>
         <div className="text-(length:--text-micro) uppercase tracking-(--tracking-caps) text-muted-foreground">Observed</div>
-        <div className="mt-2 text-xl font-semibold tabular-nums">{formatCents(summary.observedAmount)}</div>
+        <div className="mt-2 text-xl font-semibold tabular-nums">{formatAmount(summary.observedAmount)}</div>
         <div className="mt-1 text-xs text-muted-foreground">
           {summary.amount > 0 ? `${summary.utilizationPercent}% of limit` : "No cap configured"}
         </div>
@@ -65,10 +93,12 @@ export function BudgetPolicyCard({
       <div>
         <div className="text-(length:--text-micro) uppercase tracking-(--tracking-caps) text-muted-foreground">Budget</div>
         <div className="mt-2 text-xl font-semibold tabular-nums">
-          {summary.amount > 0 ? formatCents(summary.amount) : "Disabled"}
+          {summary.amount > 0 ? formatAmount(summary.amount) : "Disabled"}
         </div>
         <div className="mt-1 text-xs text-muted-foreground">
-          Soft alert at {summary.warnPercent}%{summary.paused && summary.pauseReason ? ` · ${summary.pauseReason} pause` : ""}
+          {percentMode
+            ? "New runs wait for the window reset above the limit"
+            : `Soft alert at ${summary.warnPercent}%${summary.paused && summary.pauseReason ? ` · ${summary.pauseReason} pause` : ""}`}
         </div>
       </div>
     </div>
@@ -76,7 +106,7 @@ export function BudgetPolicyCard({
     <div className="grid gap-3 sm:grid-cols-2">
       <div className="rounded-xl border border-border/70 bg-black/[0.18] px-4 py-3">
         <div className="text-(length:--text-micro) uppercase tracking-(--tracking-caps) text-muted-foreground">Observed</div>
-        <div className="mt-2 text-xl font-semibold tabular-nums">{formatCents(summary.observedAmount)}</div>
+        <div className="mt-2 text-xl font-semibold tabular-nums">{formatAmount(summary.observedAmount)}</div>
         <div className="mt-1 text-xs text-muted-foreground">
           {summary.amount > 0 ? `${summary.utilizationPercent}% of limit` : "No cap configured"}
         </div>
@@ -84,10 +114,12 @@ export function BudgetPolicyCard({
       <div className="rounded-xl border border-border/70 bg-black/[0.18] px-4 py-3">
         <div className="text-(length:--text-micro) uppercase tracking-(--tracking-caps) text-muted-foreground">Budget</div>
         <div className="mt-2 text-xl font-semibold tabular-nums">
-          {summary.amount > 0 ? formatCents(summary.amount) : "Disabled"}
+          {summary.amount > 0 ? formatAmount(summary.amount) : "Disabled"}
         </div>
         <div className="mt-1 text-xs text-muted-foreground">
-          Soft alert at {summary.warnPercent}%{summary.paused && summary.pauseReason ? ` · ${summary.pauseReason} pause` : ""}
+          {percentMode
+            ? "New runs wait for the window reset above the limit"
+            : `Soft alert at ${summary.warnPercent}%${summary.paused && summary.pauseReason ? ` · ${summary.pauseReason} pause` : ""}`}
         </div>
       </div>
     </div>
@@ -97,7 +129,7 @@ export function BudgetPolicyCard({
     <div className="space-y-2">
       <div className="flex items-center justify-between text-xs text-muted-foreground">
         <span>Remaining</span>
-        <span>{summary.amount > 0 ? formatCents(summary.remainingAmount) : "Unlimited"}</span>
+        <span>{summary.amount > 0 ? formatAmount(summary.remainingAmount) : "Unlimited"}</span>
       </div>
       <div className={cn("h-2 overflow-hidden rounded-full", isPlain ? "bg-border/70" : "bg-muted/70")}>
         <div
@@ -135,14 +167,14 @@ export function BudgetPolicyCard({
     <div className={cn("flex flex-col gap-3 sm:flex-row sm:items-end", isPlain ? "" : "rounded-xl border border-border/70 bg-background/50 p-3")}>
       <div className="min-w-0 flex-1">
         <label className="text-(length:--text-micro) uppercase tracking-(--tracking-caps) text-muted-foreground">
-          Budget (USD)
+          {percentMode ? "Limit (% of window)" : "Budget (USD)"}
         </label>
         <Input
           value={draftBudget}
           onChange={(event) => setDraftBudget(event.target.value)}
           className="mt-2"
-          inputMode="decimal"
-          placeholder="0.00"
+          inputMode={percentMode ? "numeric" : "decimal"}
+          placeholder={percentMode ? "0" : "0.00"}
         />
       </div>
       <Button
@@ -151,7 +183,7 @@ export function BudgetPolicyCard({
         }}
         disabled={!canSave || isSaving || parsedDraft === null}
       >
-        {isSaving ? "Saving..." : summary.amount > 0 ? "Update budget" : "Set budget"}
+        {isSaving ? "Saving..." : summary.amount > 0 ? (percentMode ? "Update limit" : "Update budget") : (percentMode ? "Set limit" : "Set budget")}
       </Button>
     </div>
   ) : null;
@@ -187,7 +219,9 @@ export function BudgetPolicyCard({
         {pausedPane}
         {saveSection}
         {parsedDraft === null ? (
-          <p className="text-xs text-destructive">Enter a valid non-negative dollar amount.</p>
+          <p className="text-xs text-destructive">
+            {percentMode ? "Enter a whole number between 0 and 100." : "Enter a valid non-negative dollar amount."}
+          </p>
         ) : null}
       </div>
     );
@@ -216,7 +250,9 @@ export function BudgetPolicyCard({
         {pausedPane}
         {saveSection}
         {parsedDraft === null ? (
-          <p className="text-xs text-destructive">Enter a valid non-negative dollar amount.</p>
+          <p className="text-xs text-destructive">
+            {percentMode ? "Enter a whole number between 0 and 100." : "Enter a valid non-negative dollar amount."}
+          </p>
         ) : null}
       </CardContent>
     </Card>

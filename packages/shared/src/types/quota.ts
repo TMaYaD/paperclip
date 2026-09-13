@@ -1,5 +1,7 @@
 /** a single rate-limit or usage window returned by a provider quota API */
 export interface QuotaWindow {
+  /** stable machine key (e.g. "five_hour", "seven_day"), null when the window has no known key */
+  key?: string | null;
   /** human label, e.g. "5h", "7d", "Sonnet 7d", "Credits" */
   label: string;
   /** percent of the window already consumed (0-100), null when not reported */
