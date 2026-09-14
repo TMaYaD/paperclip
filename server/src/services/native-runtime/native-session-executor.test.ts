@@ -2067,6 +2067,22 @@ describe("native provider bootstrap environment", () => {
     });
   });
 
+  it("inherits a host-pinned Claude Code executable", () => {
+    expect(
+      buildNativeProviderEnvironment(
+        {},
+        {
+          HOME: "/Users/runner",
+          CLAUDE_CODE_EXECUTABLE: "/usr/local/bin/claude",
+          CLAUDE_CODE_OAUTH_TOKEN: "must-not-leak",
+        },
+      ),
+    ).toEqual({
+      HOME: "/Users/runner",
+      CLAUDE_CODE_EXECUTABLE: "/usr/local/bin/claude",
+    });
+  });
+
   it("lets explicitly configured agent env override host defaults", () => {
     expect(
       buildNativeProviderEnvironment(
