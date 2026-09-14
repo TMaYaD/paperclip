@@ -89,6 +89,10 @@ export type SubscriptionWindowWait = {
 export type SubscriptionWindowObservation = {
   usedPercent: number | null;
   resetsAt: string | null;
+  /** True when the latest provider read failed and this comes from the last successful read. */
+  stale: boolean;
+  /** ISO timestamp of the provider read behind this observation, null for a raw adapter result. */
+  observedAt: string | null;
 };
 
 function parseResetsAt(value: string | null | undefined, now: Date): Date | null {
@@ -113,7 +117,12 @@ export function observeSubscriptionWindow(
   if (!result || !result.ok) return null;
   const window = findQuotaWindow(result.windows, windowKind);
   if (!window) return null;
-  return { usedPercent: window.usedPercent, resetsAt: window.resetsAt };
+  return {
+    usedPercent: window.usedPercent,
+    resetsAt: window.resetsAt,
+    stale: result.stale === true,
+    observedAt: result.observedAt ?? null,
+  };
 }
 
 /**

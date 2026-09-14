@@ -10,6 +10,20 @@ const QUOTA_PROVIDER_TIMEOUT_MS = 20_000;
  */
 export const QUOTA_SNAPSHOT_TTL_MS = readPositiveIntEnv("PAPERCLIP_QUOTA_SNAPSHOT_TTL_MS", 60_000);
 
+/**
+ * How long the last successful read of a provider keeps standing in for a
+ * failed refresh. The Anthropic usage endpoint is rate limited and the Claude
+ * CLI fallback scrapes a terminal, so single reads fail now and then; without
+ * this bound each blip would report the provider as unknown for one TTL and
+ * flip budget summaries between a measured percent and "unavailable". A
+ * provider that stays unreadable past this bound is reported as unavailable,
+ * which the dispatch gate treats as fail-open.
+ */
+export const QUOTA_SNAPSHOT_MAX_STALE_MS = readPositiveIntEnv(
+  "PAPERCLIP_QUOTA_SNAPSHOT_MAX_STALE_MS",
+  10 * 60_000,
+);
+
 function readPositiveIntEnv(key: string, fallback: number): number {
   const raw = process.env[key];
   if (typeof raw !== "string" || raw.trim().length === 0) return fallback;
@@ -60,32 +74,84 @@ export type QuotaSnapshot = {
 
 export type QuotaSnapshotReader = (input?: { now?: Date }) => Promise<QuotaSnapshot>;
 
+function parseObservedAt(result: ProviderQuotaResult): number | null {
+  if (!result.observedAt) return null;
+  const parsed = new Date(result.observedAt).getTime();
+  return Number.isNaN(parsed) ? null : parsed;
+}
+
 /**
  * Builds a memoized reader over `fetchAllQuotaWindows`. One fetch is shared by
  * all concurrent callers, and the result is reused until `ttlMs` has elapsed.
  * The reader never throws: a failed fetch yields per-provider `ok: false` rows,
  * which enforcement treats as "unknown" (fail open) rather than as a block.
+ *
+ * A provider whose refresh fails keeps its last successful result, marked
+ * `stale` and carrying the new error, until that result is older than
+ * `maxStaleMs`. Every ok row is stamped with `observedAt` so consumers can say
+ * how old the usage is.
  */
 export function createQuotaSnapshotReader(options: {
   fetch?: () => Promise<ProviderQuotaResult[]>;
   ttlMs?: number;
+  maxStaleMs?: number;
 } = {}): QuotaSnapshotReader {
   const fetch = options.fetch ?? fetchAllQuotaWindows;
   const ttlMs = options.ttlMs ?? QUOTA_SNAPSHOT_TTL_MS;
+  const maxStaleMs = options.maxStaleMs ?? QUOTA_SNAPSHOT_MAX_STALE_MS;
   let cached: QuotaSnapshot | null = null;
   let inFlight: Promise<QuotaSnapshot> | null = null;
+  /** Last ok result per provider, reused while that provider's refresh fails. */
+  const lastGood = new Map<string, ProviderQuotaResult>();
+
+  function reconcile(results: ProviderQuotaResult[], fetchedAt: Date): ProviderQuotaResult[] {
+    const observedAt = fetchedAt.toISOString();
+    return results.map((result) => {
+      if (result.ok) {
+        const fresh: ProviderQuotaResult = { ...result, observedAt };
+        lastGood.set(result.provider, fresh);
+        return fresh;
+      }
+      const previous = lastGood.get(result.provider);
+      const previousObservedAt = previous ? parseObservedAt(previous) : null;
+      if (
+        !previous
+        || previousObservedAt == null
+        || fetchedAt.getTime() - previousObservedAt >= maxStaleMs
+      ) {
+        lastGood.delete(result.provider);
+        return result;
+      }
+      return {
+        ...previous,
+        stale: true,
+        error: result.error,
+        errorFamily: result.errorFamily ?? null,
+      };
+    });
+  }
 
   return async (input = {}) => {
     const now = input.now ?? new Date();
     if (cached && now.getTime() - cached.fetchedAt.getTime() < ttlMs) return cached;
     if (inFlight) return inFlight;
     inFlight = fetch()
-      .then((results) => ({ results, fetchedAt: new Date() }))
-      .catch((error: unknown) => ({
-        results: [{ provider: "unknown", ok: false, error: String(error), windows: [] }],
-        fetchedAt: new Date(),
-      }))
-      .then((snapshot) => {
+      .then(
+        (results) => results,
+        (error: unknown): ProviderQuotaResult[] => {
+          // The whole fetch threw, so no provider reported anything. Report the
+          // failure against every provider we have seen so their last good
+          // read can stand in; with no history there is nothing to attribute.
+          const failure = { ok: false as const, error: String(error), windows: [] };
+          const known = [...lastGood.keys()];
+          return known.length > 0
+            ? known.map((provider) => ({ provider, ...failure }))
+            : [{ provider: "unknown", ...failure }];
+        },
+      )
+      .then((results) => {
+        const fetchedAt = new Date();
+        const snapshot: QuotaSnapshot = { results: reconcile(results, fetchedAt), fetchedAt };
         cached = snapshot;
         return snapshot;
       })
