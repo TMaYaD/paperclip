@@ -36,6 +36,8 @@ export function SubscriptionWindowBudgets({
       // usage as unavailable instead of a healthy 0%.
       let usedPercent: number | null = null;
       let resetsAt: Date | null = null;
+      let usageStale = false;
+      let usageObservedAt: string | null = null;
       for (const result of quotaResults) {
         if (!result.ok) continue;
         const window = result.windows.find((row) => row.key === quotaKey);
@@ -43,6 +45,8 @@ export function SubscriptionWindowBudgets({
         if (usedPercent == null || window.usedPercent > usedPercent) {
           usedPercent = window.usedPercent;
           resetsAt = window.resetsAt ? new Date(window.resetsAt) : null;
+          usageStale = result.stale === true;
+          usageObservedAt = result.observedAt ?? null;
         }
       }
       const placeholder: BudgetPolicySummary = {
@@ -58,6 +62,8 @@ export function SubscriptionWindowBudgets({
         remainingAmount: 0,
         utilizationPercent: 0,
         usageUnavailable: usedPercent == null,
+        usageStale,
+        usageObservedAt,
         warnPercent: 80,
         hardStopEnabled: true,
         notifyEnabled: true,
