@@ -7,7 +7,27 @@ import { fileURLToPath } from "node:url";
 
 const repoRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 
-export function materializePublishManifest(pkg) {
+/**
+ * Versions of the workspace packages reachable from scripts/release-package-manifest.json,
+ * so a workspace:* specifier resolves to the dependency's real version. Release builds
+ * rewrite every workspace version to one value first, so this only matters for builds
+ * that pack the checkout as-is (paperclipai install --ref), where plugin-sdk is 1.0.0
+ * while the rest of the workspace is 0.3.1.
+ */
+export function loadWorkspaceVersions(sourceRoot = repoRoot) {
+  const versions = new Map();
+  const manifestPath = resolve(sourceRoot, "scripts", "release-package-manifest.json");
+  if (!existsSync(manifestPath)) return versions;
+  for (const entry of JSON.parse(readFileSync(manifestPath, "utf8"))) {
+    const packagePath = resolve(sourceRoot, entry.dir, "package.json");
+    if (!existsSync(packagePath)) continue;
+    const pkg = JSON.parse(readFileSync(packagePath, "utf8"));
+    if (pkg.name && pkg.version) versions.set(pkg.name, pkg.version);
+  }
+  return versions;
+}
+
+export function materializePublishManifest(pkg, workspaceVersions = new Map()) {
   const publishConfig = pkg.publishConfig ?? {};
   const publishManifest = { ...pkg };
 
@@ -22,7 +42,7 @@ export function materializePublishManifest(pkg) {
         if (typeof specifier !== "string" || !specifier.startsWith("workspace:")) return [name, specifier];
         const range = specifier.slice("workspace:".length);
         const prefix = range === "^" || range === "~" ? range : "";
-        return [name, `${prefix}${pkg.version}`];
+        return [name, `${prefix}${workspaceVersions.get(name) ?? pkg.version}`];
       }),
     );
   }
@@ -156,7 +176,7 @@ export function prepareBundledPackage(sourceDir, destinationDir, { sourceRoot = 
   }
 
   const deployedPackagePath = resolve(destinationDir, "package.json");
-  const publishManifest = materializePublishManifest(sourcePackage);
+  const publishManifest = materializePublishManifest(sourcePackage, loadWorkspaceVersions(sourceRoot));
   const installManifest = createBundledInstallManifest(publishManifest, bundledDependencies);
   writeFileSync(deployedPackagePath, `${JSON.stringify(installManifest, null, 2)}\n`);
 
