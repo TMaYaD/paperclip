@@ -541,6 +541,10 @@ export function buildSessionKey(identity: SessionKeyIdentity, fingerprint: strin
 const ACPX_INHERITED_HOST_ENV_KEYS = new Set([
   "PATH",
   "PATHEXT",
+  // Lets the host pin the Claude Code executable claude-agent-acp spawns
+  // (it reads CLAUDE_CODE_EXECUTABLE before falling back to the SDK's bundled
+  // platform binary, which does not run on every host).
+  "CLAUDE_CODE_EXECUTABLE",
   "SYSTEMROOT",
   "WINDIR",
   "COMSPEC",
