@@ -461,6 +461,10 @@ const NATIVE_PROVIDER_HOST_ENV_KEYS = [
   "XDG_DATA_HOME",
   "SystemRoot",
   "PATHEXT",
+  // Lets the host pin the Claude Code executable the ACP provider spawns
+  // (claude-agent-acp reads CLAUDE_CODE_EXECUTABLE before falling back to the
+  // SDK's bundled platform binary, which does not run on every host).
+  "CLAUDE_CODE_EXECUTABLE",
 ] as const;
 
 async function measureNativeRunnerSpan<T>(
