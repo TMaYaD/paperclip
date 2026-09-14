@@ -389,9 +389,14 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
 
   async function buildPolicySummary(policy: PolicyRow): Promise<BudgetPolicySummary> {
     const scope = await resolveScopeRecord(db, policy.scopeType as BudgetScopeType, policy.scopeId);
-    const observation = await observeSubscriptionPolicy(policy);
-    const observedAmount = observation
-      ? observation.usedPercent ?? 0
+    const isSubscription = policy.metric === "subscription_percent";
+    const observation = isSubscription ? await observeSubscriptionPolicy(policy) : null;
+    // A subscription policy only knows its usage when the provider reported
+    // the window. A failed quota fetch, a missing window, or a window without
+    // utilization is "unknown" and must not be presented as a healthy 0%.
+    const usageUnavailable = isSubscription && observation?.usedPercent == null;
+    const observedAmount = isSubscription
+      ? observation?.usedPercent ?? 0
       : await computeObservedAmount(db, policy);
     const { start, end } = resolveWindow(policy.windowKind as BudgetWindowKind, new Date(), observation);
     const amount = policy.isActive ? policy.amount : 0;
@@ -409,11 +414,12 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
       observedAmount,
       remainingAmount: amount > 0 ? Math.max(0, amount - observedAmount) : 0,
       utilizationPercent,
+      usageUnavailable,
       warnPercent: policy.warnPercent,
       hardStopEnabled: policy.hardStopEnabled,
       notifyEnabled: policy.notifyEnabled,
       isActive: policy.isActive,
-      status: policy.isActive
+      status: policy.isActive && !usageUnavailable
         ? budgetStatusFromObserved(observedAmount, amount, policy.warnPercent)
         : "ok",
       paused: scope.paused,

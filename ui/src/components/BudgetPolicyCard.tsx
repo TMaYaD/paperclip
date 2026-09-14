@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { BudgetPolicySummary } from "@paperclipai/shared";
-import { AlertTriangle, PauseCircle, ShieldAlert, Wallet } from "lucide-react";
+import { AlertTriangle, HelpCircle, PauseCircle, ShieldAlert, Wallet } from "lucide-react";
 import { cn, formatCents } from "../lib/utils";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -47,7 +47,8 @@ export function windowLabel(windowKind: BudgetPolicySummary["windowKind"]) {
   }
 }
 
-function statusTone(status: BudgetPolicySummary["status"]) {
+function statusTone(status: BudgetPolicySummary["status"], usageUnavailable: boolean) {
+  if (usageUnavailable) return "text-muted-foreground border-border/70 bg-muted/40";
   if (status === "hard_stop") return "text-red-700 dark:text-red-300 border-red-500/30 bg-red-500/10";
   if (status === "warning") return "text-amber-700 dark:text-amber-200 border-amber-500/30 bg-amber-500/10";
   return "text-emerald-700 dark:text-emerald-200 border-emerald-500/30 bg-emerald-500/10";
@@ -77,18 +78,44 @@ export function BudgetPolicyCard({
 
   const parsedDraft = percentMode ? parsePercentInput(draftBudget) : parseDollarInput(draftBudget);
   const canSave = typeof parsedDraft === "number" && parsedDraft !== summary.amount && Boolean(onSave);
-  const progress = summary.amount > 0 ? Math.min(100, summary.utilizationPercent) : 0;
-  const StatusIcon = summary.status === "hard_stop" ? ShieldAlert : summary.status === "warning" ? AlertTriangle : Wallet;
+  // The provider did not report this window: say so, never show a healthy 0%.
+  const usageUnavailable = percentMode && summary.usageUnavailable === true;
+  const progress = !usageUnavailable && summary.amount > 0 ? Math.min(100, summary.utilizationPercent) : 0;
+  const StatusIcon = usageUnavailable
+    ? HelpCircle
+    : summary.status === "hard_stop"
+      ? ShieldAlert
+      : summary.status === "warning"
+        ? AlertTriangle
+        : Wallet;
+  const statusLabel = summary.paused
+    ? "Paused"
+    : usageUnavailable
+      ? "Unknown"
+      : summary.status === "warning"
+        ? "Warning"
+        : summary.status === "hard_stop"
+          ? "Hard stop"
+          : "Healthy";
+  const observedValue = usageUnavailable ? "Unavailable" : formatAmount(summary.observedAmount);
+  const observedCaption = usageUnavailable
+    ? "Provider did not report this window"
+    : summary.amount > 0
+      ? `${summary.utilizationPercent}% of limit`
+      : "No cap configured";
+  const remainingValue = usageUnavailable
+    ? "Unknown"
+    : summary.amount > 0
+      ? formatAmount(summary.remainingAmount)
+      : "Unlimited";
   const isPlain = variant === "plain";
 
   const observedBudgetGrid = isPlain ? (
     <div className="grid gap-6 sm:grid-cols-2">
       <div>
         <div className="text-(length:--text-micro) uppercase tracking-(--tracking-caps) text-muted-foreground">Observed</div>
-        <div className="mt-2 text-xl font-semibold tabular-nums">{formatAmount(summary.observedAmount)}</div>
-        <div className="mt-1 text-xs text-muted-foreground">
-          {summary.amount > 0 ? `${summary.utilizationPercent}% of limit` : "No cap configured"}
-        </div>
+        <div className="mt-2 text-xl font-semibold tabular-nums">{observedValue}</div>
+        <div className="mt-1 text-xs text-muted-foreground">{observedCaption}</div>
       </div>
       <div>
         <div className="text-(length:--text-micro) uppercase tracking-(--tracking-caps) text-muted-foreground">Budget</div>
@@ -106,10 +133,8 @@ export function BudgetPolicyCard({
     <div className="grid gap-3 sm:grid-cols-2">
       <div className="rounded-xl border border-border/70 bg-black/[0.18] px-4 py-3">
         <div className="text-(length:--text-micro) uppercase tracking-(--tracking-caps) text-muted-foreground">Observed</div>
-        <div className="mt-2 text-xl font-semibold tabular-nums">{formatAmount(summary.observedAmount)}</div>
-        <div className="mt-1 text-xs text-muted-foreground">
-          {summary.amount > 0 ? `${summary.utilizationPercent}% of limit` : "No cap configured"}
-        </div>
+        <div className="mt-2 text-xl font-semibold tabular-nums">{observedValue}</div>
+        <div className="mt-1 text-xs text-muted-foreground">{observedCaption}</div>
       </div>
       <div className="rounded-xl border border-border/70 bg-black/[0.18] px-4 py-3">
         <div className="text-(length:--text-micro) uppercase tracking-(--tracking-caps) text-muted-foreground">Budget</div>
@@ -129,7 +154,7 @@ export function BudgetPolicyCard({
     <div className="space-y-2">
       <div className="flex items-center justify-between text-xs text-muted-foreground">
         <span>Remaining</span>
-        <span>{summary.amount > 0 ? formatAmount(summary.remainingAmount) : "Unlimited"}</span>
+        <span>{remainingValue}</span>
       </div>
       <div className={cn("h-2 overflow-hidden rounded-full", isPlain ? "bg-border/70" : "bg-muted/70")}>
         <div
@@ -137,7 +162,7 @@ export function BudgetPolicyCard({
           aria-valuenow={Math.round(progress)}
           aria-valuemin={0}
           aria-valuemax={100}
-          aria-label={`Budget utilization: ${Math.round(progress)}% used`}
+          aria-label={usageUnavailable ? "Budget utilization unknown" : `Budget utilization: ${Math.round(progress)}% used`}
           className={cn(
             "h-full rounded-full transition-(--tp-width-background-color) duration-200",
             summary.status === "hard_stop"
@@ -210,7 +235,7 @@ export function BudgetPolicyCard({
             )}
           >
             <StatusIcon className="h-3.5 w-3.5" />
-            {summary.paused ? "Paused" : summary.status === "warning" ? "Warning" : summary.status === "hard_stop" ? "Hard stop" : "Healthy"}
+            {statusLabel}
           </div>
         </div>
 
@@ -238,9 +263,9 @@ export function BudgetPolicyCard({
             <CardTitle className="mt-1 text-base">{summary.scopeName}</CardTitle>
             <CardDescription className="mt-1">{windowLabel(summary.windowKind)}</CardDescription>
           </div>
-          <div className={cn("inline-flex items-center gap-2 rounded-full border px-3 py-1 text-(length:--text-micro) uppercase tracking-(--tracking-caps)", statusTone(summary.status))}>
+          <div className={cn("inline-flex items-center gap-2 rounded-full border px-3 py-1 text-(length:--text-micro) uppercase tracking-(--tracking-caps)", statusTone(summary.status, usageUnavailable))}>
             <StatusIcon className="h-3.5 w-3.5" />
-            {summary.paused ? "Paused" : summary.status === "warning" ? "Warning" : summary.status === "hard_stop" ? "Hard stop" : "Healthy"}
+            {statusLabel}
           </div>
         </div>
       </CardHeader>

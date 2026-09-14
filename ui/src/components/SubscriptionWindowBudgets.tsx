@@ -32,13 +32,15 @@ export function SubscriptionWindowBudgets({
       );
       if (existing) return existing;
       const quotaKey = SUBSCRIPTION_BUDGET_WINDOW_QUOTA_KEYS[windowKind];
-      let usedPercent = 0;
+      // null until some provider reports the window; the card then shows the
+      // usage as unavailable instead of a healthy 0%.
+      let usedPercent: number | null = null;
       let resetsAt: Date | null = null;
       for (const result of quotaResults) {
         if (!result.ok) continue;
         const window = result.windows.find((row) => row.key === quotaKey);
         if (!window || window.usedPercent == null) continue;
-        if (window.usedPercent > usedPercent) {
+        if (usedPercent == null || window.usedPercent > usedPercent) {
           usedPercent = window.usedPercent;
           resetsAt = window.resetsAt ? new Date(window.resetsAt) : null;
         }
@@ -52,9 +54,10 @@ export function SubscriptionWindowBudgets({
         metric: "subscription_percent",
         windowKind,
         amount: 0,
-        observedAmount: usedPercent,
+        observedAmount: usedPercent ?? 0,
         remainingAmount: 0,
         utilizationPercent: 0,
+        usageUnavailable: usedPercent == null,
         warnPercent: 80,
         hardStopEnabled: true,
         notifyEnabled: true,

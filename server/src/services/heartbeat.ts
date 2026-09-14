@@ -15,8 +15,8 @@ import { recordExecutionWait } from "./execution-wait.js";
 import {
   SUBSCRIPTION_WINDOW_SKIPPED_ERROR_CODE,
   SUBSCRIPTION_WINDOW_WAIT_EXHAUSTED_ERROR_CODE,
-  SUBSCRIPTION_WINDOW_WAIT_MAX_ATTEMPTS,
   SUBSCRIPTION_WINDOW_WAIT_RETRY_REASON,
+  boundSubscriptionWindowWait,
   subscriptionWindowGateService,
   type SubscriptionWindowWait,
 } from "./subscription-window-gate.js";
@@ -16491,26 +16491,73 @@ export function heartbeatService(
       return cancelled;
     }
 
-    const attempt = (run.scheduledRetryAttempt ?? 0) + 1;
-    if (attempt > SUBSCRIPTION_WINDOW_WAIT_MAX_ATTEMPTS) {
-      await cancelRunInternal(
-        run.id,
-        `Cancelled after ${SUBSCRIPTION_WINDOW_WAIT_MAX_ATTEMPTS} consecutive subscription window waits: ${wait.reason}`,
-        {
-          errorCode: SUBSCRIPTION_WINDOW_WAIT_EXHAUSTED_ERROR_CODE,
-          resultJson: { subscriptionWindowWait: summary },
+    // Only this gate's own deferrals count toward the bound. A run promoted
+    // after workspace-busy, transient, or continuation retries starts a fresh
+    // wait, mirroring how WorkspaceBusyDeferral reads its attempt.
+    const continuing = run.scheduledRetryReason === SUBSCRIPTION_WINDOW_WAIT_RETRY_REASON;
+    const previousWait = continuing
+      ? parseObject(parseObject(run.resultJson).subscriptionWindowWait)
+      : {};
+    const previousStartedAt =
+      typeof previousWait.waitStartedAt === "string" ? new Date(previousWait.waitStartedAt) : null;
+    const waitStartedAt =
+      previousStartedAt && !Number.isNaN(previousStartedAt.getTime()) ? previousStartedAt : now;
+    const attempt = continuing ? (run.scheduledRetryAttempt ?? 0) + 1 : 1;
+    const bound = boundSubscriptionWindowWait({ waitStartedAt, resumeAt: wait.resumeAt, now });
+    const waitSummary = {
+      ...summary,
+      resumeAt: bound.resumeAt.toISOString(),
+      waitStartedAt: waitStartedAt.toISOString(),
+      waitDeadline: bound.deadline.toISOString(),
+    };
+
+    if (bound.exhausted) {
+      // Cancel through the same pre-invocation path as the daily cap. The
+      // general cancel routine re-enters the dispatcher's own lifecycle work
+      // and stalls when invoked from inside a claim, and immediate recovery
+      // would only re-queue the work straight back into this gate.
+      const reason =
+        `Cancelled after waiting for the provider subscription window since ${waitStartedAt.toISOString()} ` +
+        `(${attempt - 1} consecutive deferrals): ${wait.reason}`;
+      const cancelled = await setRunStatus(run.id, "cancelled", {
+        finishedAt: now,
+        error: reason,
+        errorCode: SUBSCRIPTION_WINDOW_WAIT_EXHAUSTED_ERROR_CODE,
+        resultJson: {
+          ...parseObject(run.resultJson),
+          stopReason: SUBSCRIPTION_WINDOW_WAIT_EXHAUSTED_ERROR_CODE,
+          subscriptionWindowWait: waitSummary,
         },
+      });
+      if (!cancelled) return null;
+      await setWakeupStatus(run.wakeupRequestId, "cancelled", {
+        finishedAt: now,
+        error: reason,
+      });
+      await appendRunEvent(cancelled, {
+        eventType: "lifecycle",
+        stream: "system",
+        level: "warn",
+        message: reason,
+        payload: { ...waitSummary, scheduledRetryAttempt: attempt - 1 },
+      });
+      await releaseIssueExecutionAndPromote(cancelled, {
+        suppressImmediateRecovery: true,
+      });
+      logger.warn(
+        { runId: run.id, agentId: run.agentId, waitStartedAt: waitStartedAt.toISOString(), attempt: attempt - 1 },
+        "claimQueuedRun: cancelled queued run after the subscription window wait bound",
       );
       return null;
     }
 
     const deferred = await setRunStatus(run.id, "scheduled_retry", {
-      scheduledRetryAt: wait.resumeAt,
+      scheduledRetryAt: bound.resumeAt,
       scheduledRetryAttempt: attempt,
       scheduledRetryReason: SUBSCRIPTION_WINDOW_WAIT_RETRY_REASON,
       resultJson: {
         ...parseObject(run.resultJson),
-        subscriptionWindowWait: summary,
+        subscriptionWindowWait: waitSummary,
       },
     });
     if (!deferred) return null;
@@ -16519,10 +16566,16 @@ export function heartbeatService(
       stream: "system",
       level: "info",
       message: `Deferred until the provider subscription window resets: ${wait.reason}`,
-      payload: { ...summary, scheduledRetryAttempt: attempt },
+      payload: { ...waitSummary, scheduledRetryAttempt: attempt },
     });
     logger.info(
-      { runId: run.id, agentId: run.agentId, resumeAt: wait.resumeAt.toISOString(), attempt },
+      {
+        runId: run.id,
+        agentId: run.agentId,
+        resumeAt: bound.resumeAt.toISOString(),
+        waitStartedAt: waitStartedAt.toISOString(),
+        attempt,
+      },
       "claimQueuedRun: deferred queued run for subscription window",
     );
     return deferred;

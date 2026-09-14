@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { eq, sql } from "drizzle-orm";
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   agents,
   agentWakeupRequests,
@@ -20,9 +20,12 @@ import {
 import { heartbeatService } from "../services/heartbeat.ts";
 import {
   SUBSCRIPTION_WINDOW_SKIPPED_ERROR_CODE,
+  SUBSCRIPTION_WINDOW_WAIT_EXHAUSTED_ERROR_CODE,
+  SUBSCRIPTION_WINDOW_WAIT_MAX_MS,
   SUBSCRIPTION_WINDOW_WAIT_RETRY_REASON,
   subscriptionWindowGateService,
 } from "../services/subscription-window-gate.ts";
+import { WORKSPACE_BUSY_RETRY_REASON } from "../modules/run-dispatch/domain/wake-context.ts";
 import { runningProcesses } from "../adapters/index.ts";
 
 const mockAdapterExecute = vi.hoisted(() =>
@@ -103,15 +106,22 @@ async function cleanupFixture(db: ReturnType<typeof createDb>) {
       `));
       return;
     } catch (error) {
-      const isLateCommentRace =
-        error instanceof Error && error.message.includes("issue_comments_issue_id_issues_id_fk");
-      if (!isLateCommentRace || attempt === 9) throw error;
+      // Post-run work (follow-up comments, issue checkout) can still be in
+      // flight when the fixture is torn down; give it a moment and retry.
+      const isLateWorkRace =
+        error instanceof Error &&
+        (error.message.includes("issue_comments_issue_id_issues_id_fk") ||
+          error.message.includes("deadlock detected"));
+      if (!isLateWorkRace || attempt === 9) throw error;
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
   }
 }
 
-const SATURATED_SESSION_RESET = "2099-01-01T00:00:00.000Z";
+// A plausible session reset (two hours out): inside the wait bound, so the
+// gate defers to it rather than clamping to the deadline.
+const SATURATED_SESSION_RESET = new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString();
+const SATURATED_SESSION_RESUME = new Date(new Date(SATURATED_SESSION_RESET).getTime() + 30_000).toISOString();
 
 function quotaResults(input: { fiveHourUsedPercent: number | null; sevenDayUsedPercent?: number | null }): ProviderQuotaResult[] {
   return [
@@ -159,16 +169,27 @@ describeEmbeddedPostgres("heartbeat subscription window wait", () => {
     await ensureIssueRelationsTable(db);
   }, 20_000);
 
+  beforeEach(() => {
+    mockAdapterExecute.mockClear();
+  });
+
   afterEach(async () => {
     currentQuota = quotaResults({ fiveHourUsedPercent: 0 });
-    mockAdapterExecute.mockClear();
-    runningProcesses.clear();
+    // A run that executed is still finishing its post-run lifecycle work when
+    // the test body ends, and that work can enqueue and dispatch a follow-up
+    // run for the same agent. Give it a moment to do so, drain the queue, and
+    // only then tear the fixture down and forget the adapter calls; otherwise
+    // a late follow-up executes against a truncated fixture and its call
+    // leaks into the next test.
+    await new Promise((resolve) => setTimeout(resolve, 500));
     await waitForCondition(async () => {
       const runs = await db.select({ status: heartbeatRuns.status }).from(heartbeatRuns);
       return !runs.some((run) => run.status === "queued" || run.status === "running");
     });
     await new Promise((resolve) => setTimeout(resolve, 50));
     await cleanupFixture(db);
+    runningProcesses.clear();
+    mockAdapterExecute.mockClear();
   });
 
   afterAll(async () => {
@@ -224,6 +245,12 @@ describeEmbeddedPostgres("heartbeat subscription window wait", () => {
     agentId: string;
     issueId: string;
     invocationSource: "assignment" | "timer";
+    /** Simulates a run promoted back to queued after earlier scheduled retries. */
+    priorRetry?: {
+      reason: string;
+      attempt: number;
+      resultJson?: Record<string, unknown>;
+    };
   }) {
     const wakeupRequestId = randomUUID();
     const runId = randomUUID();
@@ -249,6 +276,13 @@ describeEmbeddedPostgres("heartbeat subscription window wait", () => {
         issueId: input.issueId,
         wakeReason: input.invocationSource === "timer" ? "heartbeat_timer" : "issue_assigned",
       },
+      ...(input.priorRetry
+        ? {
+            scheduledRetryReason: input.priorRetry.reason,
+            scheduledRetryAttempt: input.priorRetry.attempt,
+            resultJson: input.priorRetry.resultJson ?? null,
+          }
+        : {}),
     });
     await db
       .update(agentWakeupRequests)
@@ -277,7 +311,7 @@ describeEmbeddedPostgres("heartbeat subscription window wait", () => {
     const run = await readRun(runId);
     expect(run?.scheduledRetryReason).toBe(SUBSCRIPTION_WINDOW_WAIT_RETRY_REASON);
     expect(run?.scheduledRetryAttempt).toBe(1);
-    expect(run?.scheduledRetryAt?.toISOString()).toBe("2099-01-01T00:00:30.000Z");
+    expect(run?.scheduledRetryAt?.toISOString()).toBe(SATURATED_SESSION_RESUME);
     expect(run?.errorCode).toBeNull();
     expect((run?.resultJson as Record<string, unknown>)?.subscriptionWindowWait).toMatchObject({
       quotaKey: "five_hour",
@@ -334,6 +368,9 @@ describeEmbeddedPostgres("heartbeat subscription window wait", () => {
 
     await heartbeat.resumeQueuedRuns();
     expect(await waitForCondition(async () => (await readRun(runId))?.status === "scheduled_retry")).toBe(true);
+    const firstWait = (await readRun(runId))?.resultJson as { subscriptionWindowWait?: { waitStartedAt?: string } };
+    const waitStartedAt = firstWait.subscriptionWindowWait?.waitStartedAt;
+    expect(typeof waitStartedAt).toBe("string");
 
     await db
       .update(heartbeatRuns)
@@ -349,6 +386,90 @@ describeEmbeddedPostgres("heartbeat subscription window wait", () => {
       }),
     ).toBe(true);
     expect(mockAdapterExecute).not.toHaveBeenCalled();
+    // The wait chain keeps its original start so the time bound spans the whole wait.
+    const secondWait = (await readRun(runId))?.resultJson as { subscriptionWindowWait?: { waitStartedAt?: string } };
+    expect(secondWait.subscriptionWindowWait?.waitStartedAt).toBe(waitStartedAt);
+  });
+
+  it("starts a fresh wait when the run was last retried for an unrelated reason", async () => {
+    const { companyId, agentId, issueId } = await seedCompanyAgentAndIssue();
+    await seedSessionPolicy(companyId, 80);
+    currentQuota = quotaResults({ fiveHourUsedPercent: 99 });
+    const { runId } = await seedQueuedRun({
+      companyId,
+      agentId,
+      issueId,
+      invocationSource: "assignment",
+      priorRetry: { reason: WORKSPACE_BUSY_RETRY_REASON, attempt: 40 },
+    });
+
+    await heartbeat.resumeQueuedRuns();
+
+    expect(await waitForCondition(async () => (await readRun(runId))?.status === "scheduled_retry")).toBe(true);
+    const run = await readRun(runId);
+    expect(run?.scheduledRetryReason).toBe(SUBSCRIPTION_WINDOW_WAIT_RETRY_REASON);
+    expect(run?.scheduledRetryAttempt).toBe(1);
+    expect(run?.errorCode).toBeNull();
+    expect(mockAdapterExecute).not.toHaveBeenCalled();
+  });
+
+  it("never schedules the resume past the wait deadline, even for a far-future reset", async () => {
+    const { companyId, agentId, issueId } = await seedCompanyAgentAndIssue();
+    await seedSessionPolicy(companyId, 80);
+    currentQuota = quotaResults({ fiveHourUsedPercent: 99 });
+    const waitStartedAt = new Date(Date.now() - SUBSCRIPTION_WINDOW_WAIT_MAX_MS + 10 * 60 * 1000);
+    const { runId } = await seedQueuedRun({
+      companyId,
+      agentId,
+      issueId,
+      invocationSource: "assignment",
+      priorRetry: {
+        reason: SUBSCRIPTION_WINDOW_WAIT_RETRY_REASON,
+        attempt: 3,
+        resultJson: { subscriptionWindowWait: { waitStartedAt: waitStartedAt.toISOString() } },
+      },
+    });
+
+    await heartbeat.resumeQueuedRuns();
+
+    expect(await waitForCondition(async () => (await readRun(runId))?.status === "scheduled_retry")).toBe(true);
+    const run = await readRun(runId);
+    expect(run?.scheduledRetryAttempt).toBe(4);
+    const deadline = waitStartedAt.getTime() + SUBSCRIPTION_WINDOW_WAIT_MAX_MS;
+    expect(run?.scheduledRetryAt?.getTime()).toBe(deadline);
+    expect(run?.scheduledRetryAt?.getTime()).toBeLessThan(new Date(SATURATED_SESSION_RESET).getTime());
+  });
+
+  it("cancels a run that has waited longer than the maximum, regardless of how few deferrals that took", async () => {
+    const { companyId, agentId, issueId } = await seedCompanyAgentAndIssue();
+    await seedSessionPolicy(companyId, 80);
+    currentQuota = quotaResults({ fiveHourUsedPercent: 99 });
+    const waitStartedAt = new Date(Date.now() - SUBSCRIPTION_WINDOW_WAIT_MAX_MS - 1_000);
+    const { runId, wakeupRequestId } = await seedQueuedRun({
+      companyId,
+      agentId,
+      issueId,
+      invocationSource: "assignment",
+      priorRetry: {
+        reason: SUBSCRIPTION_WINDOW_WAIT_RETRY_REASON,
+        attempt: 2,
+        resultJson: { subscriptionWindowWait: { waitStartedAt: waitStartedAt.toISOString() } },
+      },
+    });
+
+    await heartbeat.resumeQueuedRuns();
+
+    expect(await waitForCondition(async () => (await readRun(runId))?.status === "cancelled")).toBe(true);
+    const run = await readRun(runId);
+    expect(run?.errorCode).toBe(SUBSCRIPTION_WINDOW_WAIT_EXHAUSTED_ERROR_CODE);
+    expect(run?.error).toContain("2 consecutive deferrals");
+    expect(mockAdapterExecute).not.toHaveBeenCalled();
+    // Same shape as the other pre-invocation cancels: the wake is settled and
+    // nothing asks the board for help.
+    const wake = await db.select({ status: agentWakeupRequests.status }).from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wakeupRequestId)).then((rows) => rows[0]);
+    expect(wake?.status).toBe("cancelled");
+    const comments = await db.select({ id: issueComments.id }).from(issueComments).where(eq(issueComments.issueId, issueId));
+    expect(comments).toHaveLength(0);
   });
 
   it("skips a timer heartbeat quietly while the window is saturated", async () => {
