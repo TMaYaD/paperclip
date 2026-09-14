@@ -39,14 +39,18 @@ export const SUBSCRIPTION_WINDOW_WAIT_DEFAULT_MS = readPositiveIntEnv(
   15 * 60 * 1000,
 );
 /**
- * Upper bound on consecutive deferrals of one run. A healthy window resets
- * within a week, so this only trips when the quota snapshot is stale or the
- * account is wedged; the run is then cancelled through the normal path so the
- * problem becomes visible instead of waiting forever.
+ * Upper bound on how long one run may keep waiting, measured from its first
+ * consecutive deferral by this gate. A weekly window can stay legitimately
+ * saturated for seven days, and the Claude CLI fallback reports no reset time
+ * at all (so a saturated window is re-checked every default wait), which is
+ * why the bound is a duration rather than a count of deferrals. It only trips
+ * when the quota snapshot is stale or the account is wedged; the run is then
+ * cancelled the way the daily cap cancels a queued run, so the problem becomes
+ * visible instead of waiting forever.
  */
-export const SUBSCRIPTION_WINDOW_WAIT_MAX_ATTEMPTS = readPositiveIntEnv(
-  "PAPERCLIP_SUBSCRIPTION_WINDOW_WAIT_MAX_ATTEMPTS",
-  48,
+export const SUBSCRIPTION_WINDOW_WAIT_MAX_MS = readPositiveIntEnv(
+  "PAPERCLIP_SUBSCRIPTION_WINDOW_WAIT_MAX_MS",
+  8 * 24 * 60 * 60 * 1000,
 );
 /** Small margin after the reported reset so the provider has rolled the window. */
 const SUBSCRIPTION_WINDOW_RESET_MARGIN_MS = 30 * 1000;
@@ -164,6 +168,39 @@ export function decideSubscriptionWindowWait(input: {
   }
 
   return chosen;
+}
+
+export type SubscriptionWindowWaitBound = {
+  /** Latest moment the run may still be waiting before it is cancelled. */
+  deadline: Date;
+  /** True once `now` has reached the deadline. */
+  exhausted: boolean;
+  /**
+   * The wait's resume time clamped to the deadline, so a bogus far-future
+   * reset time cannot hold the run past the bound.
+   */
+  resumeAt: Date;
+};
+
+/**
+ * Pure bound on one run's consecutive wait. `waitStartedAt` is the first
+ * deferral by this gate in the current chain; retries for unrelated reasons
+ * before it do not count.
+ */
+export function boundSubscriptionWindowWait(input: {
+  waitStartedAt: Date;
+  resumeAt: Date;
+  now?: Date;
+  maxWaitMs?: number;
+}): SubscriptionWindowWaitBound {
+  const now = input.now ?? new Date();
+  const maxWaitMs = input.maxWaitMs ?? SUBSCRIPTION_WINDOW_WAIT_MAX_MS;
+  const deadline = new Date(input.waitStartedAt.getTime() + maxWaitMs);
+  return {
+    deadline,
+    exhausted: now.getTime() >= deadline.getTime(),
+    resumeAt: input.resumeAt.getTime() > deadline.getTime() ? deadline : input.resumeAt,
+  };
 }
 
 export type SubscriptionWindowGateInput = {

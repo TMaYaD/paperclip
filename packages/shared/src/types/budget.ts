@@ -38,6 +38,13 @@ export interface BudgetPolicySummary {
   observedAmount: number;
   remainingAmount: number;
   utilizationPercent: number;
+  /**
+   * True for a `subscription_percent` policy whose provider window could not
+   * be observed (quota fetch failed, window missing, or no utilization
+   * reported). `observedAmount` is then 0 as a placeholder, not a measurement,
+   * and `status` is "ok" only because nothing is known.
+   */
+  usageUnavailable?: boolean;
   warnPercent: number;
   hardStopEnabled: boolean;
   notifyEnabled: boolean;

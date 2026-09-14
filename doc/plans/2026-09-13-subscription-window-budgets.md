@@ -66,10 +66,21 @@ The gate **fails open**: when the quota snapshot is unavailable or the provider
 result is not ok, runs proceed. The provider's real limit still applies and is
 handled by the existing `provider_quota` recovery.
 
-Only a broken assumption reaches a human: after
-`PAPERCLIP_SUBSCRIPTION_WINDOW_WAIT_MAX_ATTEMPTS` consecutive deferrals
-(default 48) the run is cancelled with `subscription_window_wait_exhausted`
-and flows through normal terminal-run recovery.
+Only a broken assumption reaches a human: a run that has been waiting for
+longer than `PAPERCLIP_SUBSCRIPTION_WINDOW_WAIT_MAX_MS` (default 8 days, one
+full weekly window plus a day of margin) since its first consecutive deferral
+is cancelled with `subscription_window_wait_exhausted` through the same
+pre-invocation path as the daily cap: the wake is settled and immediate
+recovery is suppressed, because recovery would only re-queue the work straight
+back into this gate. The cancelled run and its idle issue then surface through
+the ordinary stale-work checks. The bound is a duration rather than a count of
+deferrals: the Claude CLI fallback reports no reset time, so a saturated
+weekly window is re-checked every `PAPERCLIP_SUBSCRIPTION_WINDOW_WAIT_DEFAULT_MS`
+(default 15 minutes) for up to a week, which a small deferral count would
+exhaust in hours. Only deferrals by this gate count toward the bound; a run
+promoted after workspace-busy, transient, or continuation retries starts a
+fresh wait. A reported reset later than the deadline is clamped to it, so a
+bogus far-future reset cannot hold a run past the bound either.
 
 ## Quota snapshot
 
@@ -87,7 +98,10 @@ The Costs → Budgets tab gains a "Subscription usage limits" section with one
 card per window (session, week) for the organization scope. Cards for windows
 without a policy are seeded from the live quota snapshot so the operator sees
 current usage before choosing a limit. `BudgetPolicyCard` renders
-`subscription_percent` policies in percent. Agent and project scoped
+`subscription_percent` policies in percent. When no provider reported the
+window (quota fetch failed, window missing, or no utilization) the summary
+carries `usageUnavailable` and the card shows the usage as unavailable with an
+"Unknown" status instead of a healthy 0%. Agent and project scoped
 subscription policies are created through the existing policies API.
 
 ## Follow-ups (not in this change)

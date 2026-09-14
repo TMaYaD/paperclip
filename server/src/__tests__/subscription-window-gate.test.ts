@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ProviderQuotaResult, QuotaWindow } from "@paperclipai/shared";
 import {
+  boundSubscriptionWindowWait,
   decideSubscriptionWindowWait,
   observeSubscriptionWindow,
   type SubscriptionWindowPolicy,
@@ -157,6 +158,51 @@ describe("observeSubscriptionWindow", () => {
     expect(
       observeSubscriptionWindow({ provider: "anthropic", ok: false, error: "down", windows: [] }, "provider_week"),
     ).toBeNull();
+  });
+});
+
+describe("boundSubscriptionWindowWait", () => {
+  const DAY_MS = 24 * 60 * 60 * 1000;
+
+  it("keeps the reported resume time while the wait is inside the bound", () => {
+    const waitStartedAt = new Date(NOW.getTime() - 3 * DAY_MS);
+    const resumeAt = new Date(NOW.getTime() + 15 * 60 * 1000);
+    const bound = boundSubscriptionWindowWait({ waitStartedAt, resumeAt, now: NOW, maxWaitMs: 8 * DAY_MS });
+    expect(bound.exhausted).toBe(false);
+    expect(bound.deadline.toISOString()).toBe(new Date(waitStartedAt.getTime() + 8 * DAY_MS).toISOString());
+    expect(bound.resumeAt).toBe(resumeAt);
+  });
+
+  it("clamps a resume time past the deadline to the deadline", () => {
+    const waitStartedAt = new Date(NOW.getTime() - 7 * DAY_MS);
+    const bound = boundSubscriptionWindowWait({
+      waitStartedAt,
+      resumeAt: new Date("2099-01-01T00:00:00.000Z"),
+      now: NOW,
+      maxWaitMs: 8 * DAY_MS,
+    });
+    expect(bound.exhausted).toBe(false);
+    expect(bound.resumeAt.toISOString()).toBe(new Date(waitStartedAt.getTime() + 8 * DAY_MS).toISOString());
+  });
+
+  it("reports exhaustion once the wait has lasted the maximum, not after a number of deferrals", () => {
+    const waitStartedAt = new Date(NOW.getTime() - 8 * DAY_MS);
+    const bound = boundSubscriptionWindowWait({
+      waitStartedAt,
+      resumeAt: new Date(NOW.getTime() + 15 * 60 * 1000),
+      now: NOW,
+      maxWaitMs: 8 * DAY_MS,
+    });
+    expect(bound.exhausted).toBe(true);
+
+    // A weekly window re-checked every 15 minutes for six days is still a valid wait.
+    const sixDays = boundSubscriptionWindowWait({
+      waitStartedAt: new Date(NOW.getTime() - 6 * DAY_MS),
+      resumeAt: new Date(NOW.getTime() + 15 * 60 * 1000),
+      now: NOW,
+      maxWaitMs: 8 * DAY_MS,
+    });
+    expect(sixDays.exhausted).toBe(false);
   });
 });
 
