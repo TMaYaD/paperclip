@@ -28,12 +28,22 @@ describe("randomUuid", () => {
     expect(id).toBe("ffffffff-ffff-4fff-bfff-ffffffffffff");
   });
 
-  it("produces distinct valid ids without any crypto object", () => {
-    vi.stubGlobal("crypto", undefined);
+  it("produces distinct ids across calls on the fallback path", () => {
+    vi.stubGlobal("crypto", {
+      getRandomValues: (bytes: Uint8Array) => {
+        for (let index = 0; index < bytes.length; index += 1) bytes[index] = Math.floor(Math.random() * 256);
+        return bytes;
+      },
+    });
     const first = randomUuid();
     const second = randomUuid();
     expect(first).toMatch(UUID_V4);
     expect(second).toMatch(UUID_V4);
     expect(first).not.toBe(second);
+  });
+
+  it("refuses to generate predictable ids without a CSPRNG", () => {
+    vi.stubGlobal("crypto", undefined);
+    expect(() => randomUuid()).toThrow(/Secure random number generation is unavailable/);
   });
 });
