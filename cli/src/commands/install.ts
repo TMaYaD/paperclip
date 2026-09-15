@@ -157,6 +157,11 @@ async function runGitHubCurl(
   }
 }
 
+/** A full 40-hex commit sha: codeload serves its tarball directly, so no GitHub API lookup is needed. */
+export function isFullCommitSha(ref: string): boolean {
+  return /^[0-9a-f]{40}$/i.test(ref);
+}
+
 export async function resolveGitHubRef(repo: string, ref: string, runCommand: CommandRunner): Promise<string> {
   const result = await runGitHubCurl(["--fail", "--silent", "--show-error", "--location", "--header", "Accept: application/vnd.github+json", "--header", "User-Agent: paperclipai-install", `https://api.github.com/repos/${repo}/commits/${encodeURIComponent(ref)}`], runCommand, { maxBuffer: 4 * 1024 * 1024 });
   let sha: unknown;
@@ -364,7 +369,13 @@ export async function installCommand(
   const gitRequest = resolveGitInstallRequest(options);
   if (gitRequest) {
     await confirmGitInstall(options, gitRequest.repo, gitRequest.ref);
-    const sha = await resolveGitHubRef(gitRequest.repo, gitRequest.ref, runCommand);
+    // A full sha skips api.github.com: the tarball download below takes it
+    // as-is, and unattended installs keep working on hosts whose anonymous
+    // API quota is spent (the agents on the same box consume it). Branches,
+    // tags and short shas still resolve through the API.
+    const sha = isFullCommitSha(gitRequest.ref)
+      ? gitRequest.ref.toLowerCase()
+      : await resolveGitHubRef(gitRequest.repo, gitRequest.ref, runCommand);
     const paths = resolveInstallStorePaths();
     const installed = await withInstallStoreLock(async () => {
       assertManagedShimWritable(paths);
