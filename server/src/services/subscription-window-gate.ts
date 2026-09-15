@@ -39,6 +39,16 @@ export const SUBSCRIPTION_WINDOW_WAIT_DEFAULT_MS = readPositiveIntEnv(
   15 * 60 * 1000,
 );
 /**
+ * Re-check interval while a limited window's usage cannot be read. A limit
+ * that cannot be checked holds new runs instead of letting them through: the
+ * operator asked for headroom, and dispatching blind is how a limit gets
+ * busted. Removing the limit lets runs proceed at the operator's discretion.
+ */
+export const SUBSCRIPTION_WINDOW_UNKNOWN_WAIT_MS = readPositiveIntEnv(
+  "PAPERCLIP_SUBSCRIPTION_WINDOW_UNKNOWN_WAIT_MS",
+  5 * 60 * 1000,
+);
+/**
  * Upper bound on how long one run may keep waiting, measured from its first
  * consecutive deferral by this gate. A weekly window can stay legitimately
  * saturated for seven days, and the Claude CLI fallback reports no reset time
@@ -78,8 +88,11 @@ export type SubscriptionWindowWait = {
   windowKind: SubscriptionBudgetWindowKind;
   quotaKey: string;
   provider: string;
-  usedPercent: number;
+  /** Percent used, or null when the run is held because usage could not be read. */
+  usedPercent: number | null;
   limitPercent: number;
+  /** True when the hold is for unreadable usage rather than a reached limit. */
+  usageUnknown: boolean;
   resetsAt: string | null;
   /** When the deferred run should be promoted again. */
   resumeAt: Date;
@@ -89,6 +102,10 @@ export type SubscriptionWindowWait = {
 export type SubscriptionWindowObservation = {
   usedPercent: number | null;
   resetsAt: string | null;
+  /** True when the latest provider read failed and this comes from the last successful read. */
+  stale: boolean;
+  /** ISO timestamp of the provider read behind this observation, null for a raw adapter result. */
+  observedAt: string | null;
 };
 
 function parseResetsAt(value: string | null | undefined, now: Date): Date | null {
@@ -113,55 +130,89 @@ export function observeSubscriptionWindow(
   if (!result || !result.ok) return null;
   const window = findQuotaWindow(result.windows, windowKind);
   if (!window) return null;
-  return { usedPercent: window.usedPercent, resetsAt: window.resetsAt };
+  return {
+    usedPercent: window.usedPercent,
+    resetsAt: window.resetsAt,
+    stale: result.stale === true,
+    observedAt: result.observedAt ?? null,
+  };
 }
 
 /**
  * Pure decision: given the active subscription policies for a dispatch and the
- * provider's current windows, return the wait to apply, or null to proceed.
+ * provider's quota result, return the wait to apply, or null to proceed.
  *
- * A window with no reported utilization never blocks. When several policies
- * block at once, the wait ends at the latest reset, because every blocking
- * window has to clear before a run can start.
+ * A policy whose window cannot be read (the provider row is missing or not ok,
+ * the window is absent, or it carries no utilization) holds the run for
+ * `unknownWaitMs` and re-checks; only a scope with no limit stays open. When
+ * several policies block at once, the wait ends at the latest resume time,
+ * because every blocking window has to clear before a run can start, so a
+ * known saturated window outranks an unknown one.
  */
 export function decideSubscriptionWindowWait(input: {
   policies: SubscriptionWindowPolicy[];
-  windows: QuotaWindow[];
+  /** The provider's row from the quota snapshot, or null when it has none. */
+  result: ProviderQuotaResult | null | undefined;
   provider: string;
   now?: Date;
   defaultWaitMs?: number;
+  unknownWaitMs?: number;
 }): SubscriptionWindowWait | null {
   const now = input.now ?? new Date();
   const defaultWaitMs = input.defaultWaitMs ?? SUBSCRIPTION_WINDOW_WAIT_DEFAULT_MS;
+  const unknownWaitMs = input.unknownWaitMs ?? SUBSCRIPTION_WINDOW_UNKNOWN_WAIT_MS;
+  const result = input.result ?? null;
+  const windows = result?.ok ? result.windows : null;
   let chosen: SubscriptionWindowWait | null = null;
 
   for (const policy of input.policies) {
     if (policy.amount <= 0) continue;
-    const window = findQuotaWindow(input.windows, policy.windowKind);
-    if (!window || window.usedPercent == null) continue;
-    if (window.usedPercent < policy.amount) continue;
-
-    const resetsAt = parseResetsAt(window.resetsAt, now);
-    const resumeAt = resetsAt
-      ? new Date(resetsAt.getTime() + SUBSCRIPTION_WINDOW_RESET_MARGIN_MS)
-      : new Date(now.getTime() + defaultWaitMs);
     const windowLabel = policy.windowKind === "provider_session" ? "session" : "weekly";
-    const candidate: SubscriptionWindowWait = {
+    const base = {
       policyId: policy.id,
       scopeType: policy.scopeType,
       scopeId: policy.scopeId,
       windowKind: policy.windowKind,
       quotaKey: SUBSCRIPTION_BUDGET_WINDOW_QUOTA_KEYS[policy.windowKind],
       provider: input.provider,
-      usedPercent: window.usedPercent,
       limitPercent: policy.amount,
-      resetsAt: resetsAt ? resetsAt.toISOString() : null,
-      resumeAt,
-      reason:
-        `${input.provider} ${windowLabel} subscription window is at ${window.usedPercent}% ` +
-        `(limit ${policy.amount}% for ${policy.scopeType} scope); ` +
-        (resetsAt ? `window resets at ${resetsAt.toISOString()}` : "no reset time reported"),
     };
+    const window = windows ? findQuotaWindow(windows, policy.windowKind) : null;
+    let candidate: SubscriptionWindowWait;
+    if (!window || window.usedPercent == null) {
+      const cause =
+        windows == null
+          ? `provider usage could not be read${result?.error ? ` (${result.error})` : ""}`
+          : !window
+            ? "the provider did not report this window"
+            : "the provider reported this window without utilization";
+      candidate = {
+        ...base,
+        usedPercent: null,
+        usageUnknown: true,
+        resetsAt: null,
+        resumeAt: new Date(now.getTime() + unknownWaitMs),
+        reason:
+          `${input.provider} ${windowLabel} subscription window usage is unknown (${cause}); ` +
+          `new runs wait while the ${policy.amount}% limit for the ${policy.scopeType} scope cannot be checked`,
+      };
+    } else {
+      if (window.usedPercent < policy.amount) continue;
+      const resetsAt = parseResetsAt(window.resetsAt, now);
+      candidate = {
+        ...base,
+        usedPercent: window.usedPercent,
+        usageUnknown: false,
+        resetsAt: resetsAt ? resetsAt.toISOString() : null,
+        resumeAt: resetsAt
+          ? new Date(resetsAt.getTime() + SUBSCRIPTION_WINDOW_RESET_MARGIN_MS)
+          : new Date(now.getTime() + defaultWaitMs),
+        reason:
+          `${input.provider} ${windowLabel} subscription window is at ${window.usedPercent}% ` +
+          `(limit ${policy.amount}% for ${policy.scopeType} scope); ` +
+          (resetsAt ? `window resets at ${resetsAt.toISOString()}` : "no reset time reported"),
+      };
+    }
     if (!chosen || candidate.resumeAt.getTime() > chosen.resumeAt.getTime()) {
       chosen = candidate;
     }
@@ -268,8 +319,9 @@ export function subscriptionWindowGateService(
 
     /**
      * Returns the wait to apply before starting a run for this agent, or null.
-     * Quota fetch failures fail open: an unreachable usage endpoint must not
-     * stop work, and the provider's real limit still applies.
+     * A scope with no active limit has nothing to check and proceeds. Under a
+     * limit, usage that cannot be read holds the run for a short re-check
+     * instead of letting it through (see decideSubscriptionWindowWait).
      */
     evaluate: async (input: SubscriptionWindowGateInput): Promise<SubscriptionWindowWait | null> => {
       const policies = await listPolicies(input);
@@ -277,9 +329,8 @@ export function subscriptionWindowGateService(
       const now = input.now ?? new Date();
       const provider = providerSlugForAdapterType(input.adapterType);
       const snapshot = await readQuotaSnapshot({ now });
-      const result = snapshot.results.find((row) => row.provider === provider);
-      if (!result || !result.ok) return null;
-      return decideSubscriptionWindowWait({ policies, windows: result.windows, provider, now });
+      const result = snapshot.results.find((row) => row.provider === provider) ?? null;
+      return decideSubscriptionWindowWait({ policies, result, provider, now });
     },
   };
 }

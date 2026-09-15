@@ -395,6 +395,10 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
     // the window. A failed quota fetch, a missing window, or a window without
     // utilization is "unknown" and must not be presented as a healthy 0%.
     const usageUnavailable = isSubscription && observation?.usedPercent == null;
+    // The snapshot keeps the last successful read while a refresh fails, so
+    // the usage is real but older than usual; say so instead of flipping to
+    // "unknown" and back on every transient probe failure.
+    const usageStale = isSubscription && !usageUnavailable && observation?.stale === true;
     const observedAmount = isSubscription
       ? observation?.usedPercent ?? 0
       : await computeObservedAmount(db, policy);
@@ -415,6 +419,8 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
       remainingAmount: amount > 0 ? Math.max(0, amount - observedAmount) : 0,
       utilizationPercent,
       usageUnavailable,
+      usageStale,
+      usageObservedAt: isSubscription ? observation?.observedAt ?? null : null,
       warnPercent: policy.warnPercent,
       hardStopEnabled: policy.hardStopEnabled,
       notifyEnabled: policy.notifyEnabled,

@@ -62,9 +62,16 @@ When a queued run's provider window is at or above the limit:
 - The issue keeps its status and assignee, the wake stays queued, and no
   comment, incident, approval, or recovery action is written.
 
-The gate **fails open**: when the quota snapshot is unavailable or the provider
-result is not ok, runs proceed. The provider's real limit still applies and is
-handled by the existing `provider_quota` recovery.
+The gate **fails closed under a limit**: when the provider row is missing or
+not ok, the window is absent, or it carries no utilization, a run covered by an
+active policy is deferred for `PAPERCLIP_SUBSCRIPTION_WINDOW_UNKNOWN_WAIT_MS`
+(default 5 minutes) and re-checked, with `usageUnknown` recorded on the wait
+and the timer-skip rule unchanged. Dispatching blind is how a limit gets
+busted; an operator who would rather run at their own discretion removes the
+limit, and a scope with no active policy is never held. A known saturated
+window outranks an unknown one, so the wait ends at the later of the two. The
+wait bound below still applies, so a probe that stays broken surfaces as a
+cancelled run rather than a silent stall.
 
 Only a broken assumption reaches a human: a run that has been waiting for
 longer than `PAPERCLIP_SUBSCRIPTION_WINDOW_WAIT_MAX_MS` (default 8 days, one
@@ -88,9 +95,25 @@ bogus far-future reset cannot hold a run past the bound either.
 TTL (`PAPERCLIP_QUOTA_SNAPSHOT_TTL_MS`, default 60s) and shares one in-flight
 fetch between concurrent callers. Provider usage endpoints are rate limited and
 the Claude CLI fallback runs a terminal probe, so enforcement never fetches per
-dispatch. The same snapshot feeds the budget overview so a
-`subscription_percent` policy summary shows live percent used and the
-provider's reset time as its window end.
+dispatch. The same snapshot feeds the budget overview and the
+`/costs/quota-windows` endpoint, so a `subscription_percent` policy summary,
+the placeholder cards, and the Providers tab all show the same percent used
+and the provider's reset time as the window end, and one probe serves every
+surface.
+
+Single provider reads fail now and then: the Anthropic usage endpoint is rate
+limited and the Claude CLI fallback scrapes a terminal. A failed refresh
+therefore keeps the provider's last successful result, marked `stale` and
+carrying the new `error`, for up to `PAPERCLIP_QUOTA_SNAPSHOT_MAX_STALE_MS`
+(default 10 minutes). Every ok result is stamped with `observedAt`. Past the
+bound the provider is reported as unavailable again and the gate holds runs
+under a limit for a re-check. The gate reads the stale result like a fresh
+one: usage a few minutes old is a better basis for a decision than no usage at
+all, and the bound keeps it from acting on a window that has long since reset.
+The alternative, treating a failed refresh as unknown for one TTL, made the
+budget cards flip between a measured percent and "unavailable" on every blip
+and, while the gate still failed open, admitted every queued run for a minute
+each time.
 
 ## UI
 
@@ -98,10 +121,19 @@ The Costs → Budgets tab gains a "Subscription usage limits" section with one
 card per window (session, week) for the organization scope. Cards for windows
 without a policy are seeded from the live quota snapshot so the operator sees
 current usage before choosing a limit. `BudgetPolicyCard` renders
-`subscription_percent` policies in percent. When no provider reported the
-window (quota fetch failed, window missing, or no utilization) the summary
-carries `usageUnavailable` and the card shows the usage as unavailable with an
-"Unknown" status instead of a healthy 0%. Agent and project scoped
+`subscription_percent` policies in percent. Its bar is the whole provider
+window (0–100%): the fill is the observed usage, a marker sits at the
+configured limit, and usage past the limit is hatched, so "Remaining" reads as
+the visible gap between the fill and the marker rather than as a percent of
+the limit. Without a limit the bar still shows current usage in a neutral
+tone. When no provider reported the window (quota fetch failed, window
+missing, or no utilization) the summary carries `usageUnavailable` and the
+card shows the usage as unavailable instead of a healthy 0%. Under a limit
+that state means the gate is holding new runs, so the card keeps the limit
+marker over a hatched track and reads "Runs held"; without a limit it reads
+"Unknown". When only the latest read failed the summary carries `usageStale`
+and `usageObservedAt`, and the card keeps the last measurement and says how
+old it is. Agent and project scoped
 subscription policies are created through the existing policies API.
 
 ## Follow-ups (not in this change)

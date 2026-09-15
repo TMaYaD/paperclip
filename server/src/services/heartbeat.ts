@@ -16440,6 +16440,7 @@ export function heartbeatService(
       quotaKey: wait.quotaKey,
       provider: wait.provider,
       usedPercent: wait.usedPercent,
+      usageUnknown: wait.usageUnknown,
       limitPercent: wait.limitPercent,
       resetsAt: wait.resetsAt,
       resumeAt: wait.resumeAt.toISOString(),

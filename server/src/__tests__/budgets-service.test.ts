@@ -611,6 +611,30 @@ describeEmbeddedPostgres("budgetService release gate enforcement", () => {
       status: "hard_stop",
     });
     expect(reported.policies[0]?.windowEnd.toISOString()).toBe("2099-01-01T00:00:00.000Z");
+    expect(reported.policies[0]).toMatchObject({ usageStale: false, usageObservedAt: null });
+
+    // A failed refresh keeps the last good read: still a measurement, flagged
+    // as stale with its read time, never a flip back to "unavailable".
+    quota = [
+      {
+        provider: "openai",
+        ok: true,
+        stale: true,
+        observedAt: "2026-09-13T11:58:00.000Z",
+        error: "usage endpoint down",
+        windows: [
+          { key: "five_hour", label: "5h limit", usedPercent: 60, resetsAt: null, valueLabel: null, detail: null },
+        ],
+      },
+    ];
+    const stale = await service.overview(companyId);
+    expect(stale.policies[0]).toMatchObject({
+      usageUnavailable: false,
+      usageStale: true,
+      usageObservedAt: "2026-09-13T11:58:00.000Z",
+      observedAmount: 60,
+      status: "warning",
+    });
   });
 
   it("hard-stops project work until a valid budget raise resumes it and overview reconciles ledger spend", async () => {

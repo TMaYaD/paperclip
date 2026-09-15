@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import type { BudgetPolicySummary } from "@paperclipai/shared";
 import { AlertTriangle, HelpCircle, PauseCircle, ShieldAlert, Wallet } from "lucide-react";
-import { cn, formatCents } from "../lib/utils";
+import { cn, formatCents, relativeTime } from "../lib/utils";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -47,7 +47,106 @@ export function windowLabel(windowKind: BudgetPolicySummary["windowKind"]) {
   }
 }
 
-function statusTone(status: BudgetPolicySummary["status"], usageUnavailable: boolean) {
+function clampPercent(value: number) {
+  return Math.max(0, Math.min(100, value));
+}
+
+/**
+ * Usage bar. In window mode the track is the whole provider window (0-100%),
+ * the fill is the observed usage, a marker sits at the configured limit, and
+ * any usage past the limit is hatched so "remaining" reads as the gap between
+ * the fill and the marker. Money budgets have no natural ceiling, so their bar
+ * stays a plain utilization-of-budget fill.
+ */
+function BudgetUsageBar({
+  usedPercent,
+  limitPercent,
+  status,
+  unavailable,
+  neutral,
+  held,
+  className,
+}: {
+  /** Fill, as a percent of the track. */
+  usedPercent: number;
+  /** Limit marker position, or null for a plain utilization bar. */
+  limitPercent: number | null;
+  status: BudgetPolicySummary["status"];
+  unavailable: boolean;
+  /** No limit is configured, so the fill carries no status meaning. */
+  neutral: boolean;
+  /** Usage is unknown under a limit, so the gate is holding new runs. */
+  held: boolean;
+  className?: string;
+}) {
+  const used = unavailable ? 0 : clampPercent(usedPercent);
+  const limit = limitPercent == null ? null : clampPercent(limitPercent);
+  const withinLimit = limit == null ? used : Math.min(used, limit);
+  const overLimit = limit == null ? 0 : Math.max(0, used - limit);
+  const fillClassName = neutral
+    ? "bg-muted-foreground/50"
+    : status === "hard_stop"
+      ? "bg-(--status-task-blocked)"
+      : status === "warning"
+        ? "bg-(--status-task-todo)"
+        : "bg-(--status-task-done)";
+  const label = unavailable
+    ? limit != null && limit > 0
+      ? `Window usage unknown, limit ${Math.round(limit)}%; new runs are held`
+      : "Budget utilization unknown"
+    : limit == null
+      ? `Budget utilization: ${Math.round(used)}% used`
+      : `Window usage: ${Math.round(used)}% used, limit ${Math.round(limit)}%`;
+  return (
+    <div className={cn("relative h-2 overflow-hidden rounded-full", className)}>
+      <div
+        role="progressbar"
+        aria-valuenow={Math.round(used)}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-label={label}
+        className={cn("h-full rounded-full transition-(--tp-width-background-color) duration-200", fillClassName)}
+        style={{ width: `${withinLimit}%` }}
+      />
+      {held ? (
+        <div
+          data-testid="budget-usage-held"
+          aria-hidden
+          className="absolute inset-0 bg-(--status-task-blocked)/25"
+          style={{
+            backgroundImage:
+              "repeating-linear-gradient(135deg, var(--status-task-blocked) 0 2px, transparent 2px 5px)",
+          }}
+        />
+      ) : null}
+      {overLimit > 0 ? (
+        <div
+          data-testid="budget-over-limit"
+          aria-hidden
+          className="absolute inset-y-0 bg-(--status-task-blocked)/40"
+          style={{
+            left: `${limit}%`,
+            width: `${overLimit}%`,
+            backgroundImage:
+              "repeating-linear-gradient(135deg, var(--status-task-blocked) 0 2px, transparent 2px 5px)",
+          }}
+        />
+      ) : null}
+      {limit != null && limit > 0 ? (
+        <div
+          data-testid="budget-limit-marker"
+          aria-hidden
+          title={`Limit ${Math.round(limit)}%`}
+          className="absolute inset-y-0 w-0.5 bg-foreground/70"
+          style={{ left: `calc(${limit}% - 1px)` }}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+function statusTone(status: BudgetPolicySummary["status"], usageUnavailable: boolean, usageHeld: boolean) {
+  if (usageHeld) return "text-red-700 dark:text-red-300 border-red-500/30 bg-red-500/10";
   if (usageUnavailable) return "text-muted-foreground border-border/70 bg-muted/40";
   if (status === "hard_stop") return "text-red-700 dark:text-red-300 border-red-500/30 bg-red-500/10";
   if (status === "warning") return "text-amber-700 dark:text-amber-200 border-amber-500/30 bg-amber-500/10";
@@ -80,33 +179,49 @@ export function BudgetPolicyCard({
   const canSave = typeof parsedDraft === "number" && parsedDraft !== summary.amount && Boolean(onSave);
   // The provider did not report this window: say so, never show a healthy 0%.
   const usageUnavailable = percentMode && summary.usageUnavailable === true;
-  const progress = !usageUnavailable && summary.amount > 0 ? Math.min(100, summary.utilizationPercent) : 0;
-  const StatusIcon = usageUnavailable
-    ? HelpCircle
-    : summary.status === "hard_stop"
+  // A limit that cannot be checked holds new runs (the gate fails closed), so
+  // the card reads as "held" rather than merely "unknown". Without a limit
+  // nothing is held and unknown usage is just unknown.
+  const usageHeld = usageUnavailable && summary.amount > 0;
+  // The latest provider read failed and the usage comes from the last good
+  // read: still a measurement, so keep the value and say how old it is.
+  const usageStale = percentMode && !usageUnavailable && summary.usageStale === true;
+  const overLimitBy = percentMode && summary.amount > 0 ? summary.observedAmount - summary.amount : 0;
+  const StatusIcon = usageHeld
+    ? PauseCircle
+    : usageUnavailable
+      ? HelpCircle
+      : summary.status === "hard_stop"
       ? ShieldAlert
       : summary.status === "warning"
         ? AlertTriangle
         : Wallet;
   const statusLabel = summary.paused
     ? "Paused"
-    : usageUnavailable
-      ? "Unknown"
-      : summary.status === "warning"
+    : usageHeld
+      ? "Runs held"
+      : usageUnavailable
+        ? "Unknown"
+        : summary.status === "warning"
         ? "Warning"
         : summary.status === "hard_stop"
           ? "Hard stop"
           : "Healthy";
   const observedValue = usageUnavailable ? "Unavailable" : formatAmount(summary.observedAmount);
+  const observedBase = summary.amount > 0 ? `${summary.utilizationPercent}% of limit` : "No cap configured";
   const observedCaption = usageUnavailable
-    ? "Provider did not report this window"
-    : summary.amount > 0
-      ? `${summary.utilizationPercent}% of limit`
-      : "No cap configured";
+    ? usageHeld
+      ? "Provider did not report this window · new runs wait until it does"
+      : "Provider did not report this window"
+    : usageStale
+      ? `${observedBase} · as of ${summary.usageObservedAt ? relativeTime(summary.usageObservedAt) : "an earlier read"}, latest read failed`
+      : observedBase;
   const remainingValue = usageUnavailable
     ? "Unknown"
     : summary.amount > 0
-      ? formatAmount(summary.remainingAmount)
+      ? overLimitBy > 0
+        ? `Over limit by ${formatAmount(overLimitBy)}`
+        : formatAmount(summary.remainingAmount)
       : "Unlimited";
   const isPlain = variant === "plain";
 
@@ -156,24 +271,27 @@ export function BudgetPolicyCard({
         <span>Remaining</span>
         <span>{remainingValue}</span>
       </div>
-      <div className={cn("h-2 overflow-hidden rounded-full", isPlain ? "bg-border/70" : "bg-muted/70")}>
-        <div
-          role="progressbar"
-          aria-valuenow={Math.round(progress)}
-          aria-valuemin={0}
-          aria-valuemax={100}
-          aria-label={usageUnavailable ? "Budget utilization unknown" : `Budget utilization: ${Math.round(progress)}% used`}
-          className={cn(
-            "h-full rounded-full transition-(--tp-width-background-color) duration-200",
-            summary.status === "hard_stop"
-              ? "bg-(--status-task-blocked)"
-              : summary.status === "warning"
-                ? "bg-(--status-task-todo)"
-                : "bg-(--status-task-done)",
-          )}
-          style={{ width: `${progress}%` }}
+      {percentMode ? (
+        <BudgetUsageBar
+          usedPercent={summary.observedAmount}
+          limitPercent={summary.amount > 0 ? summary.amount : null}
+          status={summary.status}
+          unavailable={usageUnavailable}
+          neutral={summary.amount <= 0}
+          held={usageHeld}
+          className={isPlain ? "bg-border/70" : "bg-muted/70"}
         />
-      </div>
+      ) : (
+        <BudgetUsageBar
+          usedPercent={summary.amount > 0 ? summary.utilizationPercent : 0}
+          limitPercent={null}
+          status={summary.status}
+          unavailable={false}
+          neutral={false}
+          held={false}
+          className={isPlain ? "bg-border/70" : "bg-muted/70"}
+        />
+      )}
     </div>
   );
 
@@ -227,7 +345,7 @@ export function BudgetPolicyCard({
           <div
             className={cn(
               "inline-flex items-center gap-2 text-(length:--text-micro) uppercase tracking-(--tracking-caps)",
-              summary.status === "hard_stop"
+              usageHeld || summary.status === "hard_stop"
                 ? "text-red-700 dark:text-red-300"
                 : summary.status === "warning"
                   ? "text-amber-800 dark:text-amber-200"
@@ -263,7 +381,7 @@ export function BudgetPolicyCard({
             <CardTitle className="mt-1 text-base">{summary.scopeName}</CardTitle>
             <CardDescription className="mt-1">{windowLabel(summary.windowKind)}</CardDescription>
           </div>
-          <div className={cn("inline-flex items-center gap-2 rounded-full border px-3 py-1 text-(length:--text-micro) uppercase tracking-(--tracking-caps)", statusTone(summary.status, usageUnavailable))}>
+          <div className={cn("inline-flex items-center gap-2 rounded-full border px-3 py-1 text-(length:--text-micro) uppercase tracking-(--tracking-caps)", statusTone(summary.status, usageUnavailable, usageHeld))}>
             <StatusIcon className="h-3.5 w-3.5" />
             {statusLabel}
           </div>

@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ProviderQuotaResult, QuotaWindow } from "@paperclipai/shared";
 import {
   boundSubscriptionWindowWait,
@@ -32,14 +32,18 @@ function policy(overrides: Partial<SubscriptionWindowPolicy> = {}): Subscription
   };
 }
 
+function ok(windows: QuotaWindow[]): ProviderQuotaResult {
+  return { provider: "anthropic", ok: true, windows };
+}
+
 describe("decideSubscriptionWindowWait", () => {
   it("returns null while usage is below every policy limit", () => {
     const wait = decideSubscriptionWindowWait({
       policies: [policy(), policy({ id: "policy-week", windowKind: "provider_week", amount: 90 })],
-      windows: [
+      result: ok([
         window({ key: "five_hour", usedPercent: 79, resetsAt: "2026-09-13T14:00:00.000Z" }),
         window({ key: "seven_day", usedPercent: 50, resetsAt: "2026-09-18T00:00:00.000Z" }),
-      ],
+      ]),
       provider: "anthropic",
       now: NOW,
     });
@@ -49,7 +53,7 @@ describe("decideSubscriptionWindowWait", () => {
   it("defers to just after the window reset when usage reaches the limit", () => {
     const wait = decideSubscriptionWindowWait({
       policies: [policy()],
-      windows: [window({ key: "five_hour", usedPercent: 80, resetsAt: "2026-09-13T14:00:00.000Z" })],
+      result: ok([window({ key: "five_hour", usedPercent: 80, resetsAt: "2026-09-13T14:00:00.000Z" })]),
       provider: "anthropic",
       now: NOW,
     });
@@ -59,6 +63,7 @@ describe("decideSubscriptionWindowWait", () => {
       quotaKey: "five_hour",
       provider: "anthropic",
       usedPercent: 80,
+      usageUnknown: false,
       limitPercent: 80,
       resetsAt: "2026-09-13T14:00:00.000Z",
     });
@@ -69,7 +74,7 @@ describe("decideSubscriptionWindowWait", () => {
   it("falls back to the default wait when the provider reports no usable reset time", () => {
     const stale = decideSubscriptionWindowWait({
       policies: [policy()],
-      windows: [window({ key: "five_hour", usedPercent: 95, resetsAt: "2026-09-13T11:00:00.000Z" })],
+      result: ok([window({ key: "five_hour", usedPercent: 95, resetsAt: "2026-09-13T11:00:00.000Z" })]),
       provider: "anthropic",
       now: NOW,
       defaultWaitMs: 60_000,
@@ -79,7 +84,7 @@ describe("decideSubscriptionWindowWait", () => {
 
     const missing = decideSubscriptionWindowWait({
       policies: [policy()],
-      windows: [window({ key: "five_hour", usedPercent: 95, resetsAt: null })],
+      result: ok([window({ key: "five_hour", usedPercent: 95, resetsAt: null })]),
       provider: "anthropic",
       now: NOW,
       defaultWaitMs: 60_000,
@@ -90,10 +95,10 @@ describe("decideSubscriptionWindowWait", () => {
   it("waits for the latest reset when both the session and the week block", () => {
     const wait = decideSubscriptionWindowWait({
       policies: [policy(), policy({ id: "policy-week", windowKind: "provider_week", amount: 90 })],
-      windows: [
+      result: ok([
         window({ key: "five_hour", usedPercent: 100, resetsAt: "2026-09-13T14:00:00.000Z" }),
         window({ key: "seven_day", usedPercent: 91, resetsAt: "2026-09-18T00:00:00.000Z" }),
-      ],
+      ]),
       provider: "anthropic",
       now: NOW,
     });
@@ -101,42 +106,91 @@ describe("decideSubscriptionWindowWait", () => {
     expect(wait?.resumeAt.toISOString()).toBe("2026-09-18T00:00:30.000Z");
   });
 
-  it("never blocks on a window the provider did not report or reported without utilization", () => {
+  it("holds new runs for a short re-check when a limited window cannot be read", () => {
+    const missingWindow = decideSubscriptionWindowWait({
+      policies: [policy()],
+      result: ok([window({ key: "seven_day", usedPercent: 100 })]),
+      provider: "anthropic",
+      now: NOW,
+      unknownWaitMs: 5 * 60_000,
+    });
+    expect(missingWindow).toMatchObject({
+      policyId: "policy-session",
+      quotaKey: "five_hour",
+      usedPercent: null,
+      usageUnknown: true,
+      limitPercent: 80,
+      resetsAt: null,
+    });
+    expect(missingWindow?.resumeAt.toISOString()).toBe("2026-09-13T12:05:00.000Z");
+    expect(missingWindow?.reason).toContain("did not report this window");
+
+    const noUtilization = decideSubscriptionWindowWait({
+      policies: [policy()],
+      result: ok([window({ key: "five_hour", usedPercent: null })]),
+      provider: "anthropic",
+      now: NOW,
+    });
+    expect(noUtilization).toMatchObject({ usageUnknown: true, usedPercent: null });
+    expect(noUtilization?.reason).toContain("without utilization");
+
+    const failedRead = decideSubscriptionWindowWait({
+      policies: [policy()],
+      result: { provider: "anthropic", ok: false, error: "Claude CLI /usage: probe ended early", windows: [] },
+      provider: "anthropic",
+      now: NOW,
+    });
+    expect(failedRead).toMatchObject({ usageUnknown: true, usedPercent: null });
+    expect(failedRead?.reason).toContain("Claude CLI /usage: probe ended early");
+
+    const noRow = decideSubscriptionWindowWait({ policies: [policy()], result: null, provider: "anthropic", now: NOW });
+    expect(noRow).toMatchObject({ usageUnknown: true });
+  });
+
+  it("stays open without a limit even when usage cannot be read", () => {
     expect(
-      decideSubscriptionWindowWait({
-        policies: [policy()],
-        windows: [window({ key: "seven_day", usedPercent: 100 })],
-        provider: "anthropic",
-        now: NOW,
-      }),
+      decideSubscriptionWindowWait({ policies: [policy({ amount: 0 })], result: null, provider: "anthropic", now: NOW }),
     ).toBeNull();
     expect(
       decideSubscriptionWindowWait({
-        policies: [policy()],
-        windows: [window({ key: "five_hour", usedPercent: null })],
+        policies: [],
+        result: { provider: "anthropic", ok: false, error: "down", windows: [] },
         provider: "anthropic",
         now: NOW,
       }),
     ).toBeNull();
   });
 
+  it("lets a known saturated window outrank an unknown one", () => {
+    const wait = decideSubscriptionWindowWait({
+      policies: [policy(), policy({ id: "policy-week", windowKind: "provider_week", amount: 90 })],
+      result: ok([window({ key: "seven_day", usedPercent: 95, resetsAt: "2026-09-18T00:00:00.000Z" })]),
+      provider: "anthropic",
+      now: NOW,
+    });
+    expect(wait?.policyId).toBe("policy-week");
+    expect(wait?.usageUnknown).toBe(false);
+    expect(wait?.resumeAt.toISOString()).toBe("2026-09-18T00:00:30.000Z");
+  });
+
   it("ignores policies with a zero limit and matches windows by key, not label", () => {
     expect(
       decideSubscriptionWindowWait({
         policies: [policy({ amount: 0 })],
-        windows: [window({ key: "five_hour", usedPercent: 100 })],
+        result: ok([window({ key: "five_hour", usedPercent: 100 })]),
         provider: "anthropic",
         now: NOW,
       }),
     ).toBeNull();
-    expect(
-      decideSubscriptionWindowWait({
-        policies: [policy()],
-        windows: [window({ key: null, label: "Current session", usedPercent: 100 })],
-        provider: "anthropic",
-        now: NOW,
-      }),
-    ).toBeNull();
+    // A window without the session key is not the session window, however it
+    // is labeled: the policy holds for a re-check rather than reading its 100%.
+    const mislabeled = decideSubscriptionWindowWait({
+      policies: [policy()],
+      result: ok([window({ key: null, label: "Current session", usedPercent: 100 })]),
+      provider: "anthropic",
+      now: NOW,
+    });
+    expect(mislabeled).toMatchObject({ usageUnknown: true, usedPercent: null });
   });
 });
 
@@ -150,8 +204,27 @@ describe("observeSubscriptionWindow", () => {
     expect(observeSubscriptionWindow(result, "provider_week")).toEqual({
       usedPercent: 42,
       resetsAt: "2026-09-18T00:00:00.000Z",
+      stale: false,
+      observedAt: null,
     });
     expect(observeSubscriptionWindow(result, "provider_session")).toBeNull();
+  });
+
+  it("carries the snapshot's staleness and read time through", () => {
+    const result: ProviderQuotaResult = {
+      provider: "anthropic",
+      ok: true,
+      stale: true,
+      observedAt: "2026-09-13T11:55:00.000Z",
+      error: "Anthropic OAuth usage: 429",
+      windows: [window({ key: "five_hour", usedPercent: 61 })],
+    };
+    expect(observeSubscriptionWindow(result, "provider_session")).toEqual({
+      usedPercent: 61,
+      resetsAt: null,
+      stale: true,
+      observedAt: "2026-09-13T11:55:00.000Z",
+    });
   });
 
   it("returns null for a failed provider result", () => {
@@ -207,6 +280,10 @@ describe("boundSubscriptionWindowWait", () => {
 });
 
 describe("createQuotaSnapshotReader", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("shares one fetch between concurrent callers and reuses it inside the ttl", async () => {
     const fetch = vi.fn(async (): Promise<ProviderQuotaResult[]> => [
       { provider: "anthropic", ok: true, windows: [] },
@@ -241,6 +318,108 @@ describe("createQuotaSnapshotReader", () => {
     const snapshot = await read({ now: NOW });
     expect(snapshot.results).toEqual([
       expect.objectContaining({ ok: false, error: "Error: usage endpoint unreachable", windows: [] }),
+    ]);
+  });
+
+  it("stamps every ok row with the time it was read", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const fetch = vi.fn(async (): Promise<ProviderQuotaResult[]> => [
+      { provider: "anthropic", ok: true, windows: [window({ key: "five_hour", usedPercent: 12 })] },
+    ]);
+    const read = createQuotaSnapshotReader({ fetch, ttlMs: 60_000 });
+    const snapshot = await read({ now: NOW });
+    expect(snapshot.results[0]).toMatchObject({ ok: true, observedAt: NOW.toISOString() });
+    expect(snapshot.results[0]?.stale).toBeUndefined();
+  });
+
+  it("keeps the last good read of a provider when its refresh fails, marked stale with the new error", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const good: ProviderQuotaResult = {
+      provider: "anthropic",
+      source: "anthropic-oauth",
+      ok: true,
+      windows: [window({ key: "five_hour", usedPercent: 40, resetsAt: "2026-09-13T15:00:00.000Z" })],
+    };
+    const fetch = vi
+      .fn<() => Promise<ProviderQuotaResult[]>>()
+      .mockResolvedValueOnce([good, { provider: "openai", ok: true, windows: [] }])
+      .mockResolvedValueOnce([
+        { provider: "anthropic", ok: false, error: "Claude CLI /usage: probe ended early", windows: [] },
+        { provider: "openai", ok: true, windows: [] },
+      ]);
+    const read = createQuotaSnapshotReader({ fetch, ttlMs: 60_000, maxStaleMs: 10 * 60_000 });
+
+    const first = await read({ now: NOW });
+    expect(first.results[0]).toMatchObject({ ok: true, observedAt: NOW.toISOString() });
+
+    const later = new Date(NOW.getTime() + 61_000);
+    vi.setSystemTime(later);
+    const second = await read({ now: later });
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(second.results[0]).toEqual({
+      ...good,
+      observedAt: NOW.toISOString(),
+      stale: true,
+      error: "Claude CLI /usage: probe ended early",
+      errorFamily: null,
+    });
+    // The other provider refreshed fine and is not stale.
+    expect(second.results[1]).toMatchObject({ provider: "openai", ok: true, observedAt: later.toISOString() });
+    expect(second.results[1]?.stale).toBeUndefined();
+  });
+
+  it("reports a provider as unavailable once its last good read is older than the stale bound", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const failure: ProviderQuotaResult = { provider: "anthropic", ok: false, error: "down", windows: [] };
+    const fetch = vi
+      .fn<() => Promise<ProviderQuotaResult[]>>()
+      .mockResolvedValueOnce([
+        { provider: "anthropic", ok: true, windows: [window({ key: "five_hour", usedPercent: 40 })] },
+      ])
+      .mockResolvedValue([failure]);
+    const read = createQuotaSnapshotReader({ fetch, ttlMs: 1_000, maxStaleMs: 5_000 });
+
+    await read({ now: NOW });
+    const withinBound = new Date(NOW.getTime() + 4_000);
+    vi.setSystemTime(withinBound);
+    expect((await read({ now: withinBound })).results[0]).toMatchObject({ ok: true, stale: true });
+
+    const pastBound = new Date(NOW.getTime() + 6_000);
+    vi.setSystemTime(pastBound);
+    expect((await read({ now: pastBound })).results[0]).toEqual(failure);
+
+    // Once forgotten, a further failure has nothing to fall back on either.
+    const later = new Date(NOW.getTime() + 8_000);
+    vi.setSystemTime(later);
+    expect((await read({ now: later })).results[0]).toEqual(failure);
+  });
+
+  it("attributes a fetch that throws outright to every known provider so their last good read stands in", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const fetch = vi
+      .fn<() => Promise<ProviderQuotaResult[]>>()
+      .mockResolvedValueOnce([
+        { provider: "anthropic", ok: true, windows: [window({ key: "seven_day", usedPercent: 70 })] },
+      ])
+      .mockRejectedValueOnce(new Error("registry exploded"));
+    const read = createQuotaSnapshotReader({ fetch, ttlMs: 1_000, maxStaleMs: 60_000 });
+
+    await read({ now: NOW });
+    const later = new Date(NOW.getTime() + 2_000);
+    vi.setSystemTime(later);
+    const snapshot = await read({ now: later });
+    expect(snapshot.results).toEqual([
+      expect.objectContaining({
+        provider: "anthropic",
+        ok: true,
+        stale: true,
+        error: "Error: registry exploded",
+        windows: [window({ key: "seven_day", usedPercent: 70 })],
+      }),
     ]);
   });
 });
