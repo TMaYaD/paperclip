@@ -106,14 +106,15 @@ limited and the Claude CLI fallback scrapes a terminal. A failed refresh
 therefore keeps the provider's last successful result, marked `stale` and
 carrying the new `error`, for up to `PAPERCLIP_QUOTA_SNAPSHOT_MAX_STALE_MS`
 (default 10 minutes). Every ok result is stamped with `observedAt`. Past the
-bound the provider is reported as unavailable again and the gate holds runs
-under a limit for a re-check. The gate reads the stale result like a fresh
-one: usage a few minutes old is a better basis for a decision than no usage at
-all, and the bound keeps it from acting on a window that has long since reset.
-The alternative, treating a failed refresh as unknown for one TTL, made the
-budget cards flip between a measured percent and "unavailable" on every blip
-and, while the gate still failed open, admitted every queued run for a minute
-each time.
+bound the provider is reported as unavailable again. A stale result can only
+tighten the gate: at or above the limit it defers to the reset as a fresh read
+would, but below the limit it cannot clear a run, because real usage may have
+crossed the limit since that read, so the run holds for the unknown-usage
+re-check instead. The reuse therefore serves the summaries and the cards,
+which keep showing the last measurement and how old it is. The alternative,
+treating a failed refresh as unknown for one TTL, made the budget cards flip
+between a measured percent and "unavailable" on every blip and, while the gate
+still failed open, admitted every queued run for a minute each time.
 
 ## UI
 
@@ -133,7 +134,8 @@ that state means the gate is holding new runs, so the card keeps the limit
 marker over a hatched track and reads "Runs held"; without a limit it reads
 "Unknown". When only the latest read failed the summary carries `usageStale`
 and `usageObservedAt`, and the card keeps the last measurement and says how
-old it is. Agent and project scoped
+old it is. Under a limit it also reads "Runs held" over the hatched track,
+because the gate does not clear runs on a stale read. Agent and project scoped
 subscription policies are created through the existing policies API.
 
 ## Follow-ups (not in this change)
