@@ -45,6 +45,15 @@ export interface BudgetPolicySummary {
    * and `status` is "ok" only because nothing is known.
    */
   usageUnavailable?: boolean;
+  /**
+   * True for a `subscription_percent` policy whose `observedAmount` comes from
+   * the last successful provider read because the latest read failed. The
+   * value is a real measurement, just older than usual; `usageObservedAt`
+   * says how old.
+   */
+  usageStale?: boolean;
+  /** ISO timestamp of the provider read behind `observedAmount` (subscription policies only). */
+  usageObservedAt?: string | null;
   warnPercent: number;
   hardStopEnabled: boolean;
   notifyEnabled: boolean;

@@ -24,7 +24,18 @@ export interface ProviderQuotaResult {
   ok: boolean;
   /** machine-readable error family when ok is false */
   errorFamily?: string | null;
-  /** error message when ok is false */
+  /** error message when ok is false, or the latest failed read when `stale` is true */
   error?: string;
+  /**
+   * ISO timestamp of the provider read that produced `windows`. Set by the
+   * server's memoized quota snapshot; absent on a raw adapter result.
+   */
+  observedAt?: string | null;
+  /**
+   * True when the latest provider read failed and `windows` still come from
+   * the last successful read, which is no older than the snapshot's stale
+   * bound. `ok` stays true so consumers keep using the last known usage.
+   */
+  stale?: boolean;
   windows: QuotaWindow[];
 }
