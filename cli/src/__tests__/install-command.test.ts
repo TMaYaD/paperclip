@@ -6,6 +6,7 @@ import {
   type CommandRunner,
   installCommand,
   installGitPayload,
+  isFullCommitSha,
   resolveGitHubRef,
   resolveGitInstallRequest,
   resolveGitInstallWorkspacePackages,
@@ -166,6 +167,22 @@ describe("managed install commands", () => {
     expect(runCommand.mock.calls.filter(([command, args]) => command === "npm" && args[0] === "pack")).toHaveLength(2);
     const installCall = runCommand.mock.calls.find(([command, args]) => command === "npm" && args[0] === "install");
     expect(installCall?.[1].filter((arg) => arg.endsWith(".tgz"))).toHaveLength(4);
+  });
+
+  it("installs a full commit SHA without asking GitHub to resolve it", async () => {
+    const sha = "d".repeat(40);
+    const runCommand = createGitCheckoutRunCommand(sha);
+    await installCommand({ ref: sha.toUpperCase(), repo: "HenkDz/paperclip", yes: true }, { runCommand });
+    const manifest = readInstallManifest(resolveInstallStorePaths());
+    expect(manifest).toMatchObject({ source: "git", repo: "HenkDz/paperclip", ref: sha.toUpperCase(), sha });
+    const apiLookups = runCommand.mock.calls.filter(([command, args]) => command === "curl" && args.some((arg) => arg.includes("api.github.com")));
+    expect(apiLookups).toHaveLength(0);
+    const downloads = runCommand.mock.calls.filter(([command, args]) => command === "curl" && args.includes("--output"));
+    expect(downloads).toHaveLength(1);
+    expect(downloads[0]?.[1].at(-1)).toBe(`https://codeload.github.com/HenkDz/paperclip/tar.gz/${sha}`);
+    expect(isFullCommitSha(sha)).toBe(true);
+    expect(isFullCommitSha(sha.slice(0, 12))).toBe(false);
+    expect(isFullCommitSha("master")).toBe(false);
   });
 
   it("builds git checkouts with NODE_ENV cleared so ambient production mode keeps devDependencies", async () => {
