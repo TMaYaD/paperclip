@@ -23,6 +23,7 @@ export {
   fetchClaudeQuota,
   fetchClaudeCliQuota,
   captureClaudeCliUsageText,
+  parseClaudeCliResetsAt,
   parseClaudeCliUsageText,
   toPercent,
   fetchWithTimeout,
