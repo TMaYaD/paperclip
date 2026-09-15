@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- ing.paperclip.gitmon: watch the fork's `main` and deploy it.
+
+     gitmon polls the clone at WorkingDirectory with `git fetch` (no GitHub API
+     calls), pulls when `main` moves, and restarts deploy.sh, which installs the
+     new commit and restarts ing.paperclip.paperclipai in a quiet window.
+
+     Source of truth: deploy/headless-mac/ in the repository, so gitmon pulls
+     updates to the deploy logic together with everything else. Installed copy:
+     /Library/LaunchDaemons/ing.paperclip.gitmon.plist (root:wheel 644).
+
+     LaunchDaemon rather than LaunchAgent for the same reason as
+     ing.paperclip.paperclipai: this Mac is headless with no console login for
+     paperclipai, so there is no per-user launchd domain to bootstrap into.
+     UserName pins the job to paperclipai, which owns the install and the clone. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>ing.paperclip.gitmon</string>
+  <key>UserName</key><string>paperclipai</string>
+  <key>GroupName</key><string>staff</string>
+  <key>WorkingDirectory</key><string>/Users/paperclipai/gitmon/paperclip</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/paperclipai/.local/bin/gitmon</string>
+    <string>-i</string>
+    <string>300</string>
+    <string>/Users/paperclipai/gitmon/paperclip/deploy/headless-mac/deploy.sh</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/Users/paperclipai/.local/bin:/Users/paperclipai/opt/node24/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key><string>/Users/paperclipai</string>
+    <key>PAPERCLIP_HOME</key><string>/Users/paperclipai/.paperclip</string>
+    <key>PAPERCLIP_INSTANCE_ID</key><string>default</string>
+    <key>PAPERCLIP_DEPLOY_REPO</key><string>TMaYaD/paperclip</string>
+    <!-- now: build immediately, restart in a quiet window. idle: also wait for
+         a quiet window before the ~45 minute build. -->
+    <key>PAPERCLIP_DEPLOY_BUILD_WHEN</key><string>now</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>30</integer>
+  <key>ProcessType</key><string>Background</string>
+  <key>StandardOutPath</key><string>/Users/paperclipai/.paperclip/instances/default/logs/gitmon.log</string>
+  <key>StandardErrorPath</key><string>/Users/paperclipai/.paperclip/instances/default/logs/gitmon.err.log</string>
+</dict>
+</plist>
