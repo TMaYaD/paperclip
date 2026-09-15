@@ -103,16 +103,35 @@ describe("BudgetPolicyCard", () => {
     expect(container.textContent).toContain("Unlimited");
   });
 
-  it("keeps the last measurement and says how old it is when the latest provider read failed", () => {
+  it("keeps the last measurement, says how old it is, and reads held when a stale read sits under a limit", () => {
+    // The gate never clears a run on a stale read, so under a limit the card
+    // shows the hold while still drawing the last known usage and the marker.
     const observedAt = new Date(Date.now() - 3 * 60_000).toISOString();
-    const { bar } = render(
+    const { bar, marker, held } = render(
       subscriptionSummary({ amount: 80, observedAmount: 40, usageStale: true, usageObservedAt: observedAt }),
     );
     expect(bar.style.width).toBe("40%");
+    expect(marker?.style.left).toBe("calc(80% - 1px)");
+    expect(held).not.toBeNull();
     expect(container.textContent).toContain("40%");
-    expect(container.textContent).toContain("50% of limit · as of 3m ago, latest read failed");
+    expect(container.textContent).toContain(
+      "50% of limit · as of 3m ago, latest read failed; new runs wait for a fresh read",
+    );
+    expect(container.textContent).toContain("Runs held");
     expect(container.textContent).not.toContain("Unavailable");
-    expect(container.textContent).toContain("Healthy");
+    expect(container.textContent).not.toContain("Healthy");
+  });
+
+  it("shows a stale read without a limit as plain usage, nothing held", () => {
+    const observedAt = new Date(Date.now() - 3 * 60_000).toISOString();
+    const { bar, held } = render(
+      subscriptionSummary({ amount: 0, observedAmount: 40, isActive: false, usageStale: true, usageObservedAt: observedAt }),
+    );
+    expect(bar.style.width).toBe("40%");
+    expect(held).toBeNull();
+    expect(container.textContent).toContain("No cap configured · as of 3m ago, latest read failed");
+    expect(container.textContent).not.toContain("new runs wait");
+    expect(container.textContent).not.toContain("Runs held");
   });
 
   it("shows the limit over a hatched track and a held status when usage is unknown under a limit", () => {

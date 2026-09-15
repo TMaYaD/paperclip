@@ -147,6 +147,44 @@ describe("decideSubscriptionWindowWait", () => {
     expect(noRow).toMatchObject({ usageUnknown: true });
   });
 
+  it("lets a stale read defer to the reset but never clear a run", () => {
+    const staleAt = {
+      provider: "anthropic",
+      ok: true,
+      stale: true,
+      observedAt: "2026-09-13T11:52:00.000Z",
+      error: "Anthropic OAuth usage: 429",
+      windows: [window({ key: "five_hour", usedPercent: 85, resetsAt: "2026-09-13T14:00:00.000Z" })],
+    } satisfies ProviderQuotaResult;
+    const saturated = decideSubscriptionWindowWait({ policies: [policy()], result: staleAt, provider: "anthropic", now: NOW });
+    expect(saturated).toMatchObject({ usedPercent: 85, usageUnknown: false, resetsAt: "2026-09-13T14:00:00.000Z" });
+    expect(saturated?.resumeAt.toISOString()).toBe("2026-09-13T14:00:30.000Z");
+
+    // Below the limit the stale value cannot vouch for headroom: usage may have
+    // crossed the limit since that read, so the run holds for a re-check.
+    const below = decideSubscriptionWindowWait({
+      policies: [policy()],
+      result: { ...staleAt, windows: [window({ key: "five_hour", usedPercent: 40 })] },
+      provider: "anthropic",
+      now: NOW,
+      unknownWaitMs: 5 * 60_000,
+    });
+    expect(below).toMatchObject({ usedPercent: null, usageUnknown: true });
+    expect(below?.resumeAt.toISOString()).toBe("2026-09-13T12:05:00.000Z");
+    expect(below?.reason).toContain("last good read of 40% at 2026-09-13T11:52:00.000Z cannot clear the limit");
+    expect(below?.reason).toContain("Anthropic OAuth usage: 429");
+
+    // A fresh read below the limit clears the run as before.
+    expect(
+      decideSubscriptionWindowWait({
+        policies: [policy()],
+        result: ok([window({ key: "five_hour", usedPercent: 40 })]),
+        provider: "anthropic",
+        now: NOW,
+      }),
+    ).toBeNull();
+  });
+
   it("stays open without a limit even when usage cannot be read", () => {
     expect(
       decideSubscriptionWindowWait({ policies: [policy({ amount: 0 })], result: null, provider: "anthropic", now: NOW }),

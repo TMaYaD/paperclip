@@ -179,13 +179,13 @@ export function BudgetPolicyCard({
   const canSave = typeof parsedDraft === "number" && parsedDraft !== summary.amount && Boolean(onSave);
   // The provider did not report this window: say so, never show a healthy 0%.
   const usageUnavailable = percentMode && summary.usageUnavailable === true;
-  // A limit that cannot be checked holds new runs (the gate fails closed), so
-  // the card reads as "held" rather than merely "unknown". Without a limit
-  // nothing is held and unknown usage is just unknown.
-  const usageHeld = usageUnavailable && summary.amount > 0;
   // The latest provider read failed and the usage comes from the last good
   // read: still a measurement, so keep the value and say how old it is.
   const usageStale = percentMode && !usageUnavailable && summary.usageStale === true;
+  // A limit that cannot be checked holds new runs (the gate fails closed, and
+  // a stale read never clears a run), so the card reads as "held" rather than
+  // merely "unknown" or "healthy". Without a limit nothing is held.
+  const usageHeld = (usageUnavailable || usageStale) && summary.amount > 0;
   const overLimitBy = percentMode && summary.amount > 0 ? summary.observedAmount - summary.amount : 0;
   const StatusIcon = usageHeld
     ? PauseCircle
@@ -214,7 +214,8 @@ export function BudgetPolicyCard({
       ? "Provider did not report this window · new runs wait until it does"
       : "Provider did not report this window"
     : usageStale
-      ? `${observedBase} · as of ${summary.usageObservedAt ? relativeTime(summary.usageObservedAt) : "an earlier read"}, latest read failed`
+      ? `${observedBase} · as of ${summary.usageObservedAt ? relativeTime(summary.usageObservedAt) : "an earlier read"}, latest read failed` +
+        (usageHeld ? "; new runs wait for a fresh read" : "")
       : observedBase;
   const remainingValue = usageUnavailable
     ? "Unknown"

@@ -16,8 +16,10 @@ export const QUOTA_SNAPSHOT_TTL_MS = readPositiveIntEnv("PAPERCLIP_QUOTA_SNAPSHO
  * CLI fallback scrapes a terminal, so single reads fail now and then; without
  * this bound each blip would report the provider as unknown for one TTL and
  * flip budget summaries between a measured percent and "unavailable". A
- * provider that stays unreadable past this bound is reported as unavailable;
- * the dispatch gate then holds runs under a limit for a re-check.
+ * provider that stays unreadable past this bound is reported as unavailable.
+ * The dispatch gate never clears a run on a stale result (it may only defer
+ * on one), so the reuse serves the summaries; unreadable and stale-below-limit
+ * usage both hold runs under a limit for a re-check.
  */
 export const QUOTA_SNAPSHOT_MAX_STALE_MS = readPositiveIntEnv(
   "PAPERCLIP_QUOTA_SNAPSHOT_MAX_STALE_MS",

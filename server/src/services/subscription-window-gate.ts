@@ -144,10 +144,14 @@ export function observeSubscriptionWindow(
  *
  * A policy whose window cannot be read (the provider row is missing or not ok,
  * the window is absent, or it carries no utilization) holds the run for
- * `unknownWaitMs` and re-checks; only a scope with no limit stays open. When
- * several policies block at once, the wait ends at the latest resume time,
- * because every blocking window has to clear before a run can start, so a
- * known saturated window outranks an unknown one.
+ * `unknownWaitMs` and re-checks; only a scope with no limit stays open. A
+ * stale result (the last good read, reused because the latest refresh failed)
+ * can only tighten the gate: at or above the limit it defers to the reset as
+ * usual, but below the limit it cannot clear the run, because real usage may
+ * have crossed the limit since that read, so the run holds for a re-check
+ * instead. When several policies block at once, the wait ends at the latest
+ * resume time, because every blocking window has to clear before a run can
+ * start, so a known saturated window outranks an unknown one.
  */
 export function decideSubscriptionWindowWait(input: {
   policies: SubscriptionWindowPolicy[];
@@ -163,6 +167,7 @@ export function decideSubscriptionWindowWait(input: {
   const unknownWaitMs = input.unknownWaitMs ?? SUBSCRIPTION_WINDOW_UNKNOWN_WAIT_MS;
   const result = input.result ?? null;
   const windows = result?.ok ? result.windows : null;
+  const stale = result?.stale === true;
   let chosen: SubscriptionWindowWait | null = null;
 
   for (const policy of input.policies) {
@@ -178,14 +183,19 @@ export function decideSubscriptionWindowWait(input: {
       limitPercent: policy.amount,
     };
     const window = windows ? findQuotaWindow(windows, policy.windowKind) : null;
+    const usedPercent = window?.usedPercent ?? null;
+    const staleBelowLimit = stale && usedPercent != null && usedPercent < policy.amount;
     let candidate: SubscriptionWindowWait;
-    if (!window || window.usedPercent == null) {
+    if (usedPercent == null || staleBelowLimit) {
       const cause =
         windows == null
           ? `provider usage could not be read${result?.error ? ` (${result.error})` : ""}`
           : !window
             ? "the provider did not report this window"
-            : "the provider reported this window without utilization";
+            : usedPercent == null
+              ? "the provider reported this window without utilization"
+              : `the latest provider read failed${result?.error ? ` (${result.error})` : ""}, and the last good read of ` +
+                `${usedPercent}%${result?.observedAt ? ` at ${result.observedAt}` : ""} cannot clear the limit`;
       candidate = {
         ...base,
         usedPercent: null,
@@ -197,18 +207,18 @@ export function decideSubscriptionWindowWait(input: {
           `new runs wait while the ${policy.amount}% limit for the ${policy.scopeType} scope cannot be checked`,
       };
     } else {
-      if (window.usedPercent < policy.amount) continue;
-      const resetsAt = parseResetsAt(window.resetsAt, now);
+      if (usedPercent < policy.amount) continue;
+      const resetsAt = parseResetsAt(window!.resetsAt, now);
       candidate = {
         ...base,
-        usedPercent: window.usedPercent,
+        usedPercent,
         usageUnknown: false,
         resetsAt: resetsAt ? resetsAt.toISOString() : null,
         resumeAt: resetsAt
           ? new Date(resetsAt.getTime() + SUBSCRIPTION_WINDOW_RESET_MARGIN_MS)
           : new Date(now.getTime() + defaultWaitMs),
         reason:
-          `${input.provider} ${windowLabel} subscription window is at ${window.usedPercent}% ` +
+          `${input.provider} ${windowLabel} subscription window is at ${usedPercent}% ` +
           `(limit ${policy.amount}% for ${policy.scopeType} scope); ` +
           (resetsAt ? `window resets at ${resetsAt.toISOString()}` : "no reset time reported"),
       };
