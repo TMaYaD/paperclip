@@ -31,6 +31,10 @@
   <dict>
     <key>PATH</key><string>/Users/paperclipai/.local/bin:/Users/paperclipai/opt/node24/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     <key>HOME</key><string>/Users/paperclipai</string>
+    <!-- The git in ~/.local/bin is a custom build under ~/opt/git; without
+         this it cannot find its remote helpers under launchd
+         ("git: 'remote-https' is not a git command") and every fetch fails. -->
+    <key>GIT_EXEC_PATH</key><string>/Users/paperclipai/opt/git/libexec/git-core</string>
     <key>PAPERCLIP_HOME</key><string>/Users/paperclipai/.paperclip</string>
     <key>PAPERCLIP_INSTANCE_ID</key><string>default</string>
     <key>PAPERCLIP_DEPLOY_REPO</key><string>TMaYaD/paperclip</string>
