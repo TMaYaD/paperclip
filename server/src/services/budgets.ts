@@ -10,6 +10,7 @@ import {
   projects,
 } from "@paperclipai/db";
 import {
+  SUBSCRIPTION_BUDGET_WINDOW_DURATION_MS,
   isSubscriptionBudgetWindowKind,
   type BudgetIncident,
   type BudgetIncidentResolutionInput,
@@ -22,7 +23,6 @@ import {
   type BudgetScopeType,
   type BudgetThresholdType,
   type BudgetWindowKind,
-  type SubscriptionBudgetWindowKind,
 } from "@paperclipai/shared";
 import { notFound, unprocessable } from "../errors.js";
 import { logActivity } from "./activity-log.js";
@@ -32,6 +32,7 @@ import {
   type QuotaSnapshotReader,
 } from "./quota-windows.js";
 import {
+  evaluateSubscriptionRelease,
   observeSubscriptionWindow,
   type SubscriptionWindowObservation,
 } from "./subscription-window-gate.js";
@@ -56,12 +57,6 @@ export type BudgetServiceHooks = {
   cancelWorkForScope?: (scope: BudgetEnforcementScope) => Promise<void>;
   /** Memoized provider quota reader used to summarize `subscription_percent` policies. */
   readQuotaSnapshot?: QuotaSnapshotReader;
-};
-
-/** Nominal lengths of the provider subscription windows, used only to render window bounds. */
-const SUBSCRIPTION_WINDOW_DURATION_MS: Record<SubscriptionBudgetWindowKind, number> = {
-  provider_session: 5 * 60 * 60 * 1000,
-  provider_week: 7 * 24 * 60 * 60 * 1000,
 };
 
 /**
@@ -98,7 +93,7 @@ function resolveWindow(
     const reportedEnd = observation?.resetsAt ? new Date(observation.resetsAt) : null;
     const end = reportedEnd && !Number.isNaN(reportedEnd.getTime()) ? reportedEnd : now;
     return {
-      start: new Date(end.getTime() - SUBSCRIPTION_WINDOW_DURATION_MS[windowKind]),
+      start: new Date(end.getTime() - SUBSCRIPTION_BUDGET_WINDOW_DURATION_MS[windowKind]),
       end,
     };
   }
@@ -402,10 +397,32 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
     const observedAmount = isSubscription
       ? observation?.usedPercent ?? 0
       : await computeObservedAmount(db, policy);
-    const { start, end } = resolveWindow(policy.windowKind as BudgetWindowKind, new Date(), observation);
+    const now = new Date();
+    const { start, end } = resolveWindow(policy.windowKind as BudgetWindowKind, now, observation);
     const amount = policy.isActive ? policy.amount : 0;
     const utilizationPercent =
       amount > 0 ? Number(((observedAmount / amount) * 100).toFixed(2)) : 0;
+    // A progressive subscription limit is only partly in force: the released
+    // share paces "Remaining" and the release marker, while `status` keeps
+    // describing the full limit. The gate runs the same evaluation, so the
+    // card and the dispatcher agree on what is held and until when.
+    const progressive = isSubscription && policy.progressive;
+    const windowKind = policy.windowKind;
+    const release =
+      isSubscription && amount > 0 && isSubscriptionBudgetWindowKind(windowKind)
+        ? evaluateSubscriptionRelease({
+            usedPercent: usageUnavailable ? 0 : observedAmount,
+            limitPercent: amount,
+            windowKind,
+            progressive,
+            resetsAt: observation?.resetsAt,
+            now,
+          })
+        : null;
+    const releasedAmount = release ? Number(release.release.releasedPercent.toFixed(2)) : amount;
+    const releaseAt = release && !usageUnavailable && release.releaseAt ? release.releaseAt.toISOString() : null;
+    const releaseWindowUnknown = progressive && release != null && release.release.elapsedFraction == null;
+    const remainingAmount = amount > 0 ? Math.max(0, releasedAmount - observedAmount) : 0;
     return {
       policyId: policy.id,
       companyId: policy.companyId,
@@ -415,8 +432,12 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
       metric: policy.metric as BudgetMetric,
       windowKind: policy.windowKind as BudgetWindowKind,
       amount,
+      progressive,
+      releasedAmount,
+      releaseAt,
+      releaseWindowUnknown,
       observedAmount,
-      remainingAmount: amount > 0 ? Math.max(0, amount - observedAmount) : 0,
+      remainingAmount: isSubscription ? Number(remainingAmount.toFixed(2)) : remainingAmount,
       utilizationPercent,
       usageUnavailable,
       usageStale,
@@ -622,11 +643,17 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
         .then((rows) => rows[0] ?? null);
 
       const now = new Date();
+      // Progressive release only means something on a subscription window. An
+      // omitted flag keeps what is stored, so an amount-only update cannot
+      // silently switch a policy back to releasing its limit all at once.
+      const progressive =
+        metric === "subscription_percent" ? input.progressive ?? existing?.progressive ?? false : false;
       const row = existing
         ? await db
           .update(budgetPolicies)
           .set({
             amount,
+            progressive,
             warnPercent: input.warnPercent ?? existing.warnPercent,
             hardStopEnabled: input.hardStopEnabled ?? existing.hardStopEnabled,
             notifyEnabled: input.notifyEnabled ?? existing.notifyEnabled,
@@ -646,6 +673,7 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
             metric,
             windowKind,
             amount,
+            progressive,
             warnPercent: input.warnPercent ?? 80,
             hardStopEnabled: input.hardStopEnabled ?? true,
             notifyEnabled: input.notifyEnabled ?? true,
@@ -711,6 +739,7 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
           scopeId: row.scopeId,
           amount: row.amount,
           windowKind: row.windowKind,
+          progressive: row.progressive,
         },
       });
 
