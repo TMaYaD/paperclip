@@ -22,7 +22,7 @@ export function SubscriptionWindowBudgets({
   policies: BudgetPolicySummary[];
   quotaResults: ProviderQuotaResult[];
   isSaving: boolean;
-  onSave: (input: { windowKind: SubscriptionBudgetWindowKind; amount: number }) => void;
+  onSave: (input: { windowKind: SubscriptionBudgetWindowKind; amount: number; progressive: boolean }) => void;
 }) {
   const summaries = useMemo(() => {
     const now = new Date();
@@ -58,6 +58,9 @@ export function SubscriptionWindowBudgets({
         metric: "subscription_percent",
         windowKind,
         amount: 0,
+        progressive: false,
+        releasedAmount: 0,
+        releaseAt: null,
         observedAmount: usedPercent ?? 0,
         remainingAmount: 0,
         utilizationPercent: 0,
@@ -83,7 +86,7 @@ export function SubscriptionWindowBudgets({
       <div>
         <h2 className="text-lg font-semibold">Subscription usage limits</h2>
         <p className="text-sm text-muted-foreground">
-          Defer new runs while the provider subscription window is at or above the limit. Runs resume on their own when the window resets; nothing is paused and no approval is opened.
+          Defer new runs while the provider subscription window is at or above the limit. Runs resume on their own when the window resets; nothing is paused and no approval is opened. Progressive release spreads a limit evenly over the window instead, so a 70% weekly limit frees about 10% a day.
         </p>
       </div>
       <div className="grid gap-4 xl:grid-cols-2">
@@ -92,8 +95,8 @@ export function SubscriptionWindowBudgets({
             key={summary.policyId}
             summary={summary}
             isSaving={isSaving}
-            onSave={(amount) =>
-              onSave({ windowKind: summary.windowKind as SubscriptionBudgetWindowKind, amount })}
+            onSave={(amount, { progressive }) =>
+              onSave({ windowKind: summary.windowKind as SubscriptionBudgetWindowKind, amount, progressive })}
           />
         ))}
       </div>

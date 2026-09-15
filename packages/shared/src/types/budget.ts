@@ -16,6 +16,11 @@ export interface BudgetPolicy {
   metric: BudgetMetric;
   windowKind: BudgetWindowKind;
   amount: number;
+  /**
+   * Release `amount` evenly over the provider window instead of all at once
+   * (`subscription_percent` policies only; always false for money budgets).
+   */
+  progressive: boolean;
   warnPercent: number;
   hardStopEnabled: boolean;
   notifyEnabled: boolean;
@@ -35,6 +40,31 @@ export interface BudgetPolicySummary {
   metric: BudgetMetric;
   windowKind: BudgetWindowKind;
   amount: number;
+  /**
+   * True when the limit is released evenly over the provider window instead
+   * of being available in full from the window start (`subscription_percent`
+   * policies only).
+   */
+  progressive?: boolean;
+  /**
+   * The part of `amount` in force right now: `amount` itself for a fixed
+   * limit, or the elapsed share of the window for a progressive one (the full
+   * `amount` again when the provider reports no reset time, since the window
+   * position is then unknown). `remainingAmount` is measured against it.
+   */
+  releasedAmount?: number;
+  /**
+   * ISO timestamp when a progressive limit next catches up with the observed
+   * usage. Set only while usage is at or ahead of the released share, which
+   * is when the gate holds new runs; null otherwise.
+   */
+  releaseAt?: string | null;
+  /**
+   * True for a progressive policy when the provider reported no usable reset
+   * time, so the window position is unknown and the full `amount` is in force
+   * until a reset is reported (`releasedAmount` then equals `amount`).
+   */
+  releaseWindowUnknown?: boolean;
   observedAmount: number;
   remainingAmount: number;
   utilizationPercent: number;
@@ -102,6 +132,8 @@ export interface BudgetPolicyUpsertInput {
   metric?: BudgetMetric;
   windowKind?: BudgetWindowKind;
   amount: number;
+  /** Omit to keep the stored value on an existing policy. */
+  progressive?: boolean;
   warnPercent?: number;
   hardStopEnabled?: boolean;
   notifyEnabled?: boolean;

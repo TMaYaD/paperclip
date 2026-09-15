@@ -11,6 +11,8 @@ export const budgetPolicies = pgTable(
     metric: text("metric").notNull().default("billed_cents"),
     windowKind: text("window_kind").notNull(),
     amount: integer("amount").notNull().default(0),
+    // subscription_percent only: release `amount` evenly over the provider window.
+    progressive: boolean("progressive").notNull().default(false),
     warnPercent: integer("warn_percent").notNull().default(80),
     hardStopEnabled: boolean("hard_stop_enabled").notNull().default(true),
     notifyEnabled: boolean("notify_enabled").notNull().default(true),
