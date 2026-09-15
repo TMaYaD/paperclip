@@ -16442,6 +16442,9 @@ export function heartbeatService(
       usedPercent: wait.usedPercent,
       usageUnknown: wait.usageUnknown,
       limitPercent: wait.limitPercent,
+      progressive: wait.progressive,
+      releasedPercent: wait.releasedPercent,
+      releaseAt: wait.releaseAt,
       resetsAt: wait.resetsAt,
       resumeAt: wait.resumeAt.toISOString(),
     };
@@ -16566,7 +16569,9 @@ export function heartbeatService(
       eventType: "lifecycle",
       stream: "system",
       level: "info",
-      message: `Deferred until the provider subscription window resets: ${wait.reason}`,
+      message: wait.releaseAt
+        ? `Deferred until more of the progressive subscription limit is released: ${wait.reason}`
+        : `Deferred until the provider subscription window resets: ${wait.reason}`,
       payload: { ...waitSummary, scheduledRetryAttempt: attempt },
     });
     logger.info(

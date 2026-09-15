@@ -1,4 +1,6 @@
 import { TaskChatProjectCreatedCard } from "@/components/task-chat/TaskChatProjectCreatedCard";
+import { BudgetPolicyCard } from "@/components/BudgetPolicyCard";
+import type { BudgetPolicySummary } from "@paperclipai/shared";
 import { TaskDetailTasksPanel } from "@/components/task-detail/TaskDetailTasksPanel";
 import { AiConnectionDesignExamples } from "@/components/ai-connections/AiConnectionDesignExamples";
 import { SavedProviderKeySelect } from "../components/onboarding/SavedProviderKeySelect";
@@ -314,6 +316,63 @@ const DESIGN_GUIDE_COMPOSIO_ROWS: ComposioServiceRow[] = [
     childConnectionId: null,
     toolCount: 9,
     noAuth: false,
+  },
+];
+
+function budgetCardExample(overrides: Partial<BudgetPolicySummary> & { policyId: string }): BudgetPolicySummary {
+  const amount = overrides.amount ?? 70;
+  const observedAmount = overrides.observedAmount ?? 20;
+  const releasedAmount = overrides.releasedAmount ?? amount;
+  return {
+    companyId: "design-guide",
+    scopeType: "company",
+    scopeId: "design-guide",
+    scopeName: "Acme",
+    metric: "subscription_percent",
+    windowKind: "provider_week",
+    amount,
+    progressive: false,
+    releasedAmount,
+    releaseAt: null,
+    observedAmount,
+    remainingAmount: Math.max(0, releasedAmount - observedAmount),
+    utilizationPercent: amount > 0 ? Number(((observedAmount / amount) * 100).toFixed(2)) : 0,
+    usageUnavailable: false,
+    warnPercent: 80,
+    hardStopEnabled: true,
+    notifyEnabled: true,
+    isActive: amount > 0,
+    status: "ok",
+    paused: false,
+    pauseReason: null,
+    windowStart: new Date("2026-09-11T00:00:00.000Z"),
+    windowEnd: new Date("2026-09-18T00:00:00.000Z"),
+    ...overrides,
+  };
+}
+
+// A 70% weekly limit (10% a day) in the states the subscription budget card
+// distinguishes. Progressive cards carry two indicators: the released share so
+// far (tinted track, lighter marker) and the configured limit (dark marker).
+const BUDGET_CARD_EXAMPLES: Array<{ label: string; summary: BudgetPolicySummary }> = [
+  { label: "Fixed limit, healthy", summary: budgetCardExample({ policyId: "fixed", observedAmount: 40 }) },
+  {
+    label: "Progressive, under the released share",
+    summary: budgetCardExample({ policyId: "progressive", progressive: true, releasedAmount: 30, observedAmount: 20 }),
+  },
+  {
+    label: "Progressive, usage ahead of the release (runs wait for the next release)",
+    summary: budgetCardExample({
+      policyId: "waiting",
+      progressive: true,
+      releasedAmount: 30,
+      observedAmount: 35,
+      releaseAt: new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString(),
+    }),
+  },
+  {
+    label: "Progressive, over the full limit (runs wait for the reset)",
+    summary: budgetCardExample({ policyId: "over", progressive: true, releasedAmount: 70, observedAmount: 80, status: "hard_stop" }),
   },
 ];
 
@@ -1598,6 +1657,19 @@ export function DesignGuide() {
             </div>
           ))}
         </div>
+        <SubSection title="Subscription limit card">
+          <p className="text-sm text-muted-foreground">
+            The bar is the whole provider window. The fill is the observed usage and the dark marker is the limit. A progressive limit adds a second indicator for the share released so far, and hatches usage past it in the warning tone.
+          </p>
+          <div className="grid gap-4 xl:grid-cols-2">
+            {BUDGET_CARD_EXAMPLES.map(({ label, summary }) => (
+              <div key={summary.policyId} className="space-y-2">
+                <div className="text-xs text-muted-foreground">{label}</div>
+                <BudgetPolicyCard summary={summary} compact onSave={() => {}} />
+              </div>
+            ))}
+          </div>
+        </SubSection>
       </Section>
 
       {/* ============================================================ */}

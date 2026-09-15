@@ -13,6 +13,8 @@ export const upsertBudgetPolicySchema = z.object({
   metric: z.enum(BUDGET_METRICS).optional().default("billed_cents"),
   windowKind: z.enum(BUDGET_WINDOW_KINDS).optional().default("calendar_month_utc"),
   amount: z.number().int().nonnegative(),
+  // No default: an omitted flag keeps the stored value on an existing policy.
+  progressive: z.boolean().optional(),
   warnPercent: z.number().int().min(1).max(99).optional().default(80),
   hardStopEnabled: z.boolean().optional().default(true),
   notifyEnabled: z.boolean().optional().default(true),
@@ -39,6 +41,13 @@ export const upsertBudgetPolicySchema = z.object({
       code: z.ZodIssueCode.custom,
       message: "provider_session and provider_week windows require the subscription_percent metric",
       path: ["windowKind"],
+    });
+  }
+  if (value.progressive === true && value.metric !== "subscription_percent") {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "progressive release requires the subscription_percent metric",
+      path: ["progressive"],
     });
   }
 });

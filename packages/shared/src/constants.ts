@@ -911,6 +911,16 @@ export const SUBSCRIPTION_BUDGET_WINDOW_QUOTA_KEYS: Record<SubscriptionBudgetWin
   provider_week: "seven_day",
 };
 
+/**
+ * Nominal lengths of the provider subscription windows. The provider reports
+ * only the reset time, so a window's start is derived as reset minus this
+ * length; used to render window bounds and to pro-rate progressive limits.
+ */
+export const SUBSCRIPTION_BUDGET_WINDOW_DURATION_MS: Record<SubscriptionBudgetWindowKind, number> = {
+  provider_session: 5 * 60 * 60 * 1000,
+  provider_week: 7 * 24 * 60 * 60 * 1000,
+};
+
 export function isSubscriptionBudgetWindowKind(value: string): value is SubscriptionBudgetWindowKind {
   return (SUBSCRIPTION_BUDGET_WINDOW_KINDS as readonly string[]).includes(value);
 }

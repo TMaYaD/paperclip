@@ -44,6 +44,40 @@ describe("upsertBudgetPolicySchema", () => {
     ).toBe(false);
   });
 
+  it("accepts progressive release on subscription policies and leaves it unset when omitted", () => {
+    const progressive = upsertBudgetPolicySchema.parse({
+      scopeType: "company",
+      scopeId,
+      metric: "subscription_percent",
+      windowKind: "provider_week",
+      amount: 70,
+      progressive: true,
+    });
+    expect(progressive.progressive).toBe(true);
+    // Omitted means "keep what is stored", so the schema must not default it.
+    const omitted = upsertBudgetPolicySchema.parse({
+      scopeType: "company",
+      scopeId,
+      metric: "subscription_percent",
+      windowKind: "provider_week",
+      amount: 70,
+    });
+    expect(omitted.progressive).toBeUndefined();
+  });
+
+  it("rejects progressive release on money budgets", () => {
+    const result = upsertBudgetPolicySchema.safeParse({
+      scopeType: "company",
+      scopeId,
+      amount: 5000,
+      progressive: true,
+    });
+    expect(result.success).toBe(false);
+    expect(result.success ? [] : result.error.issues.map((issue) => issue.path.join("."))).toContain("progressive");
+    // An explicit false is fine anywhere.
+    expect(upsertBudgetPolicySchema.safeParse({ scopeType: "company", scopeId, amount: 5000, progressive: false }).success).toBe(true);
+  });
+
   it("rejects billed_cents policies on provider windows", () => {
     expect(
       upsertBudgetPolicySchema.safeParse({

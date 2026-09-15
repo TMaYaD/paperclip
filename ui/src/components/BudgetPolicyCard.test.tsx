@@ -2,7 +2,7 @@
 
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { BudgetPolicySummary } from "@paperclipai/shared";
 import { BudgetPolicyCard } from "./BudgetPolicyCard";
 
@@ -20,6 +20,9 @@ function subscriptionSummary(overrides: Partial<BudgetPolicySummary> = {}): Budg
     metric: "subscription_percent",
     windowKind: "provider_session",
     amount,
+    progressive: false,
+    releasedAmount: amount,
+    releaseAt: null,
     observedAmount,
     remainingAmount: amount > 0 ? Math.max(0, amount - observedAmount) : 0,
     utilizationPercent: amount > 0 ? Number(((observedAmount / amount) * 100).toFixed(2)) : 0,
@@ -52,16 +55,38 @@ describe("BudgetPolicyCard", () => {
     container.remove();
   });
 
-  function render(summary: BudgetPolicySummary) {
+  function render(summary: BudgetPolicySummary, onSave?: (amount: number, options: { progressive: boolean }) => void) {
     root = createRoot(container);
     act(() => {
-      root!.render(<BudgetPolicyCard summary={summary} />);
+      root!.render(<BudgetPolicyCard summary={summary} onSave={onSave} />);
     });
-    const bar = container.querySelector('[role="progressbar"]') as HTMLElement;
-    const marker = container.querySelector('[data-testid="budget-limit-marker"]') as HTMLElement | null;
-    const over = container.querySelector('[data-testid="budget-over-limit"]') as HTMLElement | null;
-    const held = container.querySelector('[data-testid="budget-usage-held"]') as HTMLElement | null;
-    return { bar, marker, over, held };
+    const query = (selector: string) => container.querySelector(selector) as HTMLElement | null;
+    return {
+      bar: query('[role="progressbar"]') as HTMLElement,
+      marker: query('[data-testid="budget-limit-marker"]'),
+      over: query('[data-testid="budget-over-limit"]'),
+      held: query('[data-testid="budget-usage-held"]'),
+      releasedTrack: query('[data-testid="budget-released-track"]'),
+      releasedMarker: query('[data-testid="budget-released-marker"]'),
+      overReleased: query('[data-testid="budget-over-released"]'),
+      toggle: query('[data-testid="budget-progressive-toggle"]'),
+      saveButton: Array.from(container.querySelectorAll("button")).find((button) =>
+        /Set limit|Update limit|Set budget|Update budget/.test(button.textContent ?? ""),
+      ) as HTMLButtonElement | undefined,
+    };
+  }
+
+  function progressiveWeek(overrides: Partial<BudgetPolicySummary> = {}) {
+    // 70% of the week releases 10% a day; 30% is out so far.
+    return subscriptionSummary({
+      windowKind: "provider_week",
+      amount: 70,
+      progressive: true,
+      releasedAmount: 30,
+      windowStart: new Date("2026-09-11T00:00:00.000Z"),
+      windowEnd: new Date("2026-09-18T00:00:00.000Z"),
+      ...overrides,
+    });
   }
 
   it("draws subscription usage on the whole window with a marker at the limit", () => {
@@ -166,8 +191,9 @@ describe("BudgetPolicyCard", () => {
     expect(container.textContent).not.toContain("new runs wait");
   });
 
-  it("keeps money budgets as a plain utilization bar", () => {
-    const { bar, marker, over } = render(
+  it("keeps money budgets as a plain utilization bar without a release toggle", () => {
+    const onSave = vi.fn();
+    const { bar, marker, over, releasedMarker, toggle, saveButton } = render(
       subscriptionSummary({
         metric: "billed_cents",
         windowKind: "calendar_month_utc",
@@ -177,11 +203,112 @@ describe("BudgetPolicyCard", () => {
         utilizationPercent: 25,
         usageUnavailable: undefined,
       }),
+      onSave,
     );
     expect(bar.style.width).toBe("25%");
     expect(bar.getAttribute("aria-label")).toBe("Budget utilization: 25% used");
     expect(marker).toBeNull();
     expect(over).toBeNull();
+    expect(releasedMarker).toBeNull();
+    expect(toggle).toBeNull();
+    expect(saveButton?.textContent).toBe("Update budget");
     expect(container.textContent).toContain("$75.00");
+    expect(container.textContent).not.toContain("Progressive release");
+  });
+
+  it("draws the released share of a progressive limit as a second indicator on the window", () => {
+    // 20% used against 30% released of a 70% limit: the fill is the usage,
+    // the tinted track and its marker show what is released so far, the
+    // limit marker stays at 70%, and "Remaining" is the gap to the release.
+    const { bar, marker, over, overReleased, releasedTrack, releasedMarker } = render(
+      progressiveWeek({ observedAmount: 20, remainingAmount: 10, utilizationPercent: 28.57 }),
+    );
+    expect(bar.style.width).toBe("20%");
+    expect(bar.getAttribute("aria-label")).toBe("Window usage: 20% used, limit 70%, 30% released so far");
+    expect(releasedTrack?.style.width).toBe("30%");
+    expect(releasedMarker?.style.left).toBe("calc(30% - 1px)");
+    expect(releasedMarker?.getAttribute("title")).toBe("Released 30% so far");
+    expect(marker?.style.left).toBe("calc(70% - 1px)");
+    expect(over).toBeNull();
+    expect(overReleased).toBeNull();
+    expect(container.textContent).toContain("Healthy");
+    expect(container.textContent).toContain("Progressive release · 10% per day · 30% released so far");
+    expect(container.textContent).toContain("Remaining");
+    expect(container.textContent).toContain("10%");
+  });
+
+  it("reads waiting for release and hatches usage ahead of the released share in the warning tone", () => {
+    // 35% used with 30% released: runs wait for the next release, not the
+    // reset, so this is the budget's normal rhythm rather than a hard stop.
+    const releaseAt = new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString();
+    const { bar, marker, over, overReleased, releasedMarker } = render(
+      progressiveWeek({ observedAmount: 35, remainingAmount: 0, utilizationPercent: 50, releaseAt }),
+    );
+    expect(bar.style.width).toBe("30%");
+    expect(bar.className).toContain("bg-(--status-task-todo)");
+    expect(overReleased?.style.left).toBe("30%");
+    expect(overReleased?.style.width).toBe("5%");
+    expect(over).toBeNull();
+    expect(releasedMarker?.style.left).toBe("calc(30% - 1px)");
+    expect(marker?.style.left).toBe("calc(70% - 1px)");
+    expect(container.textContent).toContain("Waiting for release");
+    expect(container.textContent).toContain("Ahead of release by 5% · more in 2h");
+    expect(container.textContent).not.toContain("Hard stop");
+    expect(container.textContent).not.toContain("Healthy");
+  });
+
+  it("treats a fully released progressive limit like a fixed one", () => {
+    // Past the window (or without a reset time) the whole limit is out: the
+    // two indicators coincide, so only the limit marker and the over-limit
+    // hatch remain.
+    const { bar, marker, over, overReleased, releasedTrack, releasedMarker } = render(
+      progressiveWeek({ releasedAmount: 70, observedAmount: 80, remainingAmount: 0, utilizationPercent: 114.29, status: "hard_stop" }),
+    );
+    expect(bar.style.width).toBe("70%");
+    expect(releasedTrack).toBeNull();
+    expect(releasedMarker).toBeNull();
+    expect(overReleased).toBeNull();
+    expect(marker?.style.left).toBe("calc(70% - 1px)");
+    expect(over?.style.width).toBe("10%");
+    expect(container.textContent).toContain("Over limit by 10%");
+    expect(container.textContent).toContain("Hard stop");
+    expect(container.textContent).toContain("Progressive release · 10% per day · fully released");
+  });
+
+  it("says when the full limit is in force only because the reset time is unknown", () => {
+    // Without a window position nothing can be pro-rated; the card must not
+    // dress that up as the schedule having run its course.
+    const { releasedMarker, releasedTrack } = render(
+      progressiveWeek({ releasedAmount: 70, releaseWindowUnknown: true, observedAmount: 40, remainingAmount: 30, utilizationPercent: 57.14 }),
+    );
+    expect(releasedMarker).toBeNull();
+    expect(releasedTrack).toBeNull();
+    expect(container.textContent).toContain("Progressive release · 10% per day · reset time unknown, full limit in force");
+    expect(container.textContent).not.toContain("fully released");
+  });
+
+  it("saves the drafted release mode together with the limit", () => {
+    const onSave = vi.fn();
+    const { toggle, saveButton } = render(subscriptionSummary({ amount: 80, observedAmount: 40 }), onSave);
+    expect(toggle?.getAttribute("aria-checked")).toBe("false");
+    expect(container.textContent).toContain("Release the limit evenly over the window instead of all at once");
+    // Same amount, same mode: nothing to save yet.
+    expect(saveButton?.disabled).toBe(true);
+
+    act(() => toggle!.click());
+    expect(toggle?.getAttribute("aria-checked")).toBe("true");
+    expect(container.textContent).toContain("Releases the limit evenly over the window, about 16% per hour");
+    expect(saveButton?.disabled).toBe(false);
+
+    act(() => saveButton!.click());
+    expect(onSave).toHaveBeenCalledWith(80, { progressive: true });
+  });
+
+  it("does not offer to save a release mode with no limit to release", () => {
+    const onSave = vi.fn();
+    const { toggle, saveButton } = render(subscriptionSummary({ amount: 0, observedAmount: 40, isActive: false }), onSave);
+    act(() => toggle!.click());
+    expect(toggle?.getAttribute("aria-checked")).toBe("true");
+    expect(saveButton?.disabled).toBe(true);
   });
 });

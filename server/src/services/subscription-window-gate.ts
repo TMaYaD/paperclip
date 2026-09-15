@@ -2,6 +2,7 @@ import { and, eq, gt, inArray, or } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { budgetPolicies } from "@paperclipai/db";
 import {
+  SUBSCRIPTION_BUDGET_WINDOW_DURATION_MS,
   SUBSCRIPTION_BUDGET_WINDOW_QUOTA_KEYS,
   isSubscriptionBudgetWindowKind,
   type BudgetScopeType,
@@ -24,6 +25,13 @@ import {
  * not an incident and never pauses the scope: the window resets on its own, so
  * the queued run is *deferred* to the reset time and promoted again by the
  * ordinary scheduled-retry loop. Nothing in this path asks the board for help.
+ *
+ * A *progressive* policy releases its limit evenly over the window instead of
+ * all at once (70% of a week releases 10% a day; 100% of a session releases
+ * 20% an hour). Usage ahead of the released share is deferred to the moment
+ * the release catches up, which is earlier than the reset while the full
+ * limit is not yet used, so the sawtooth of "run, wait for release, run"
+ * spreads the window's budget across its whole length.
  */
 
 /** `heartbeat_runs.scheduled_retry_reason` for a run deferred by this gate. */
@@ -79,6 +87,8 @@ export type SubscriptionWindowPolicy = {
   windowKind: SubscriptionBudgetWindowKind;
   /** Percent of the window that may be used before new runs are deferred. */
   amount: number;
+  /** Release `amount` evenly over the window: only the elapsed share is in force. */
+  progressive: boolean;
 };
 
 export type SubscriptionWindowWait = {
@@ -90,7 +100,21 @@ export type SubscriptionWindowWait = {
   provider: string;
   /** Percent used, or null when the run is held because usage could not be read. */
   usedPercent: number | null;
+  /** The configured limit, released in full or progressively (see `progressive`). */
   limitPercent: number;
+  progressive: boolean;
+  /**
+   * Percent of the window in force at decision time: `limitPercent` for a
+   * fixed limit, the elapsed share for a progressive one; null when usage is
+   * unknown and the hold is a re-check.
+   */
+  releasedPercent: number | null;
+  /**
+   * When a progressive limit has released enough for the usage, so the run
+   * can be re-checked before the reset; null when the wait is for the reset
+   * or a re-check of unknown usage.
+   */
+  releaseAt: string | null;
   /** True when the hold is for unreadable usage rather than a reached limit. */
   usageUnknown: boolean;
   resetsAt: string | null;
@@ -123,6 +147,94 @@ export function findQuotaWindow(
   return windows.find((window) => window.key === key) ?? null;
 }
 
+export type SubscriptionWindowRelease = {
+  /** Percent of the window the policy allows right now. */
+  releasedPercent: number;
+  /** Share of the window elapsed (0-1), null when the reset time is unknown. */
+  elapsedFraction: number | null;
+  /** Window bounds derived from the reported reset, null when it is unknown. */
+  windowStart: Date | null;
+  windowEnd: Date | null;
+};
+
+/**
+ * Pure: the part of a limit in force at `now`. A fixed limit is in force in
+ * full. A progressive limit is released linearly over the provider window:
+ * the released share is `limit × elapsed / duration`, with the window start
+ * derived from the reported reset minus the nominal window length. Without a
+ * usable reset time the window position is unknown, so the full limit
+ * applies: the configured ceiling still holds and only the smoothing is lost,
+ * which beats holding every run until a reset is reported.
+ */
+export function releaseSubscriptionLimit(input: {
+  limitPercent: number;
+  windowKind: SubscriptionBudgetWindowKind;
+  progressive: boolean;
+  resetsAt: string | null | undefined;
+  now?: Date;
+}): SubscriptionWindowRelease {
+  const now = input.now ?? new Date();
+  const resetsAt = parseResetsAt(input.resetsAt, now);
+  if (!resetsAt) {
+    return { releasedPercent: input.limitPercent, elapsedFraction: null, windowStart: null, windowEnd: null };
+  }
+  const durationMs = SUBSCRIPTION_BUDGET_WINDOW_DURATION_MS[input.windowKind];
+  const windowStart = new Date(resetsAt.getTime() - durationMs);
+  const elapsedFraction = Math.min(1, Math.max(0, (now.getTime() - windowStart.getTime()) / durationMs));
+  return {
+    releasedPercent: input.progressive ? input.limitPercent * elapsedFraction : input.limitPercent,
+    elapsedFraction,
+    windowStart,
+    windowEnd: resetsAt,
+  };
+}
+
+export type SubscriptionReleaseEvaluation = {
+  release: SubscriptionWindowRelease;
+  /** True when usage is at or ahead of the released share, so new runs wait. */
+  held: boolean;
+  /**
+   * When a progressive limit catches up with the usage, set only while held
+   * below the full limit; null when the full limit is reached (the wait is
+   * then for the reset) or when nothing is held.
+   */
+  releaseAt: Date | null;
+};
+
+/**
+ * Pure: compares known usage with the released share of a limit. Usage of 0
+ * is never held, because nothing has been consumed to pace. Held below the
+ * full limit, a progressive policy names the moment its linear release
+ * reaches the usage (`windowStart + used / limit × duration`), which is the
+ * earliest time the run can go again; at or above the full limit the reset
+ * is the only way out, as for a fixed limit.
+ */
+export function evaluateSubscriptionRelease(input: {
+  usedPercent: number;
+  limitPercent: number;
+  windowKind: SubscriptionBudgetWindowKind;
+  progressive: boolean;
+  resetsAt: string | null | undefined;
+  now?: Date;
+}): SubscriptionReleaseEvaluation {
+  const release = releaseSubscriptionLimit(input);
+  const held = input.limitPercent > 0 && input.usedPercent > 0 && input.usedPercent >= release.releasedPercent;
+  if (!held || !input.progressive || input.usedPercent >= input.limitPercent || !release.windowStart) {
+    return { release, held, releaseAt: null };
+  }
+  const durationMs = SUBSCRIPTION_BUDGET_WINDOW_DURATION_MS[input.windowKind];
+  const share = Math.min(1, Math.max(0, input.usedPercent / input.limitPercent));
+  return {
+    release,
+    held,
+    releaseAt: new Date(release.windowStart.getTime() + share * durationMs),
+  };
+}
+
+function formatPercent(value: number) {
+  return String(Math.round(value * 10) / 10);
+}
+
 export function observeSubscriptionWindow(
   result: ProviderQuotaResult | null | undefined,
   windowKind: SubscriptionBudgetWindowKind,
@@ -152,6 +264,11 @@ export function observeSubscriptionWindow(
  * instead. When several policies block at once, the wait ends at the latest
  * resume time, because every blocking window has to clear before a run can
  * start, so a known saturated window outranks an unknown one.
+ *
+ * A progressive policy is measured against its released share rather than the
+ * full limit (see evaluateSubscriptionRelease): held below the full limit, the
+ * run resumes just after the release catches up with the usage instead of at
+ * the reset. The stale rule applies to the released share the same way.
  */
 export function decideSubscriptionWindowWait(input: {
   policies: SubscriptionWindowPolicy[];
@@ -181,12 +298,24 @@ export function decideSubscriptionWindowWait(input: {
       quotaKey: SUBSCRIPTION_BUDGET_WINDOW_QUOTA_KEYS[policy.windowKind],
       provider: input.provider,
       limitPercent: policy.amount,
+      progressive: policy.progressive,
     };
     const window = windows ? findQuotaWindow(windows, policy.windowKind) : null;
     const usedPercent = window?.usedPercent ?? null;
-    const staleBelowLimit = stale && usedPercent != null && usedPercent < policy.amount;
+    const evaluation =
+      usedPercent == null
+        ? null
+        : evaluateSubscriptionRelease({
+            usedPercent,
+            limitPercent: policy.amount,
+            windowKind: policy.windowKind,
+            progressive: policy.progressive,
+            resetsAt: window?.resetsAt,
+            now,
+          });
+    const staleBelowLimit = stale && evaluation != null && !evaluation.held;
     let candidate: SubscriptionWindowWait;
-    if (usedPercent == null || staleBelowLimit) {
+    if (usedPercent == null || evaluation == null || staleBelowLimit) {
       const cause =
         windows == null
           ? `provider usage could not be read${result?.error ? ` (${result.error})` : ""}`
@@ -199,6 +328,8 @@ export function decideSubscriptionWindowWait(input: {
       candidate = {
         ...base,
         usedPercent: null,
+        releasedPercent: null,
+        releaseAt: null,
         usageUnknown: true,
         resetsAt: null,
         resumeAt: new Date(now.getTime() + unknownWaitMs),
@@ -207,20 +338,29 @@ export function decideSubscriptionWindowWait(input: {
           `new runs wait while the ${policy.amount}% limit for the ${policy.scopeType} scope cannot be checked`,
       };
     } else {
-      if (usedPercent < policy.amount) continue;
+      if (!evaluation.held) continue;
       const resetsAt = parseResetsAt(window!.resetsAt, now);
+      const releaseAt = evaluation.releaseAt;
+      const releasedPercent = evaluation.release.releasedPercent;
       candidate = {
         ...base,
         usedPercent,
+        releasedPercent,
+        releaseAt: releaseAt ? releaseAt.toISOString() : null,
         usageUnknown: false,
         resetsAt: resetsAt ? resetsAt.toISOString() : null,
-        resumeAt: resetsAt
-          ? new Date(resetsAt.getTime() + SUBSCRIPTION_WINDOW_RESET_MARGIN_MS)
-          : new Date(now.getTime() + defaultWaitMs),
-        reason:
-          `${input.provider} ${windowLabel} subscription window is at ${usedPercent}% ` +
-          `(limit ${policy.amount}% for ${policy.scopeType} scope); ` +
-          (resetsAt ? `window resets at ${resetsAt.toISOString()}` : "no reset time reported"),
+        resumeAt: releaseAt
+          ? new Date(releaseAt.getTime() + SUBSCRIPTION_WINDOW_RESET_MARGIN_MS)
+          : resetsAt
+            ? new Date(resetsAt.getTime() + SUBSCRIPTION_WINDOW_RESET_MARGIN_MS)
+            : new Date(now.getTime() + defaultWaitMs),
+        reason: releaseAt
+          ? `${input.provider} ${windowLabel} subscription window is at ${usedPercent}%, ahead of the ` +
+            `${formatPercent(releasedPercent)}% released so far of the progressive ${policy.amount}% limit ` +
+            `for ${policy.scopeType} scope; enough is released at ${releaseAt.toISOString()}`
+          : `${input.provider} ${windowLabel} subscription window is at ${usedPercent}% ` +
+            `(${policy.progressive ? "progressive " : ""}limit ${policy.amount}% for ${policy.scopeType} scope); ` +
+            (resetsAt ? `window resets at ${resetsAt.toISOString()}` : "no reset time reported"),
       };
     }
     if (!chosen || candidate.resumeAt.getTime() > chosen.resumeAt.getTime()) {
@@ -299,6 +439,7 @@ export function subscriptionWindowGateService(
         scopeId: budgetPolicies.scopeId,
         windowKind: budgetPolicies.windowKind,
         amount: budgetPolicies.amount,
+        progressive: budgetPolicies.progressive,
       })
       .from(budgetPolicies)
       .where(
@@ -319,6 +460,7 @@ export function subscriptionWindowGateService(
             scopeId: row.scopeId,
             windowKind: row.windowKind,
             amount: row.amount,
+            progressive: row.progressive,
           }]
         : [],
     );
