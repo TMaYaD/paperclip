@@ -320,12 +320,14 @@ describe("parseClaudeCliUsageText", () => {
       Extra usage not enabled • /extra-usage to enable
     `;
 
-    expect(parseClaudeCliUsageText(raw)).toEqual([
+    // The panel prints resets only as text; they come back as instants in the
+    // printed zone (Chicago is on daylight time in mid-March, UTC-5).
+    expect(parseClaudeCliUsageText(raw, { now: new Date("2026-03-15T12:00:00.000Z") })).toEqual([
       {
         key: "five_hour",
         label: "Current session",
         usedPercent: 2,
-        resetsAt: null,
+        resetsAt: "2026-03-15T22:00:00.000Z",
         valueLabel: null,
         detail: "Resets 5pm (America/Chicago)",
       },
@@ -333,7 +335,7 @@ describe("parseClaudeCliUsageText", () => {
         key: "seven_day",
         label: "Current week (all models)",
         usedPercent: 47,
-        resetsAt: null,
+        resetsAt: "2026-03-18T12:59:00.000Z",
         valueLabel: null,
         detail: "Resets Mar 18 at 7:59am (America/Chicago)",
       },
@@ -341,7 +343,7 @@ describe("parseClaudeCliUsageText", () => {
         key: "seven_day_sonnet",
         label: "Current week (Sonnet only)",
         usedPercent: 0,
-        resetsAt: null,
+        resetsAt: "2026-03-18T13:59:00.000Z",
         valueLabel: null,
         detail: "Resets Mar 18 at 8:59am (America/Chicago)",
       },

@@ -414,7 +414,117 @@ function formatClaudeCliDetail(label: string, lines: string[]): string | null {
     .trim();
 }
 
-export function parseClaudeCliUsageText(text: string): QuotaWindow[] {
+const MONTH_INDEX: Record<string, number> = {
+  jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11,
+};
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+function isUsableTimeZone(zone: string): boolean {
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: zone });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function wallClockPartsInZone(utcMs: number, timeZone: string) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    hourCycle: "h23",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).formatToParts(new Date(utcMs));
+  const read = (type: string) => Number(parts.find((part) => part.type === type)?.value ?? "0");
+  return {
+    year: read("year"),
+    month: read("month") - 1,
+    day: read("day"),
+    hour: read("hour") % 24,
+    minute: read("minute"),
+    second: read("second"),
+  };
+}
+
+/** The instant at which a zone's wall clock reads the given local time. */
+function zonedWallClockToUtc(local: { year: number; month: number; day: number; hour: number; minute: number }, timeZone: string): Date {
+  const guess = Date.UTC(local.year, local.month, local.day, local.hour, local.minute);
+  const offsetAt = (utcMs: number) => {
+    const wall = wallClockPartsInZone(utcMs, timeZone);
+    return Date.UTC(wall.year, wall.month, wall.day, wall.hour, wall.minute, wall.second) - Math.floor(utcMs / 1000) * 1000;
+  };
+  let utc = guess - offsetAt(guess);
+  const settled = guess - offsetAt(utc);
+  if (settled !== utc) utc = settled;
+  return new Date(utc);
+}
+
+/**
+ * Reads the reset the CLI usage panel shows only as text: "Resets 1am
+ * (Asia/Calcutta)" for the session window, "Resets Sep 20 at 3:30pm
+ * (Asia/Calcutta)" for the week. The terminal capture is lossy, so the time
+ * also accepts a bare digit run ("330pm") and a zone name that lost letters
+ * ("Asia/Clcutta") falls back to `fallbackTimeZone`, by default the host's,
+ * which is the zone the CLI prints anyway. A time without a date is today in
+ * that zone, or tomorrow once it has passed; a month and day take the current
+ * year, or the next one when that would already be more than a day ago.
+ * Returns null when the text carries no recognizable reset.
+ */
+export function parseClaudeCliResetsAt(
+  detail: string | null | undefined,
+  options: { now?: Date; fallbackTimeZone?: string } = {},
+): string | null {
+  if (!detail) return null;
+  const match = detail.match(
+    /resets\s*(?:([A-Za-z]{3})\s*(\d{1,2}))?\s*(?:at)?\s*(\d{1,2}:\d{2}|\d{1,4})\s*(am|pm)(?:\s*\(([^)]*)\))?/i,
+  );
+  if (!match) return null;
+  const [, monthName, dayText, timeText, meridiem, zoneText] = match;
+  let hour: number;
+  let minute: number;
+  if (timeText.includes(":")) {
+    [hour, minute] = timeText.split(":").map(Number) as [number, number];
+  } else if (timeText.length >= 3) {
+    hour = Number(timeText.slice(0, -2));
+    minute = Number(timeText.slice(-2));
+  } else {
+    hour = Number(timeText);
+    minute = 0;
+  }
+  if (!Number.isInteger(hour) || hour < 1 || hour > 12 || !Number.isInteger(minute) || minute < 0 || minute > 59) {
+    return null;
+  }
+  const hour24 = (hour % 12) + (meridiem.toLowerCase() === "pm" ? 12 : 0);
+  const now = options.now ?? new Date();
+  const zone = zoneText && isUsableTimeZone(zoneText.trim())
+    ? zoneText.trim()
+    : options.fallbackTimeZone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const today = wallClockPartsInZone(now.getTime(), zone);
+  let month = today.month;
+  let day = today.day;
+  if (monthName) {
+    const parsedMonth = MONTH_INDEX[monthName.toLowerCase()];
+    const parsedDay = Number(dayText);
+    if (parsedMonth == null || !Number.isInteger(parsedDay) || parsedDay < 1 || parsedDay > 31) return null;
+    month = parsedMonth;
+    day = parsedDay;
+  }
+  let resetsAt = zonedWallClockToUtc({ year: today.year, month, day, hour: hour24, minute }, zone);
+  if (!monthName) {
+    if (resetsAt.getTime() <= now.getTime()) {
+      resetsAt = zonedWallClockToUtc({ year: today.year, month, day: day + 1, hour: hour24, minute }, zone);
+    }
+  } else if (resetsAt.getTime() < now.getTime() - DAY_MS) {
+    resetsAt = zonedWallClockToUtc({ year: today.year + 1, month, day, hour: hour24, minute }, zone);
+  }
+  return Number.isNaN(resetsAt.getTime()) ? null : resetsAt.toISOString();
+}
+
+export function parseClaudeCliUsageText(text: string, options: { now?: Date } = {}): QuotaWindow[] {
   const cleaned = trimToLatestUsagePanel(cleanTerminalText(text)) ?? cleanTerminalText(text);
   const usageError = extractUsageError(cleaned);
   if (usageError) throw new Error(usageError);
@@ -439,13 +549,19 @@ export function parseClaudeCliUsageText(text: string): QuotaWindow[] {
 
   const windows = sections.map<QuotaWindow>((section) => {
     const usedPercent = section.lines.map(percentFromLine).find((value) => value != null) ?? null;
+    const detail = formatClaudeCliDetail(section.label, section.lines);
+    // The panel prints the reset only as text; read it back so consumers that
+    // need the window position (subscription budgets) get a real timestamp.
+    const resetsAt = normalizeForLabelSearch(section.label) === "extrausage"
+      ? null
+      : parseClaudeCliResetsAt(detail, { now: options.now });
     return {
       key: claudeQuotaWindowKey(section.label),
       label: section.label,
       usedPercent,
-      resetsAt: null,
+      resetsAt,
       valueLabel: null,
-      detail: formatClaudeCliDetail(section.label, section.lines),
+      detail,
     };
   });
 
