@@ -637,6 +637,75 @@ describeEmbeddedPostgres("budgetService release gate enforcement", () => {
     });
   });
 
+  it("summarizes a progressive subscription limit against its released share and names the next release", async () => {
+    const { companyId } = await createBudgetFixture();
+    // A session window resetting in two hours started three hours ago: 60% of
+    // the window, and so 60% of a progressive limit, has been released.
+    const resetsAt = new Date(Date.now() + 2 * 60 * 60 * 1000);
+    const sessionWindow = (usedPercent: number): ProviderQuotaResult[] => [
+      {
+        provider: "openai",
+        ok: true,
+        windows: [
+          { key: "five_hour", label: "5h limit", usedPercent, resetsAt: resetsAt.toISOString(), valueLabel: null, detail: null },
+        ],
+      },
+    ];
+    let quota = sessionWindow(40);
+    const service = budgetService(db, {
+      readQuotaSnapshot: async () => ({ results: quota, fetchedAt: new Date() }),
+    });
+    const upsert = (input: { amount: number; progressive?: boolean }) =>
+      service.upsertPolicy(
+        companyId,
+        { scopeType: "company", scopeId: companyId, metric: "subscription_percent", windowKind: "provider_session", ...input },
+        "user-1",
+      );
+
+    const created = await upsert({ amount: 100, progressive: true });
+    expect(created).toMatchObject({ progressive: true, amount: 100, observedAmount: 40, releaseAt: null, releaseWindowUnknown: false, status: "ok" });
+    expect(created.releasedAmount).toBeCloseTo(60, 0);
+    expect(created.remainingAmount).toBeCloseTo(20, 0);
+    expect(mockLogActivity).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ action: "budget.policy_upserted", details: expect.objectContaining({ progressive: true }) }),
+    );
+
+    // Usage ahead of the release is held until the linear release reaches it:
+    // 75% of a 5h window is 1h15m before the reset. The full limit is not
+    // reached, so the status stays ok; the card reads the hold from releaseAt.
+    quota = sessionWindow(75);
+    const ahead = (await service.overview(companyId)).policies[0]!;
+    expect(ahead).toMatchObject({ progressive: true, observedAmount: 75, remainingAmount: 0, status: "ok" });
+    expect(ahead.releaseAt).toBeTruthy();
+    expect(Math.abs(new Date(ahead.releaseAt!).getTime() - (resetsAt.getTime() - 75 * 60 * 1000))).toBeLessThan(1_000);
+
+    // An amount-only update keeps the release mode; an explicit false clears it.
+    expect(await upsert({ amount: 90 })).toMatchObject({ progressive: true, amount: 90 });
+    const cleared = await upsert({ amount: 90, progressive: false });
+    expect(cleared).toMatchObject({ progressive: false, releasedAmount: 90, remainingAmount: 15, releaseAt: null });
+
+    // Without a reset time the window position is unknown: the full limit is
+    // in force and the summary says so rather than claiming "fully released".
+    quota = [
+      {
+        provider: "openai",
+        ok: true,
+        windows: [{ key: "five_hour", label: "5h limit", usedPercent: 40, resetsAt: null, valueLabel: null, detail: null }],
+      },
+    ];
+    const unknownReset = await upsert({ amount: 90, progressive: true });
+    expect(unknownReset).toMatchObject({ progressive: true, releasedAmount: 90, releaseAt: null, releaseWindowUnknown: true });
+
+    // Money budgets never release progressively, whatever the input says.
+    const money = await service.upsertPolicy(
+      companyId,
+      { scopeType: "company", scopeId: companyId, amount: 5000, progressive: true },
+      "user-1",
+    );
+    expect(money).toMatchObject({ metric: "billed_cents", progressive: false, releasedAmount: 5000 });
+  });
+
   it("hard-stops project work until a valid budget raise resumes it and overview reconciles ledger spend", async () => {
     const { companyId, agentId, projectId } = await createBudgetFixture();
     const cancelWorkForScope = vi.fn().mockResolvedValue(undefined);

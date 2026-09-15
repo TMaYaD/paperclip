@@ -229,7 +229,7 @@ describeEmbeddedPostgres("heartbeat subscription window wait", () => {
     return { companyId, agentId, issueId };
   }
 
-  async function seedSessionPolicy(companyId: string, amount: number) {
+  async function seedSessionPolicy(companyId: string, amount: number, options: { progressive?: boolean } = {}) {
     await db.insert(budgetPolicies).values({
       companyId,
       scopeType: "company",
@@ -237,6 +237,7 @@ describeEmbeddedPostgres("heartbeat subscription window wait", () => {
       metric: "subscription_percent",
       windowKind: "provider_session",
       amount,
+      progressive: options.progressive ?? false,
     });
   }
 
@@ -334,6 +335,35 @@ describeEmbeddedPostgres("heartbeat subscription window wait", () => {
       .from(heartbeatRunEvents)
       .where(eq(heartbeatRunEvents.runId, runId));
     expect(events.some((event) => event.message?.startsWith("Deferred until the provider subscription window resets"))).toBe(true);
+  });
+
+  it("defers a run ahead of a progressive limit's released share to the catch-up time, not the reset", async () => {
+    const { companyId, agentId, issueId } = await seedCompanyAgentAndIssue();
+    // The session resets in two hours, so three of its five hours (60%) have
+    // elapsed and 60% of a progressive 100% limit is released. 75% used is
+    // ahead of that; the release reaches 75% at 3.75h into the window, which
+    // is 1h15m before the reset.
+    await seedSessionPolicy(companyId, 100, { progressive: true });
+    currentQuota = quotaResults({ fiveHourUsedPercent: 75 });
+    const { runId } = await seedQueuedRun({ companyId, agentId, issueId, invocationSource: "assignment" });
+
+    await heartbeat.resumeQueuedRuns();
+
+    expect(await waitForCondition(async () => (await readRun(runId))?.status === "scheduled_retry")).toBe(true);
+    const run = await readRun(runId);
+    expect(run?.scheduledRetryReason).toBe(SUBSCRIPTION_WINDOW_WAIT_RETRY_REASON);
+    const expectedRelease = new Date(SATURATED_SESSION_RESET).getTime() - 75 * 60 * 1000;
+    expect(Math.abs(run!.scheduledRetryAt!.getTime() - (expectedRelease + 30_000))).toBeLessThan(5_000);
+    const wait = (run?.resultJson as Record<string, unknown>)?.subscriptionWindowWait as Record<string, unknown>;
+    expect(wait).toMatchObject({ usedPercent: 75, limitPercent: 100, progressive: true, resetsAt: SATURATED_SESSION_RESET });
+    expect(wait.releasedPercent as number).toBeCloseTo(60, 0);
+    expect(Math.abs(new Date(wait.releaseAt as string).getTime() - expectedRelease)).toBeLessThan(5_000);
+    expect(mockAdapterExecute).not.toHaveBeenCalled();
+    const events = await db
+      .select({ message: heartbeatRunEvents.message })
+      .from(heartbeatRunEvents)
+      .where(eq(heartbeatRunEvents.runId, runId));
+    expect(events.some((event) => event.message?.startsWith("Deferred until more of the progressive subscription limit is released"))).toBe(true);
   });
 
   it("promotes the deferred run and executes it once the window has reset", async () => {

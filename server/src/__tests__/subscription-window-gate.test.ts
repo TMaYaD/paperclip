@@ -3,7 +3,9 @@ import type { ProviderQuotaResult, QuotaWindow } from "@paperclipai/shared";
 import {
   boundSubscriptionWindowWait,
   decideSubscriptionWindowWait,
+  evaluateSubscriptionRelease,
   observeSubscriptionWindow,
+  releaseSubscriptionLimit,
   type SubscriptionWindowPolicy,
 } from "../services/subscription-window-gate.ts";
 import { createQuotaSnapshotReader } from "../services/quota-windows.ts";
@@ -28,6 +30,7 @@ function policy(overrides: Partial<SubscriptionWindowPolicy> = {}): Subscription
     scopeId: "company-1",
     windowKind: "provider_session",
     amount: 80,
+    progressive: false,
     ...overrides,
   };
 }
@@ -65,6 +68,9 @@ describe("decideSubscriptionWindowWait", () => {
       usedPercent: 80,
       usageUnknown: false,
       limitPercent: 80,
+      progressive: false,
+      releasedPercent: 80,
+      releaseAt: null,
       resetsAt: "2026-09-13T14:00:00.000Z",
     });
     expect(wait!.resumeAt.toISOString()).toBe("2026-09-13T14:00:30.000Z");
@@ -229,6 +235,166 @@ describe("decideSubscriptionWindowWait", () => {
       now: NOW,
     });
     expect(mislabeled).toMatchObject({ usageUnknown: true, usedPercent: null });
+  });
+});
+
+describe("progressive release", () => {
+  // NOW is 12:00; a session resetting at 14:00 started at 09:00, so 3 of its
+  // 5 hours (60%) have elapsed.
+  const SESSION_RESET = "2026-09-13T14:00:00.000Z";
+  const progressiveSession = () => policy({ amount: 100, progressive: true });
+
+  it("releases a limit linearly over the window and falls back to the full limit without a reset time", () => {
+    expect(
+      releaseSubscriptionLimit({ limitPercent: 100, windowKind: "provider_session", progressive: true, resetsAt: SESSION_RESET, now: NOW }),
+    ).toMatchObject({ releasedPercent: 60, elapsedFraction: 0.6 });
+    // 70% of a week releases 10% a day: 2.5 days into the week, 25% is out.
+    expect(
+      releaseSubscriptionLimit({ limitPercent: 70, windowKind: "provider_week", progressive: true, resetsAt: "2026-09-18T00:00:00.000Z", now: NOW }).releasedPercent,
+    ).toBeCloseTo(25, 10);
+    // A fixed limit is in force in full at any point of the window.
+    expect(
+      releaseSubscriptionLimit({ limitPercent: 100, windowKind: "provider_session", progressive: false, resetsAt: SESSION_RESET, now: NOW }),
+    ).toMatchObject({ releasedPercent: 100, elapsedFraction: 0.6 });
+    // No usable reset (missing or already past): the window position is
+    // unknown, so the ceiling applies and only the smoothing is lost.
+    for (const resetsAt of [null, "2026-09-13T11:00:00.000Z"]) {
+      expect(
+        releaseSubscriptionLimit({ limitPercent: 100, windowKind: "provider_session", progressive: true, resetsAt, now: NOW }),
+      ).toEqual({ releasedPercent: 100, elapsedFraction: null, windowStart: null, windowEnd: null });
+    }
+    // A reset further out than the window is long clamps to "just started".
+    expect(
+      releaseSubscriptionLimit({ limitPercent: 100, windowKind: "provider_session", progressive: true, resetsAt: "2026-09-14T00:00:00.000Z", now: NOW }),
+    ).toMatchObject({ releasedPercent: 0, elapsedFraction: 0 });
+  });
+
+  it("names the moment the release catches up with usage, and the reset once the full limit is used", () => {
+    const held = evaluateSubscriptionRelease({
+      usedPercent: 75, limitPercent: 100, windowKind: "provider_session", progressive: true, resetsAt: SESSION_RESET, now: NOW,
+    });
+    // 75% of a 5h window past its 09:00 start is 12:45.
+    expect(held.held).toBe(true);
+    expect(held.releaseAt?.toISOString()).toBe("2026-09-13T12:45:00.000Z");
+    expect(
+      evaluateSubscriptionRelease({ usedPercent: 59, limitPercent: 100, windowKind: "provider_session", progressive: true, resetsAt: SESSION_RESET, now: NOW }),
+    ).toMatchObject({ held: false, releaseAt: null });
+    expect(
+      evaluateSubscriptionRelease({ usedPercent: 100, limitPercent: 100, windowKind: "provider_session", progressive: true, resetsAt: SESSION_RESET, now: NOW }),
+    ).toMatchObject({ held: true, releaseAt: null });
+    // Nothing used yet is never held, even at the very start of a window when
+    // nothing has been released either.
+    expect(
+      evaluateSubscriptionRelease({ usedPercent: 0, limitPercent: 100, windowKind: "provider_session", progressive: true, resetsAt: "2026-09-13T17:00:00.000Z", now: NOW }),
+    ).toMatchObject({ held: false, releaseAt: null });
+  });
+
+  it("lets a run through while usage is under the released share", () => {
+    expect(
+      decideSubscriptionWindowWait({
+        policies: [progressiveSession()],
+        result: ok([window({ key: "five_hour", usedPercent: 59, resetsAt: SESSION_RESET })]),
+        provider: "anthropic",
+        now: NOW,
+      }),
+    ).toBeNull();
+  });
+
+  it("defers a run ahead of the released share to just after the release catches up, not the reset", () => {
+    const wait = decideSubscriptionWindowWait({
+      policies: [progressiveSession()],
+      result: ok([window({ key: "five_hour", usedPercent: 75, resetsAt: SESSION_RESET })]),
+      provider: "anthropic",
+      now: NOW,
+    });
+    expect(wait).toMatchObject({
+      usedPercent: 75,
+      limitPercent: 100,
+      progressive: true,
+      releasedPercent: 60,
+      releaseAt: "2026-09-13T12:45:00.000Z",
+      usageUnknown: false,
+      resetsAt: SESSION_RESET,
+    });
+    expect(wait!.resumeAt.toISOString()).toBe("2026-09-13T12:45:30.000Z");
+    expect(wait!.reason).toBe(
+      "anthropic session subscription window is at 75%, ahead of the 60% released so far of the progressive 100% limit " +
+        "for company scope; enough is released at 2026-09-13T12:45:00.000Z",
+    );
+
+    // Exactly at the released share counts as ahead: the margin after "now"
+    // lets the release move past the usage before the re-check.
+    const atShare = decideSubscriptionWindowWait({
+      policies: [progressiveSession()],
+      result: ok([window({ key: "five_hour", usedPercent: 60, resetsAt: SESSION_RESET })]),
+      provider: "anthropic",
+      now: NOW,
+    });
+    expect(atShare?.resumeAt.toISOString()).toBe("2026-09-13T12:00:30.000Z");
+
+    // Weekly: 70% releasing 10% a day, 30% used 2.5 days in, catches up at day 3.
+    const week = decideSubscriptionWindowWait({
+      policies: [policy({ id: "policy-week", windowKind: "provider_week", amount: 70, progressive: true })],
+      result: ok([window({ key: "seven_day", usedPercent: 30, resetsAt: "2026-09-18T00:00:00.000Z" })]),
+      provider: "anthropic",
+      now: NOW,
+    });
+    expect(week?.releaseAt).toBe("2026-09-14T00:00:00.000Z");
+    expect(week?.resumeAt.toISOString()).toBe("2026-09-14T00:00:30.000Z");
+    expect(week?.reason).toContain("ahead of the 25% released so far of the progressive 70% limit");
+  });
+
+  it("waits for the reset once the full progressive limit is used", () => {
+    const wait = decideSubscriptionWindowWait({
+      policies: [progressiveSession()],
+      result: ok([window({ key: "five_hour", usedPercent: 100, resetsAt: SESSION_RESET })]),
+      provider: "anthropic",
+      now: NOW,
+    });
+    expect(wait).toMatchObject({ progressive: true, releasedPercent: 60, releaseAt: null, resetsAt: SESSION_RESET });
+    expect(wait!.resumeAt.toISOString()).toBe("2026-09-13T14:00:30.000Z");
+    expect(wait!.reason).toContain("(progressive limit 100% for company scope); window resets at 2026-09-13T14:00:00.000Z");
+  });
+
+  it("applies the full limit when the provider reports no reset time", () => {
+    // Without a window position there is nothing to pro-rate: the ceiling
+    // still holds, and usage under it proceeds as with a fixed limit.
+    expect(
+      decideSubscriptionWindowWait({
+        policies: [policy({ amount: 80, progressive: true })],
+        result: ok([window({ key: "five_hour", usedPercent: 70, resetsAt: null })]),
+        provider: "anthropic",
+        now: NOW,
+      }),
+    ).toBeNull();
+    const saturated = decideSubscriptionWindowWait({
+      policies: [policy({ amount: 80, progressive: true })],
+      result: ok([window({ key: "five_hour", usedPercent: 85, resetsAt: null })]),
+      provider: "anthropic",
+      now: NOW,
+      defaultWaitMs: 60_000,
+    });
+    expect(saturated).toMatchObject({ releasedPercent: 80, releaseAt: null, resetsAt: null });
+    expect(saturated?.resumeAt.toISOString()).toBe("2026-09-13T12:01:00.000Z");
+  });
+
+  it("measures the stale-read rule against the released share", () => {
+    const stale = (usedPercent: number): ProviderQuotaResult => ({
+      provider: "anthropic",
+      ok: true,
+      stale: true,
+      observedAt: "2026-09-13T11:52:00.000Z",
+      error: "Anthropic OAuth usage: 429",
+      windows: [window({ key: "five_hour", usedPercent, resetsAt: SESSION_RESET })],
+    });
+    // Under the released share a stale value cannot vouch for headroom.
+    const below = decideSubscriptionWindowWait({ policies: [progressiveSession()], result: stale(50), provider: "anthropic", now: NOW, unknownWaitMs: 5 * 60_000 });
+    expect(below).toMatchObject({ usageUnknown: true, usedPercent: null, releasedPercent: null });
+    expect(below?.resumeAt.toISOString()).toBe("2026-09-13T12:05:00.000Z");
+    // Ahead of it, usage only grows within a window, so the catch-up time is
+    // a sound (tightening) wait.
+    const ahead = decideSubscriptionWindowWait({ policies: [progressiveSession()], result: stale(75), provider: "anthropic", now: NOW });
+    expect(ahead).toMatchObject({ usageUnknown: false, usedPercent: 75, releaseAt: "2026-09-13T12:45:00.000Z" });
   });
 });
 

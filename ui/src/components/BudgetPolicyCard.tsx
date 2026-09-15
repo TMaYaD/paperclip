@@ -1,10 +1,12 @@
 import { useEffect, useState } from "react";
 import type { BudgetPolicySummary } from "@paperclipai/shared";
-import { AlertTriangle, HelpCircle, PauseCircle, ShieldAlert, Wallet } from "lucide-react";
-import { cn, formatCents, relativeTime } from "../lib/utils";
+import { SUBSCRIPTION_BUDGET_WINDOW_DURATION_MS, isSubscriptionBudgetWindowKind } from "@paperclipai/shared";
+import { AlertTriangle, HelpCircle, Hourglass, PauseCircle, ShieldAlert, Wallet } from "lucide-react";
+import { cn, formatCents, formatDurationMs, relativeTime } from "../lib/utils";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { ToggleSwitch } from "@/components/ui/toggle-switch";
 
 function centsInputValue(value: number) {
   return (value / 100).toFixed(2);
@@ -31,7 +33,25 @@ export function isSubscriptionBudget(summary: Pick<BudgetPolicySummary, "metric"
 }
 
 function formatPercent(value: number) {
-  return `${value}%`;
+  // Released shares are fractional; a tenth of a percent is plenty here.
+  return `${Math.round(value * 10) / 10}%`;
+}
+
+/**
+ * How fast a progressive limit is released, in the unit an operator thinks
+ * in: per hour for the session window, per day for the week.
+ */
+export function progressiveReleaseRate(windowKind: BudgetPolicySummary["windowKind"], amount: number) {
+  if (!isSubscriptionBudgetWindowKind(windowKind) || amount <= 0) return null;
+  const perHour = windowKind === "provider_session";
+  const unitMs = (perHour ? 1 : 24) * 60 * 60 * 1000;
+  const perUnit = (amount * unitMs) / SUBSCRIPTION_BUDGET_WINDOW_DURATION_MS[windowKind];
+  return `${formatPercent(perUnit)} per ${perHour ? "hour" : "day"}`;
+}
+
+function releaseCountdown(releaseAt: string) {
+  const ms = new Date(releaseAt).getTime() - Date.now();
+  return Number.isFinite(ms) && ms > 0 ? formatDurationMs(ms) : "moments";
 }
 
 export function windowLabel(windowKind: BudgetPolicySummary["windowKind"]) {
@@ -55,12 +75,17 @@ function clampPercent(value: number) {
  * Usage bar. In window mode the track is the whole provider window (0-100%),
  * the fill is the observed usage, a marker sits at the configured limit, and
  * any usage past the limit is hatched so "remaining" reads as the gap between
- * the fill and the marker. Money budgets have no natural ceiling, so their bar
- * stays a plain utilization-of-budget fill.
+ * the fill and the marker. A progressive limit adds a second indicator: the
+ * released share so far is tinted on the track and closed by a lighter
+ * marker, and usage past it but under the limit is hatched in the warning
+ * tone, because runs wait there for the next release rather than the reset.
+ * Money budgets have no natural ceiling, so their bar stays a plain
+ * utilization-of-budget fill.
  */
 function BudgetUsageBar({
   usedPercent,
   limitPercent,
+  releasedPercent,
   status,
   unavailable,
   neutral,
@@ -71,6 +96,8 @@ function BudgetUsageBar({
   usedPercent: number;
   /** Limit marker position, or null for a plain utilization bar. */
   limitPercent: number | null;
+  /** Released-share marker position for a progressive limit, or null. */
+  releasedPercent: number | null;
   status: BudgetPolicySummary["status"];
   unavailable: boolean;
   /** No limit is configured, so the fill carries no status meaning. */
@@ -81,7 +108,15 @@ function BudgetUsageBar({
 }) {
   const used = unavailable ? 0 : clampPercent(usedPercent);
   const limit = limitPercent == null ? null : clampPercent(limitPercent);
-  const withinLimit = limit == null ? used : Math.min(used, limit);
+  // The released share only needs its own indicator while it is below the
+  // limit; once fully released the two coincide and the limit marker suffices.
+  const released =
+    limit == null || releasedPercent == null || clampPercent(releasedPercent) >= limit
+      ? null
+      : clampPercent(releasedPercent);
+  const solidEnd = released ?? limit;
+  const withinLimit = solidEnd == null ? used : Math.min(used, solidEnd);
+  const overReleased = released == null || limit == null ? 0 : Math.max(0, Math.min(used, limit) - released);
   const overLimit = limit == null ? 0 : Math.max(0, used - limit);
   const fillClassName = neutral
     ? "bg-muted-foreground/50"
@@ -96,16 +131,26 @@ function BudgetUsageBar({
       : "Budget utilization unknown"
     : limit == null
       ? `Budget utilization: ${Math.round(used)}% used`
-      : `Window usage: ${Math.round(used)}% used, limit ${Math.round(limit)}%`;
+      : `Window usage: ${Math.round(used)}% used, limit ${Math.round(limit)}%` +
+        (released != null ? `, ${Math.round(released)}% released so far` : "");
   return (
     <div className={cn("relative h-2 overflow-hidden rounded-full", className)}>
+      {released != null ? (
+        <div
+          data-testid="budget-released-track"
+          aria-hidden
+          className="absolute inset-y-0 left-0 bg-(--status-task-done)/20"
+          style={{ width: `${released}%` }}
+        />
+      ) : null}
       <div
         role="progressbar"
         aria-valuenow={Math.round(used)}
         aria-valuemin={0}
         aria-valuemax={100}
         aria-label={label}
-        className={cn("h-full rounded-full transition-(--tp-width-background-color) duration-200", fillClassName)}
+        // Positioned so it paints over the released tint but under the overlays below.
+        className={cn("relative h-full rounded-full transition-(--tp-width-background-color) duration-200", fillClassName)}
         style={{ width: `${withinLimit}%` }}
       />
       {held ? (
@@ -116,6 +161,19 @@ function BudgetUsageBar({
           style={{
             backgroundImage:
               "repeating-linear-gradient(135deg, var(--status-task-blocked) 0 2px, transparent 2px 5px)",
+          }}
+        />
+      ) : null}
+      {overReleased > 0 ? (
+        <div
+          data-testid="budget-over-released"
+          aria-hidden
+          className="absolute inset-y-0 bg-(--status-task-todo)/40"
+          style={{
+            left: `${released}%`,
+            width: `${overReleased}%`,
+            backgroundImage:
+              "repeating-linear-gradient(135deg, var(--status-task-todo) 0 2px, transparent 2px 5px)",
           }}
         />
       ) : null}
@@ -132,6 +190,15 @@ function BudgetUsageBar({
           }}
         />
       ) : null}
+      {released != null ? (
+        <div
+          data-testid="budget-released-marker"
+          aria-hidden
+          title={`Released ${Math.round(released)}% so far`}
+          className="absolute inset-y-0 w-0.5 bg-foreground/40"
+          style={{ left: `calc(${released}% - 1px)` }}
+        />
+      ) : null}
       {limit != null && limit > 0 ? (
         <div
           data-testid="budget-limit-marker"
@@ -145,11 +212,16 @@ function BudgetUsageBar({
   );
 }
 
-function statusTone(status: BudgetPolicySummary["status"], usageUnavailable: boolean, usageHeld: boolean) {
+function statusTone(
+  status: BudgetPolicySummary["status"],
+  usageUnavailable: boolean,
+  usageHeld: boolean,
+  releaseWait: boolean,
+) {
   if (usageHeld) return "text-red-700 dark:text-red-300 border-red-500/30 bg-red-500/10";
   if (usageUnavailable) return "text-muted-foreground border-border/70 bg-muted/40";
   if (status === "hard_stop") return "text-red-700 dark:text-red-300 border-red-500/30 bg-red-500/10";
-  if (status === "warning") return "text-amber-700 dark:text-amber-200 border-amber-500/30 bg-amber-500/10";
+  if (status === "warning" || releaseWait) return "text-amber-700 dark:text-amber-200 border-amber-500/30 bg-amber-500/10";
   return "text-emerald-700 dark:text-emerald-200 border-emerald-500/30 bg-emerald-500/10";
 }
 
@@ -161,7 +233,11 @@ export function BudgetPolicyCard({
   variant = "card",
 }: {
   summary: BudgetPolicySummary;
-  onSave?: (amountCents: number) => void;
+  /**
+   * Saves the drafted amount (cents or percent). `progressive` is the drafted
+   * release mode; it is only ever true for a subscription budget.
+   */
+  onSave?: (amount: number, options: { progressive: boolean }) => void;
   isSaving?: boolean;
   compact?: boolean;
   variant?: "card" | "plain";
@@ -170,13 +246,21 @@ export function BudgetPolicyCard({
   const toInputValue = percentMode ? String : centsInputValue;
   const formatAmount = percentMode ? formatPercent : formatCents;
   const [draftBudget, setDraftBudget] = useState(toInputValue(summary.amount));
+  const savedProgressive = percentMode && summary.progressive === true;
+  const [draftProgressive, setDraftProgressive] = useState(savedProgressive);
 
   useEffect(() => {
     setDraftBudget(toInputValue(summary.amount));
   }, [summary.amount, toInputValue]);
+  useEffect(() => {
+    setDraftProgressive(savedProgressive);
+  }, [savedProgressive]);
 
   const parsedDraft = percentMode ? parsePercentInput(draftBudget) : parseDollarInput(draftBudget);
-  const canSave = typeof parsedDraft === "number" && parsedDraft !== summary.amount && Boolean(onSave);
+  const amountChanged = typeof parsedDraft === "number" && parsedDraft !== summary.amount;
+  // A release-mode change on its own only matters with a limit to release.
+  const progressiveChanged = draftProgressive !== savedProgressive && typeof parsedDraft === "number" && parsedDraft > 0;
+  const canSave = Boolean(onSave) && (amountChanged || progressiveChanged);
   // The provider did not report this window: say so, never show a healthy 0%.
   const usageUnavailable = percentMode && summary.usageUnavailable === true;
   // The latest provider read failed and the usage comes from the last good
@@ -187,26 +271,43 @@ export function BudgetPolicyCard({
   // merely "unknown" or "healthy". Without a limit nothing is held.
   const usageHeld = (usageUnavailable || usageStale) && summary.amount > 0;
   const overLimitBy = percentMode && summary.amount > 0 ? summary.observedAmount - summary.amount : 0;
+  // A progressive limit is only partly in force: the released share paces
+  // what may be used right now, and usage at or ahead of it (but under the
+  // full limit) means the gate holds new runs until the next release, which
+  // is the normal rhythm of a progressive budget rather than an alarm.
+  const progressive = savedProgressive && summary.amount > 0;
+  const releasedAmount = progressive ? Math.min(summary.releasedAmount ?? summary.amount, summary.amount) : summary.amount;
+  const releaseWait =
+    progressive &&
+    !usageUnavailable &&
+    !usageStale &&
+    summary.observedAmount > 0 &&
+    summary.observedAmount >= releasedAmount &&
+    summary.observedAmount < summary.amount;
   const StatusIcon = usageHeld
     ? PauseCircle
     : usageUnavailable
       ? HelpCircle
-      : summary.status === "hard_stop"
-      ? ShieldAlert
-      : summary.status === "warning"
-        ? AlertTriangle
-        : Wallet;
+      : releaseWait
+        ? Hourglass
+        : summary.status === "hard_stop"
+          ? ShieldAlert
+          : summary.status === "warning"
+            ? AlertTriangle
+            : Wallet;
   const statusLabel = summary.paused
     ? "Paused"
     : usageHeld
       ? "Runs held"
       : usageUnavailable
         ? "Unknown"
-        : summary.status === "warning"
-        ? "Warning"
-        : summary.status === "hard_stop"
-          ? "Hard stop"
-          : "Healthy";
+        : releaseWait
+          ? "Waiting for release"
+          : summary.status === "warning"
+            ? "Warning"
+            : summary.status === "hard_stop"
+              ? "Hard stop"
+              : "Healthy";
   const observedValue = usageUnavailable ? "Unavailable" : formatAmount(summary.observedAmount);
   const observedBase = summary.amount > 0 ? `${summary.utilizationPercent}% of limit` : "No cap configured";
   const observedCaption = usageUnavailable
@@ -222,8 +323,22 @@ export function BudgetPolicyCard({
     : summary.amount > 0
       ? overLimitBy > 0
         ? `Over limit by ${formatAmount(overLimitBy)}`
-        : formatAmount(summary.remainingAmount)
+        : releaseWait
+          ? `Ahead of release by ${formatAmount(summary.observedAmount - releasedAmount)}` +
+            (summary.releaseAt ? ` · more in ${releaseCountdown(summary.releaseAt)}` : "")
+          : formatAmount(summary.remainingAmount)
       : "Unlimited";
+  const releaseRate = progressiveReleaseRate(summary.windowKind, summary.amount);
+  const budgetCaption = percentMode
+    ? progressive
+      ? `Progressive release${releaseRate ? ` · ${releaseRate}` : ""} · ` +
+        (summary.releaseWindowUnknown
+          ? "reset time unknown, full limit in force"
+          : releasedAmount >= summary.amount
+            ? "fully released"
+            : `${formatPercent(releasedAmount)} released so far`)
+      : "New runs wait for the window reset above the limit"
+    : `Soft alert at ${summary.warnPercent}%${summary.paused && summary.pauseReason ? ` · ${summary.pauseReason} pause` : ""}`;
   const isPlain = variant === "plain";
 
   const observedBudgetGrid = isPlain ? (
@@ -238,11 +353,7 @@ export function BudgetPolicyCard({
         <div className="mt-2 text-xl font-semibold tabular-nums">
           {summary.amount > 0 ? formatAmount(summary.amount) : "Disabled"}
         </div>
-        <div className="mt-1 text-xs text-muted-foreground">
-          {percentMode
-            ? "New runs wait for the window reset above the limit"
-            : `Soft alert at ${summary.warnPercent}%${summary.paused && summary.pauseReason ? ` · ${summary.pauseReason} pause` : ""}`}
-        </div>
+        <div className="mt-1 text-xs text-muted-foreground">{budgetCaption}</div>
       </div>
     </div>
   ) : (
@@ -257,11 +368,7 @@ export function BudgetPolicyCard({
         <div className="mt-2 text-xl font-semibold tabular-nums">
           {summary.amount > 0 ? formatAmount(summary.amount) : "Disabled"}
         </div>
-        <div className="mt-1 text-xs text-muted-foreground">
-          {percentMode
-            ? "New runs wait for the window reset above the limit"
-            : `Soft alert at ${summary.warnPercent}%${summary.paused && summary.pauseReason ? ` · ${summary.pauseReason} pause` : ""}`}
-        </div>
+        <div className="mt-1 text-xs text-muted-foreground">{budgetCaption}</div>
       </div>
     </div>
   );
@@ -276,7 +383,8 @@ export function BudgetPolicyCard({
         <BudgetUsageBar
           usedPercent={summary.observedAmount}
           limitPercent={summary.amount > 0 ? summary.amount : null}
-          status={summary.status}
+          releasedPercent={progressive ? releasedAmount : null}
+          status={releaseWait ? "warning" : summary.status}
           unavailable={usageUnavailable}
           neutral={summary.amount <= 0}
           held={usageHeld}
@@ -286,6 +394,7 @@ export function BudgetPolicyCard({
         <BudgetUsageBar
           usedPercent={summary.amount > 0 ? summary.utilizationPercent : 0}
           limitPercent={null}
+          releasedPercent={null}
           status={summary.status}
           unavailable={false}
           neutral={false}
@@ -307,28 +416,59 @@ export function BudgetPolicyCard({
     </div>
   ) : null;
 
-  const saveSection = onSave ? (
-    <div className={cn("flex flex-col gap-3 sm:flex-row sm:items-end", isPlain ? "" : "rounded-xl border border-border/70 bg-background/50 p-3")}>
-      <div className="min-w-0 flex-1">
-        <label className="text-(length:--text-micro) uppercase tracking-(--tracking-caps) text-muted-foreground">
-          {percentMode ? "Limit (% of window)" : "Budget (USD)"}
-        </label>
-        <Input
-          value={draftBudget}
-          onChange={(event) => setDraftBudget(event.target.value)}
-          className="mt-2"
-          inputMode={percentMode ? "numeric" : "decimal"}
-          placeholder={percentMode ? "0" : "0.00"}
-        />
+  // The rate previews the drafted limit so the operator sees what "10% a
+  // day" means before saving; without a limit there is nothing to pace.
+  const draftRate = progressiveReleaseRate(
+    summary.windowKind,
+    typeof parsedDraft === "number" && parsedDraft > 0 ? parsedDraft : summary.amount,
+  );
+  const progressiveRow = percentMode ? (
+    <div className="flex items-center justify-between gap-3">
+      <div className="min-w-0">
+        <div className="text-sm font-medium">Progressive release</div>
+        <div className="text-xs text-muted-foreground">
+          {draftProgressive
+            ? `Releases the limit evenly over the window${draftRate ? `, about ${draftRate}` : ""}`
+            : "Release the limit evenly over the window instead of all at once"}
+        </div>
       </div>
-      <Button
-        onClick={() => {
-          if (typeof parsedDraft === "number" && onSave) onSave(parsedDraft);
-        }}
-        disabled={!canSave || isSaving || parsedDraft === null}
-      >
-        {isSaving ? "Saving..." : summary.amount > 0 ? (percentMode ? "Update limit" : "Update budget") : (percentMode ? "Set limit" : "Set budget")}
-      </Button>
+      <ToggleSwitch
+        data-testid="budget-progressive-toggle"
+        aria-label="Progressive release"
+        checked={draftProgressive}
+        onCheckedChange={setDraftProgressive}
+        disabled={isSaving}
+      />
+    </div>
+  ) : null;
+
+  const saveSection = onSave ? (
+    <div className={cn("space-y-3", isPlain ? "" : "rounded-xl border border-border/70 bg-background/50 p-3")}>
+      {progressiveRow}
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
+        <div className="min-w-0 flex-1">
+          <label className="text-(length:--text-micro) uppercase tracking-(--tracking-caps) text-muted-foreground">
+            {percentMode ? "Limit (% of window)" : "Budget (USD)"}
+          </label>
+          <Input
+            value={draftBudget}
+            onChange={(event) => setDraftBudget(event.target.value)}
+            className="mt-2"
+            inputMode={percentMode ? "numeric" : "decimal"}
+            placeholder={percentMode ? "0" : "0.00"}
+          />
+        </div>
+        <Button
+          onClick={() => {
+            if (typeof parsedDraft === "number" && onSave) {
+              onSave(parsedDraft, { progressive: percentMode && draftProgressive });
+            }
+          }}
+          disabled={!canSave || isSaving || parsedDraft === null}
+        >
+          {isSaving ? "Saving..." : summary.amount > 0 ? (percentMode ? "Update limit" : "Update budget") : (percentMode ? "Set limit" : "Set budget")}
+        </Button>
+      </div>
     </div>
   ) : null;
 
@@ -348,7 +488,7 @@ export function BudgetPolicyCard({
               "inline-flex items-center gap-2 text-(length:--text-micro) uppercase tracking-(--tracking-caps)",
               usageHeld || summary.status === "hard_stop"
                 ? "text-red-700 dark:text-red-300"
-                : summary.status === "warning"
+                : summary.status === "warning" || releaseWait
                   ? "text-amber-800 dark:text-amber-200"
                   : "text-muted-foreground",
             )}
@@ -382,7 +522,7 @@ export function BudgetPolicyCard({
             <CardTitle className="mt-1 text-base">{summary.scopeName}</CardTitle>
             <CardDescription className="mt-1">{windowLabel(summary.windowKind)}</CardDescription>
           </div>
-          <div className={cn("inline-flex items-center gap-2 rounded-full border px-3 py-1 text-(length:--text-micro) uppercase tracking-(--tracking-caps)", statusTone(summary.status, usageUnavailable, usageHeld))}>
+          <div className={cn("inline-flex items-center gap-2 rounded-full border px-3 py-1 text-(length:--text-micro) uppercase tracking-(--tracking-caps)", statusTone(summary.status, usageUnavailable, usageHeld, releaseWait))}>
             <StatusIcon className="h-3.5 w-3.5" />
             {statusLabel}
           </div>

@@ -237,6 +237,7 @@ export function Costs({
       amount: number;
       windowKind: BudgetPolicySummary["windowKind"];
       metric?: BudgetPolicyUpsertInput["metric"];
+      progressive?: boolean;
     }) =>
       budgetsApi.upsertPolicy(companyId, {
         scopeType: input.scopeType,
@@ -244,6 +245,7 @@ export function Costs({
         amount: input.amount,
         windowKind: input.windowKind,
         ...(input.metric ? { metric: input.metric } : {}),
+        ...(input.progressive != null ? { progressive: input.progressive } : {}),
       }),
     onSuccess: invalidateBudgetViews,
   });
@@ -946,13 +948,14 @@ export function Costs({
                 policies={subscriptionBudgetPolicies}
                 quotaResults={quotaData ?? []}
                 isSaving={policyMutation.isPending}
-                onSave={({ windowKind, amount }) =>
+                onSave={({ windowKind, amount, progressive }) =>
                   policyMutation.mutate({
                     scopeType: "company",
                     scopeId: companyId,
                     amount,
                     windowKind,
                     metric: "subscription_percent",
+                    progressive,
                   })}
               />
 
