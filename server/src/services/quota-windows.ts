@@ -16,8 +16,8 @@ export const QUOTA_SNAPSHOT_TTL_MS = readPositiveIntEnv("PAPERCLIP_QUOTA_SNAPSHO
  * CLI fallback scrapes a terminal, so single reads fail now and then; without
  * this bound each blip would report the provider as unknown for one TTL and
  * flip budget summaries between a measured percent and "unavailable". A
- * provider that stays unreadable past this bound is reported as unavailable,
- * which the dispatch gate treats as fail-open.
+ * provider that stays unreadable past this bound is reported as unavailable;
+ * the dispatch gate then holds runs under a limit for a re-check.
  */
 export const QUOTA_SNAPSHOT_MAX_STALE_MS = readPositiveIntEnv(
   "PAPERCLIP_QUOTA_SNAPSHOT_MAX_STALE_MS",
@@ -84,7 +84,8 @@ function parseObservedAt(result: ProviderQuotaResult): number | null {
  * Builds a memoized reader over `fetchAllQuotaWindows`. One fetch is shared by
  * all concurrent callers, and the result is reused until `ttlMs` has elapsed.
  * The reader never throws: a failed fetch yields per-provider `ok: false` rows,
- * which enforcement treats as "unknown" (fail open) rather than as a block.
+ * which the gate treats as unknown usage (runs under a limit wait for a
+ * re-check; scopes without a limit proceed).
  *
  * A provider whose refresh fails keeps its last successful result, marked
  * `stale` and carrying the new error, until that result is older than
