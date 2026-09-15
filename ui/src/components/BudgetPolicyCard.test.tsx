@@ -60,7 +60,8 @@ describe("BudgetPolicyCard", () => {
     const bar = container.querySelector('[role="progressbar"]') as HTMLElement;
     const marker = container.querySelector('[data-testid="budget-limit-marker"]') as HTMLElement | null;
     const over = container.querySelector('[data-testid="budget-over-limit"]') as HTMLElement | null;
-    return { bar, marker, over };
+    const held = container.querySelector('[data-testid="budget-usage-held"]') as HTMLElement | null;
+    return { bar, marker, over, held };
   }
 
   it("draws subscription usage on the whole window with a marker at the limit", () => {
@@ -114,16 +115,36 @@ describe("BudgetPolicyCard", () => {
     expect(container.textContent).toContain("Healthy");
   });
 
-  it("renders an empty bar and an Unknown status when the provider never reported the window", () => {
-    const { bar, marker } = render(
+  it("shows the limit over a hatched track and a held status when usage is unknown under a limit", () => {
+    // The gate holds new runs whenever a limit cannot be checked, so the card
+    // keeps the marker and reads as held, not merely unknown.
+    const { bar, marker, over, held } = render(
       subscriptionSummary({ amount: 80, observedAmount: 0, usageUnavailable: true }),
+    );
+    expect(bar.style.width).toBe("0%");
+    expect(bar.getAttribute("aria-label")).toBe("Window usage unknown, limit 80%; new runs are held");
+    expect(marker?.style.left).toBe("calc(80% - 1px)");
+    expect(held).not.toBeNull();
+    expect(over).toBeNull();
+    expect(container.textContent).toContain("Runs held");
+    expect(container.textContent).toContain("Unavailable");
+    expect(container.textContent).toContain("Provider did not report this window · new runs wait until it does");
+    expect(container.textContent).toContain("Remaining");
+    expect(container.textContent).not.toContain("Healthy");
+  });
+
+  it("renders an empty bar and an Unknown status when usage is unknown and no limit is set", () => {
+    const { bar, marker, held } = render(
+      subscriptionSummary({ amount: 0, observedAmount: 0, isActive: false, usageUnavailable: true }),
     );
     expect(bar.style.width).toBe("0%");
     expect(bar.getAttribute("aria-label")).toBe("Budget utilization unknown");
     expect(marker).toBeNull();
-    expect(container.textContent).toContain("Unavailable");
-    expect(container.textContent).toContain("Provider did not report this window");
+    expect(held).toBeNull();
     expect(container.textContent).toContain("Unknown");
+    expect(container.textContent).not.toContain("Runs held");
+    expect(container.textContent).toContain("Provider did not report this window");
+    expect(container.textContent).not.toContain("new runs wait");
   });
 
   it("keeps money budgets as a plain utilization bar", () => {

@@ -501,9 +501,37 @@ describeEmbeddedPostgres("heartbeat subscription window wait", () => {
     expect(mockAdapterExecute).toHaveBeenCalledTimes(1);
   });
 
-  it("runs normally when the quota snapshot is unavailable (fail open)", async () => {
+  it("holds a run for a re-check when the quota snapshot is unavailable and a limit is set", async () => {
     const { companyId, agentId, issueId } = await seedCompanyAgentAndIssue();
     await seedSessionPolicy(companyId, 80);
+    currentQuota = [{ provider: "openai", ok: false, error: "usage endpoint down", windows: [] }];
+    const { runId } = await seedQueuedRun({ companyId, agentId, issueId, invocationSource: "assignment" });
+    const before = Date.now();
+
+    await heartbeat.resumeQueuedRuns();
+
+    // Dispatching blind is how a limit gets busted: the run waits for the
+    // unknown-usage re-check instead of starting, and the wait says why.
+    expect(await waitForCondition(async () => (await readRun(runId))?.status === "scheduled_retry")).toBe(true);
+    const run = await readRun(runId);
+    expect(run?.scheduledRetryReason).toBe(SUBSCRIPTION_WINDOW_WAIT_RETRY_REASON);
+    expect(run?.scheduledRetryAttempt).toBe(1);
+    expect(run?.errorCode).toBeNull();
+    const retryDelayMs = (run?.scheduledRetryAt?.getTime() ?? 0) - before;
+    expect(retryDelayMs).toBeGreaterThanOrEqual(5 * 60_000 - 1_000);
+    expect(retryDelayMs).toBeLessThanOrEqual(5 * 60_000 + 30_000);
+    expect((run?.resultJson as Record<string, unknown>)?.subscriptionWindowWait).toMatchObject({
+      quotaKey: "five_hour",
+      usedPercent: null,
+      usageUnknown: true,
+      limitPercent: 80,
+      provider: "openai",
+    });
+    expect(mockAdapterExecute).not.toHaveBeenCalled();
+  });
+
+  it("runs normally when the quota snapshot is unavailable and no limit is set", async () => {
+    const { companyId, agentId, issueId } = await seedCompanyAgentAndIssue();
     currentQuota = [{ provider: "openai", ok: false, error: "usage endpoint down", windows: [] }];
     const { runId } = await seedQueuedRun({ companyId, agentId, issueId, invocationSource: "assignment" });
 
