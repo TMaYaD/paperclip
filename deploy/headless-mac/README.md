@@ -44,13 +44,13 @@ Run as `paperclipai`. Prerequisites already on the box: the managed
 `launchctl`.
 
 ```sh
-# 1. gitmon binary (macOS amd64 release)
+# 1. gitmon binary: the release asset is a bare executable, not an archive
+#    (pin the version; check https://github.com/TMaYaD/gitmon/releases)
 mkdir -p ~/.local/bin
-curl -fsSL -o /tmp/gitmon.tar.gz \
-  "$(curl -fsSL https://api.github.com/repos/TMaYaD/gitmon/releases/latest \
-     | grep browser_download_url | grep -i darwin | grep -i amd64 | head -1 | cut -d '"' -f 4)"
-tar -xzf /tmp/gitmon.tar.gz -C ~/.local/bin gitmon
+curl -fsSL -o ~/.local/bin/gitmon \
+  https://github.com/TMaYaD/gitmon/releases/download/v0.10.0/gitmon-darwin-amd64
 chmod +x ~/.local/bin/gitmon
+~/.local/bin/gitmon -h
 
 # 2. the clone gitmon watches (HTTPS: public repo, no credentials needed)
 mkdir -p ~/gitmon
