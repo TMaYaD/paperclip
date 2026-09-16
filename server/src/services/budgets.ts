@@ -33,6 +33,7 @@ import {
 } from "./quota-windows.js";
 import {
   evaluateSubscriptionRelease,
+  isSubscriptionUsageHeld,
   observeSubscriptionWindow,
   type SubscriptionWindowObservation,
 } from "./subscription-window-gate.js";
@@ -423,6 +424,19 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
     const releaseAt = release && !usageUnavailable && release.releaseAt ? release.releaseAt.toISOString() : null;
     const releaseWindowUnknown = progressive && release != null && release.release.elapsedFraction == null;
     const remainingAmount = amount > 0 ? Math.max(0, releasedAmount - observedAmount) : 0;
+    // Whether the gate is holding new runs on this observation, by the gate's
+    // own rule (unreadable usage under a limit, or a stale read it will not
+    // accept against the share in force now), so the card never says "held"
+    // while runs are flowing or the other way round.
+    const usageHeld = isSubscription
+      ? isSubscriptionUsageHeld({
+          limitPercent: amount > 0 ? releasedAmount : 0,
+          usedPercent: observation?.usedPercent ?? null,
+          stale: observation?.stale === true,
+          observedAt: observation?.observedAt,
+          now,
+        })
+      : false;
     return {
       policyId: policy.id,
       companyId: policy.companyId,
@@ -441,6 +455,7 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
       utilizationPercent,
       usageUnavailable,
       usageStale,
+      usageHeld,
       usageObservedAt: isSubscription ? observation?.observedAt ?? null : null,
       warnPercent: policy.warnPercent,
       hardStopEnabled: policy.hardStopEnabled,

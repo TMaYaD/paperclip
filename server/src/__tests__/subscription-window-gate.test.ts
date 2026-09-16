@@ -4,11 +4,13 @@ import {
   boundSubscriptionWindowWait,
   decideSubscriptionWindowWait,
   evaluateSubscriptionRelease,
+  isSubscriptionUsageHeld,
+  judgeStaleRead,
   observeSubscriptionWindow,
   releaseSubscriptionLimit,
   type SubscriptionWindowPolicy,
 } from "../services/subscription-window-gate.ts";
-import { createQuotaSnapshotReader } from "../services/quota-windows.ts";
+import { createQuotaSnapshotReader, isRateLimitedQuotaResult } from "../services/quota-windows.ts";
 
 const NOW = new Date("2026-09-13T12:00:00.000Z");
 
@@ -153,11 +155,12 @@ describe("decideSubscriptionWindowWait", () => {
     expect(noRow).toMatchObject({ usageUnknown: true });
   });
 
-  it("lets a stale read defer to the reset but never clear a run", () => {
+  it("lets a stale read defer to the reset, and clear a run only while young with headroom", () => {
     const staleAt = {
       provider: "anthropic",
       ok: true,
       stale: true,
+      rateLimited: true,
       observedAt: "2026-09-13T11:52:00.000Z",
       error: "Anthropic OAuth usage: 429",
       windows: [window({ key: "five_hour", usedPercent: 85, resetsAt: "2026-09-13T14:00:00.000Z" })],
@@ -166,19 +169,55 @@ describe("decideSubscriptionWindowWait", () => {
     expect(saturated).toMatchObject({ usedPercent: 85, usageUnknown: false, resetsAt: "2026-09-13T14:00:00.000Z" });
     expect(saturated?.resumeAt.toISOString()).toBe("2026-09-13T14:00:30.000Z");
 
-    // Below the limit the stale value cannot vouch for headroom: usage may have
-    // crossed the limit since that read, so the run holds for a re-check.
-    const below = decideSubscriptionWindowWait({
+    // Eight minutes old is older than the gate accepts, however much headroom.
+    const tooOld = decideSubscriptionWindowWait({
       policies: [policy()],
       result: { ...staleAt, windows: [window({ key: "five_hour", usedPercent: 40 })] },
       provider: "anthropic",
       now: NOW,
       unknownWaitMs: 5 * 60_000,
+      staleReadMaxAgeMs: 3 * 60_000,
     });
-    expect(below).toMatchObject({ usedPercent: null, usageUnknown: true });
-    expect(below?.resumeAt.toISOString()).toBe("2026-09-13T12:05:00.000Z");
-    expect(below?.reason).toContain("last good read of 40% at 2026-09-13T11:52:00.000Z cannot clear the limit");
-    expect(below?.reason).toContain("Anthropic OAuth usage: 429");
+    expect(tooOld).toMatchObject({ usedPercent: null, usageUnknown: true });
+    expect(tooOld?.resumeAt.toISOString()).toBe("2026-09-13T12:05:00.000Z");
+    expect(tooOld?.reason).toContain("was throttled (Anthropic OAuth usage: 429)");
+    expect(tooOld?.reason).toContain("last good read of 40% at 2026-09-13T11:52:00.000Z is 8 min old, older than the gate accepts");
+
+    // By default even a one-minute-old read at 40% holds: stale reads never
+    // clear a run unless the operator opts in.
+    const young = { ...staleAt, observedAt: "2026-09-13T11:59:00.000Z" };
+    const strict = decideSubscriptionWindowWait({
+      policies: [policy()],
+      result: { ...young, windows: [window({ key: "five_hour", usedPercent: 40 })] },
+      provider: "anthropic",
+      now: NOW,
+    });
+    expect(strict).toMatchObject({ usedPercent: null, usageUnknown: true });
+    expect(strict?.reason).toContain("stale reads are not accepted unless PAPERCLIP_SUBSCRIPTION_WINDOW_STALE_READ_MAX_AGE_MS is set");
+
+    // Opted in with a three-minute allowance, that read clears the run: a
+    // throttled minute no longer holds every queued run.
+    expect(
+      decideSubscriptionWindowWait({
+        policies: [policy()],
+        result: { ...young, windows: [window({ key: "five_hour", usedPercent: 40 })] },
+        provider: "anthropic",
+        now: NOW,
+        staleReadMaxAgeMs: 3 * 60_000,
+      }),
+    ).toBeNull();
+
+    // The same age at 79.5% projects past 80% with one percent a minute of
+    // drift, so it holds even when opted in.
+    const tight = decideSubscriptionWindowWait({
+      policies: [policy()],
+      result: { ...young, windows: [window({ key: "five_hour", usedPercent: 79.5 })] },
+      provider: "anthropic",
+      now: NOW,
+      staleReadMaxAgeMs: 3 * 60_000,
+    });
+    expect(tight).toMatchObject({ usedPercent: null, usageUnknown: true });
+    expect(tight?.reason).toContain("is 1 min old, which with usage drift may already be at the limit");
 
     // A fresh read below the limit clears the run as before.
     expect(
@@ -398,6 +437,44 @@ describe("progressive release", () => {
   });
 });
 
+describe("judgeStaleRead", () => {
+  it("clears only a young read whose drift-adjusted usage stays under the limit", () => {
+    const base = { usedPercent: 40, limitPercent: 80, now: NOW, maxAgeMs: 3 * 60_000, driftPercentPerMinute: 1 };
+    expect(judgeStaleRead({ ...base, observedAt: "2026-09-13T11:58:00.000Z" })).toEqual({
+      clears: true,
+      ageMs: 120_000,
+      projectedPercent: 42,
+    });
+    expect(judgeStaleRead({ ...base, observedAt: "2026-09-13T11:56:00.000Z" })).toMatchObject({ clears: false, why: "too_old" });
+    expect(judgeStaleRead({ ...base, usedPercent: 78.5, observedAt: "2026-09-13T11:58:00.000Z" })).toMatchObject({
+      clears: false,
+      why: "no_headroom",
+      projectedPercent: 80.5,
+    });
+    expect(judgeStaleRead({ ...base, observedAt: null })).toMatchObject({ clears: false, why: "no_read_time" });
+    // The strict default: no allowance at all, whatever the age or headroom.
+    expect(judgeStaleRead({ ...base, maxAgeMs: 0, observedAt: "2026-09-13T11:59:00.000Z" })).toMatchObject({ clears: false, why: "disabled" });
+    expect(judgeStaleRead({ usedPercent: 40, limitPercent: 80, now: NOW, observedAt: "2026-09-13T11:59:00.000Z" })).toMatchObject({ clears: false, why: "disabled" });
+    // A read from the future is treated as current, never as negative age.
+    expect(judgeStaleRead({ ...base, observedAt: "2026-09-13T12:01:00.000Z" })).toMatchObject({ clears: true, ageMs: 0 });
+  });
+});
+
+describe("isSubscriptionUsageHeld", () => {
+  it("mirrors the gate for the budget card", () => {
+    expect(isSubscriptionUsageHeld({ limitPercent: 0, usedPercent: null, stale: false, observedAt: null })).toBe(false);
+    expect(isSubscriptionUsageHeld({ limitPercent: 80, usedPercent: null, stale: false, observedAt: null })).toBe(true);
+    expect(isSubscriptionUsageHeld({ limitPercent: 80, usedPercent: 40, stale: false, observedAt: null })).toBe(false);
+    // At or above the limit the run defers to the reset: a hard stop, not a hold.
+    expect(isSubscriptionUsageHeld({ limitPercent: 80, usedPercent: 90, stale: true, observedAt: "2026-09-13T11:59:00.000Z", now: NOW })).toBe(false);
+    // Strict by default: a young stale read still holds.
+    expect(isSubscriptionUsageHeld({ limitPercent: 80, usedPercent: 40, stale: true, observedAt: "2026-09-13T11:59:00.000Z", now: NOW })).toBe(true);
+    // Opted in, a young read with headroom clears and an old one holds.
+    expect(isSubscriptionUsageHeld({ limitPercent: 80, usedPercent: 40, stale: true, observedAt: "2026-09-13T11:59:00.000Z", now: NOW, staleReadMaxAgeMs: 3 * 60_000 })).toBe(false);
+    expect(isSubscriptionUsageHeld({ limitPercent: 80, usedPercent: 40, stale: true, observedAt: "2026-09-13T11:50:00.000Z", now: NOW, staleReadMaxAgeMs: 3 * 60_000 })).toBe(true);
+  });
+});
+
 describe("observeSubscriptionWindow", () => {
   it("reads the matching window from an ok provider result", () => {
     const result: ProviderQuotaResult = {
@@ -568,6 +645,7 @@ describe("createQuotaSnapshotReader", () => {
       stale: true,
       error: "Claude CLI /usage: probe ended early",
       errorFamily: null,
+      rateLimited: false,
     });
     // The other provider refreshed fine and is not stale.
     expect(second.results[1]).toMatchObject({ provider: "openai", ok: true, observedAt: later.toISOString() });
@@ -599,6 +677,67 @@ describe("createQuotaSnapshotReader", () => {
     const later = new Date(NOW.getTime() + 8_000);
     vi.setSystemTime(later);
     expect((await read({ now: later })).results[0]).toEqual(failure);
+  });
+
+  it("retries a throttled read after a short delay, at most a few times, then waits out the ttl", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const good: ProviderQuotaResult = {
+      provider: "anthropic",
+      ok: true,
+      windows: [window({ key: "five_hour", usedPercent: 40 })],
+    };
+    const throttled: ProviderQuotaResult = {
+      provider: "anthropic",
+      ok: false,
+      rateLimited: true,
+      error: "Anthropic OAuth usage: anthropic usage api returned 429 (rate limited)",
+      windows: [],
+    };
+    const fetch = vi
+      .fn<() => Promise<ProviderQuotaResult[]>>()
+      .mockResolvedValueOnce([good])
+      .mockResolvedValue([throttled]);
+    const read = createQuotaSnapshotReader({
+      fetch,
+      ttlMs: 120_000,
+      maxStaleMs: 10 * 60_000,
+      throttleRetryMs: 20_000,
+      maxThrottleRetries: 2,
+    });
+
+    const at = async (offsetMs: number) => {
+      const now = new Date(NOW.getTime() + offsetMs);
+      vi.setSystemTime(now);
+      return read({ now });
+    };
+
+    await at(0);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    // First refresh after the ttl is throttled: the last good read stands in,
+    // flagged as throttled, and the next refresh comes after the short delay.
+    const first = await at(120_000);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(first.results[0]).toMatchObject({ ok: true, stale: true, rateLimited: true, error: throttled.error });
+    expect((await at(130_000)).results[0]).toMatchObject({ stale: true });
+    expect(fetch).toHaveBeenCalledTimes(2);
+    await at(140_000);
+    expect(fetch).toHaveBeenCalledTimes(3);
+    await at(160_000);
+    expect(fetch).toHaveBeenCalledTimes(4);
+    // Retries exhausted: the next refresh waits the full ttl.
+    await at(180_000);
+    await at(200_000);
+    expect(fetch).toHaveBeenCalledTimes(4);
+    await at(280_000);
+    expect(fetch).toHaveBeenCalledTimes(5);
+  });
+
+  it("recognises a throttled read by flag or by a 429 in the error text", () => {
+    expect(isRateLimitedQuotaResult({ provider: "anthropic", ok: false, rateLimited: true, windows: [] })).toBe(true);
+    expect(isRateLimitedQuotaResult({ provider: "anthropic", ok: false, error: "usage api returned 429", windows: [] })).toBe(true);
+    expect(isRateLimitedQuotaResult({ provider: "anthropic", ok: false, error: "probe ended early", windows: [] })).toBe(false);
+    expect(isRateLimitedQuotaResult({ provider: "anthropic", ok: true, windows: [] })).toBe(false);
   });
 
   it("attributes a fetch that throws outright to every known provider so their last good read stands in", async () => {

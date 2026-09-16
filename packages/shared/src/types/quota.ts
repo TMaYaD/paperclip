@@ -26,6 +26,8 @@ export interface ProviderQuotaResult {
   errorFamily?: string | null;
   /** error message when ok is false, or the latest failed read when `stale` is true */
   error?: string;
+  /** True when the latest read was throttled by the provider (HTTP 429), not broken. */
+  rateLimited?: boolean;
   /**
    * ISO timestamp of the provider read that produced `windows`. Set by the
    * server's memoized quota snapshot; absent on a raw adapter result.

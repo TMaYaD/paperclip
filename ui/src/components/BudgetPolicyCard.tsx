@@ -159,8 +159,7 @@ function BudgetUsageBar({
           aria-hidden
           className="absolute inset-0 bg-(--status-task-blocked)/25"
           style={{
-            backgroundImage:
-              "repeating-linear-gradient(135deg, var(--status-task-blocked) 0 2px, transparent 2px 5px)",
+            backgroundImage: "var(--hatch-blocked)",
           }}
         />
       ) : null}
@@ -185,8 +184,7 @@ function BudgetUsageBar({
           style={{
             left: `${limit}%`,
             width: `${overLimit}%`,
-            backgroundImage:
-              "repeating-linear-gradient(135deg, var(--status-task-blocked) 0 2px, transparent 2px 5px)",
+            backgroundImage: "var(--hatch-blocked)",
           }}
         />
       ) : null}
@@ -266,10 +264,13 @@ export function BudgetPolicyCard({
   // The latest provider read failed and the usage comes from the last good
   // read: still a measurement, so keep the value and say how old it is.
   const usageStale = percentMode && !usageUnavailable && summary.usageStale === true;
-  // A limit that cannot be checked holds new runs (the gate fails closed, and
-  // a stale read never clears a run), so the card reads as "held" rather than
-  // merely "unknown" or "healthy". Without a limit nothing is held.
-  const usageHeld = (usageUnavailable || usageStale) && summary.amount > 0;
+  // Whether the gate is holding new runs on this observation. The server
+  // computes it with the gate's own rule (unreadable usage under a limit, or
+  // a stale read too old or too close to the limit); a summary without the
+  // flag falls back to the conservative reading. Without a limit nothing is
+  // ever held.
+  const usageHeld =
+    percentMode && summary.amount > 0 && (summary.usageHeld ?? (usageUnavailable || usageStale));
   const overLimitBy = percentMode && summary.amount > 0 ? summary.observedAmount - summary.amount : 0;
   // A progressive limit is only partly in force: the released share paces
   // what may be used right now, and usage at or ahead of it (but under the
@@ -316,7 +317,7 @@ export function BudgetPolicyCard({
       : "Provider did not report this window"
     : usageStale
       ? `${observedBase} · as of ${summary.usageObservedAt ? relativeTime(summary.usageObservedAt) : "an earlier read"}, latest read failed` +
-        (usageHeld ? "; new runs wait for a fresh read" : "")
+        (usageHeld ? "; new runs wait for a fresh read" : "; new runs still clear on this read")
       : observedBase;
   const remainingValue = usageUnavailable
     ? "Unknown"

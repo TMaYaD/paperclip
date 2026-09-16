@@ -5,10 +5,23 @@ const QUOTA_PROVIDER_TIMEOUT_MS = 20_000;
 
 /**
  * How long a provider quota snapshot stays fresh for enforcement reads.
- * Provider usage endpoints are rate limited, and the Claude CLI fallback runs a
- * multi-second terminal probe, so enforcement never fetches on every dispatch.
+ * Provider usage endpoints are rate limited (the Anthropic OAuth usage endpoint
+ * allows about one read per minute per account, shared with every other client
+ * of that account), and the Claude CLI fallback runs a multi-second terminal
+ * probe, so enforcement never fetches on every dispatch and the default
+ * cadence stays well under that ceiling.
  */
-export const QUOTA_SNAPSHOT_TTL_MS = readPositiveIntEnv("PAPERCLIP_QUOTA_SNAPSHOT_TTL_MS", 60_000);
+export const QUOTA_SNAPSHOT_TTL_MS = readPositiveIntEnv("PAPERCLIP_QUOTA_SNAPSHOT_TTL_MS", 120_000);
+
+/**
+ * How soon a throttled read (HTTP 429) is retried, and how many such retries
+ * one refresh cycle may make before waiting out the full TTL. A 429 means the
+ * endpoint is healthy and another client used this minute's read, so a short
+ * wait usually clears it; the cap keeps a sustained throttle from turning into
+ * the retry loops that public reports say can get a token flagged.
+ */
+export const QUOTA_SNAPSHOT_THROTTLE_RETRY_MS = readPositiveIntEnv("PAPERCLIP_QUOTA_SNAPSHOT_THROTTLE_RETRY_MS", 20_000);
+export const QUOTA_SNAPSHOT_THROTTLE_RETRIES = readPositiveIntEnv("PAPERCLIP_QUOTA_SNAPSHOT_THROTTLE_RETRIES", 2);
 
 /**
  * How long the last successful read of a provider keeps standing in for a
@@ -94,15 +107,28 @@ function parseObservedAt(result: ProviderQuotaResult): number | null {
  * `maxStaleMs`. Every ok row is stamped with `observedAt` so consumers can say
  * how old the usage is.
  */
+export function isRateLimitedQuotaResult(result: ProviderQuotaResult): boolean {
+  if (result.ok) return false;
+  if (result.rateLimited === true) return true;
+  return typeof result.error === "string" && /\b429\b/.test(result.error);
+}
+
 export function createQuotaSnapshotReader(options: {
   fetch?: () => Promise<ProviderQuotaResult[]>;
   ttlMs?: number;
   maxStaleMs?: number;
+  throttleRetryMs?: number;
+  maxThrottleRetries?: number;
 } = {}): QuotaSnapshotReader {
   const fetch = options.fetch ?? fetchAllQuotaWindows;
   const ttlMs = options.ttlMs ?? QUOTA_SNAPSHOT_TTL_MS;
   const maxStaleMs = options.maxStaleMs ?? QUOTA_SNAPSHOT_MAX_STALE_MS;
+  const throttleRetryMs = options.throttleRetryMs ?? QUOTA_SNAPSHOT_THROTTLE_RETRY_MS;
+  const maxThrottleRetries = options.maxThrottleRetries ?? QUOTA_SNAPSHOT_THROTTLE_RETRIES;
   let cached: QuotaSnapshot | null = null;
+  /** When the cached snapshot may be refreshed: the TTL, or sooner after a throttle. */
+  let refreshAt = 0;
+  let throttleRetries = 0;
   let inFlight: Promise<QuotaSnapshot> | null = null;
   /** Last ok result per provider, reused while that provider's refresh fails. */
   const lastGood = new Map<string, ProviderQuotaResult>();
@@ -130,13 +156,14 @@ export function createQuotaSnapshotReader(options: {
         stale: true,
         error: result.error,
         errorFamily: result.errorFamily ?? null,
+        rateLimited: result.rateLimited === true,
       };
     });
   }
 
   return async (input = {}) => {
     const now = input.now ?? new Date();
-    if (cached && now.getTime() - cached.fetchedAt.getTime() < ttlMs) return cached;
+    if (cached && now.getTime() < refreshAt) return cached;
     if (inFlight) return inFlight;
     inFlight = fetch()
       .then(
@@ -154,6 +181,14 @@ export function createQuotaSnapshotReader(options: {
       )
       .then((results) => {
         const fetchedAt = new Date();
+        const throttled = results.some(isRateLimitedQuotaResult);
+        if (throttled && throttleRetries < maxThrottleRetries) {
+          throttleRetries += 1;
+          refreshAt = fetchedAt.getTime() + throttleRetryMs;
+        } else {
+          throttleRetries = 0;
+          refreshAt = fetchedAt.getTime() + ttlMs;
+        }
         const snapshot: QuotaSnapshot = { results: reconcile(results, fetchedAt), fetchedAt };
         cached = snapshot;
         return snapshot;
