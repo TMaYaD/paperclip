@@ -112,6 +112,22 @@ after `PAPERCLIP_QUOTA_SNAPSHOT_THROTTLE_RETRY_MS` (default 20s), at most
 before waiting out the TTL; the cap keeps a sustained throttle from becoming
 the retry loop that public reports say can get a token flagged.
 
+Live runs also feed the snapshot. Every Messages API response carries the
+subscription window utilization in its rate-limit headers; Claude Code turns
+them into a `rate_limit_event`, the Claude ACP bridge forwards that as
+`_meta["_claude/rateLimit"]` on a `usage_update`, and the patched `acpx`
+runtime keeps it as `rateLimit` on the status event (upstream drops all but
+`_meta.usage`). The ACP engine hands it to the host through
+`onProviderQuotaObserved`, and the server normalizes it (`rateLimitType` to
+the window key, utilization to a percent, `resetsAt` to ISO) and folds it into
+the shared snapshot as a fresh row for that provider. Each event describes one
+window, the representative claim, so the probe keeps its cadence to fill in the
+rest; the harvest just makes the snapshot current between probes and gives a
+throttled probe a recent read to fall back on. The first window seen per
+process is logged with its raw payload so an operator can confirm the scale.
+Only the direct ACP engine path is wired; the runner sidecar passes the field
+through but the native runtime does not consume it yet.
+
 Single provider reads fail now and then: the Anthropic usage endpoint is rate
 limited and the Claude CLI fallback scrapes a terminal. A failed refresh
 therefore keeps the provider's last successful result, marked `stale` and
