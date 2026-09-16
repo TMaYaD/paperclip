@@ -148,12 +148,38 @@ export function createQuotaSnapshotReader(options: {
   let inFlight: Promise<QuotaSnapshot> | null = null;
   /** Last ok result per provider, reused while that provider's refresh fails. */
   const lastGood = new Map<string, ProviderQuotaResult>();
+  /**
+   * Windows observed from live runs, per provider and window key, with the
+   * time each was observed. A probe's data is as old as the moment the probe
+   * started, so a window observed after that moment outranks the probe's copy
+   * of it; older observations are dropped once a probe supersedes them.
+   */
+  const harvested = new Map<string, Map<string, { window: QuotaWindow; observedAt: number }>>();
 
-  function reconcile(results: ProviderQuotaResult[], fetchedAt: Date): ProviderQuotaResult[] {
+  function mergeNewerObservations(result: ProviderQuotaResult, probeStartedAt: Date): QuotaWindow[] {
+    const newer = harvested.get(result.provider);
+    if (!newer) return result.windows;
+    let windows = result.windows;
+    for (const [key, entry] of newer) {
+      if (entry.observedAt <= probeStartedAt.getTime()) {
+        newer.delete(key);
+        continue;
+      }
+      windows = windows.filter((window) => window.key !== key);
+      windows.push(entry.window);
+    }
+    return windows;
+  }
+
+  function reconcile(results: ProviderQuotaResult[], fetchedAt: Date, probeStartedAt: Date): ProviderQuotaResult[] {
     const observedAt = fetchedAt.toISOString();
     return results.map((result) => {
       if (result.ok) {
-        const fresh: ProviderQuotaResult = { ...result, observedAt };
+        const fresh: ProviderQuotaResult = {
+          ...result,
+          windows: mergeNewerObservations(result, probeStartedAt),
+          observedAt,
+        };
         lastGood.set(result.provider, fresh);
         return fresh;
       }
@@ -179,6 +205,10 @@ export function createQuotaSnapshotReader(options: {
 
   function observe(observation: QuotaWindowObservation) {
     const observedAt = observation.observedAt.toISOString();
+    const key = observation.window.key ?? "";
+    const perProvider = harvested.get(observation.provider) ?? new Map();
+    perProvider.set(key, { window: observation.window, observedAt: observation.observedAt.getTime() });
+    harvested.set(observation.provider, perProvider);
     const previous = lastGood.get(observation.provider);
     const windows = (previous?.windows ?? []).filter((window) => window.key !== observation.window.key);
     windows.push(observation.window);
@@ -201,6 +231,7 @@ export function createQuotaSnapshotReader(options: {
     const now = input.now ?? new Date();
     if (cached && now.getTime() < refreshAt) return cached;
     if (inFlight) return inFlight;
+    const probeStartedAt = new Date();
     inFlight = fetch()
       .then(
         (results) => results,
@@ -225,7 +256,7 @@ export function createQuotaSnapshotReader(options: {
           throttleRetries = 0;
           refreshAt = fetchedAt.getTime() + ttlMs;
         }
-        const snapshot: QuotaSnapshot = { results: reconcile(results, fetchedAt), fetchedAt };
+        const snapshot: QuotaSnapshot = { results: reconcile(results, fetchedAt, probeStartedAt), fetchedAt };
         cached = snapshot;
         return snapshot;
       })

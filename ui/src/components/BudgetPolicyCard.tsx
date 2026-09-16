@@ -135,8 +135,8 @@ function BudgetUsageBar({
           data-testid="budget-limit-marker"
           aria-hidden
           title={`Limit ${Math.round(limit)}%`}
-          className="absolute inset-y-0 w-0.5 bg-foreground/70"
-          style={{ left: `calc(${limit}% - 1px)` }}
+          className="absolute inset-y-0 w-0.5 -translate-x-1/2 bg-foreground/70"
+          style={{ left: `${limit}%` }}
         />
       ) : null}
     </div>
