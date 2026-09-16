@@ -639,8 +639,8 @@ describeEmbeddedPostgres("budgetService release gate enforcement", () => {
       status: "warning",
     });
 
-    // A stale read from a minute ago with headroom still clears runs, and the
-    // summary says so, so the card does not claim a hold the gate is not making.
+    // With the strict default a stale read from a minute ago still holds, and
+    // the summary says so; the card mirrors whatever the gate decides.
     const recent = new Date(Date.now() - 60_000).toISOString();
     quota = [
       {
@@ -656,7 +656,7 @@ describeEmbeddedPostgres("budgetService release gate enforcement", () => {
       },
     ];
     const youngStale = await service.overview(companyId);
-    expect(youngStale.policies[0]).toMatchObject({ usageStale: true, usageHeld: false, usageObservedAt: recent, observedAmount: 40 });
+    expect(youngStale.policies[0]).toMatchObject({ usageStale: true, usageHeld: true, usageObservedAt: recent, observedAmount: 40 });
   });
 
   it("summarizes a progressive subscription limit against its released share and names the next release", async () => {
