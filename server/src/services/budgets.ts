@@ -32,6 +32,7 @@ import {
   type QuotaSnapshotReader,
 } from "./quota-windows.js";
 import {
+  isSubscriptionUsageHeld,
   observeSubscriptionWindow,
   type SubscriptionWindowObservation,
 } from "./subscription-window-gate.js";
@@ -399,11 +400,22 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
     // the usage is real but older than usual; say so instead of flipping to
     // "unknown" and back on every transient probe failure.
     const usageStale = isSubscription && !usageUnavailable && observation?.stale === true;
+    const amount = policy.isActive ? policy.amount : 0;
+    // Whether the gate is holding new runs on this observation, by the gate's
+    // own rule, so the card never says "held" while runs are flowing or the
+    // other way round.
+    const usageHeld = isSubscription
+      ? isSubscriptionUsageHeld({
+          limitPercent: amount,
+          usedPercent: observation?.usedPercent ?? null,
+          stale: observation?.stale === true,
+          observedAt: observation?.observedAt,
+        })
+      : false;
     const observedAmount = isSubscription
       ? observation?.usedPercent ?? 0
       : await computeObservedAmount(db, policy);
     const { start, end } = resolveWindow(policy.windowKind as BudgetWindowKind, new Date(), observation);
-    const amount = policy.isActive ? policy.amount : 0;
     const utilizationPercent =
       amount > 0 ? Number(((observedAmount / amount) * 100).toFixed(2)) : 0;
     return {
@@ -420,6 +432,7 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
       utilizationPercent,
       usageUnavailable,
       usageStale,
+      usageHeld,
       usageObservedAt: isSubscription ? observation?.observedAt ?? null : null,
       warnPercent: policy.warnPercent,
       hardStopEnabled: policy.hardStopEnabled,

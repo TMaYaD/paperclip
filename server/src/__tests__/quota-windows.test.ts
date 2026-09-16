@@ -5,6 +5,8 @@ import type { QuotaWindow } from "@paperclipai/adapter-utils";
 
 // Pure utility functions — import directly from adapter source
 import {
+  ClaudeUsageRateLimitedError,
+  getQuotaWindows as getClaudeQuotaWindows,
   toPercent,
   fetchWithTimeout,
   fetchClaudeQuota,
@@ -523,6 +525,44 @@ describe("fetchClaudeQuota", () => {
   it("throws when the API returns a non-200 status", async () => {
     mockFetch({}, false, 401);
     await expect(fetchClaudeQuota("token")).rejects.toThrow("anthropic usage api returned 401");
+  });
+
+  it("throws a typed rate-limit error on 429 so callers can tell a throttle from a failure", async () => {
+    (fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ok: false,
+      status: 429,
+      json: async () => ({ error: { type: "rate_limit_error", message: "Rate limited. Please try again later." } }),
+    } as Response);
+    const error = await fetchClaudeQuota("token").catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ClaudeUsageRateLimitedError);
+    expect((error as Error).message).toContain("429");
+  });
+
+  it("reports a throttled read as rateLimited without spending a CLI probe on the same endpoint", async () => {
+    const tmpDir = path.join(os.tmpdir(), `paperclip-test-claude-429-${Date.now()}`);
+    const fs = await import("node:fs/promises");
+    await fs.mkdir(tmpDir, { recursive: true });
+    await fs.writeFile(path.join(tmpDir, ".credentials.json"), JSON.stringify({ claudeAiOauth: { accessToken: "tok" } }));
+    const savedDir = process.env.CLAUDE_CONFIG_DIR;
+    process.env.CLAUDE_CONFIG_DIR = tmpDir;
+    (fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ok: false,
+      status: 429,
+      json: async () => ({ error: { type: "rate_limit_error" } }),
+    } as Response);
+    try {
+      const startedAt = Date.now();
+      const result = await getClaudeQuotaWindows();
+      expect(result).toMatchObject({ provider: "anthropic", ok: false, rateLimited: true, windows: [] });
+      expect(result.error).toContain("429");
+      // The CLI fallback sleeps for nine seconds by construction; a throttle
+      // returns long before that.
+      expect(Date.now() - startedAt).toBeLessThan(8_000);
+    } finally {
+      if (savedDir === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+      else process.env.CLAUDE_CONFIG_DIR = savedDir;
+      await fs.rm(tmpDir, { recursive: true });
+    }
   });
 
   it("returns an empty array when all window fields are absent", async () => {
