@@ -49,15 +49,18 @@ export const SUBSCRIPTION_WINDOW_UNKNOWN_WAIT_MS = readPositiveIntEnv(
   5 * 60 * 1000,
 );
 /**
- * A stale read (the last good value, reused because the latest refresh was
- * throttled or failed) may still clear a run when it is young enough and
- * leaves enough headroom for usage to have drifted since. The drift allowance
- * is per minute of age; one percent a minute is the burn rate observed on a
- * busy session window. Older or tighter stale reads hold for a re-check.
+ * Opt-in allowance for stale reads. By default a stale read (the last good
+ * value, reused because the latest refresh was throttled or failed) never
+ * clears a run: nothing bounds how far usage has moved since it was taken, so
+ * the run holds for a re-check. An operator who would rather keep dispatching
+ * through a throttled minute sets a maximum age here; a stale read younger
+ * than that clears the run when it still leaves headroom after the drift
+ * allowance below (per minute of age; one percent a minute is the burn rate
+ * observed on a busy session window). Unset or 0 keeps the strict default.
  */
-export const SUBSCRIPTION_WINDOW_STALE_READ_MAX_AGE_MS = readPositiveIntEnv(
+export const SUBSCRIPTION_WINDOW_STALE_READ_MAX_AGE_MS = readNonNegativeIntEnv(
   "PAPERCLIP_SUBSCRIPTION_WINDOW_STALE_READ_MAX_AGE_MS",
-  3 * 60 * 1000,
+  0,
 );
 export const SUBSCRIPTION_WINDOW_USAGE_DRIFT_PERCENT_PER_MINUTE = readPositiveNumberEnv(
   "PAPERCLIP_SUBSCRIPTION_WINDOW_USAGE_DRIFT_PERCENT_PER_MINUTE",
@@ -87,6 +90,13 @@ function readPositiveIntEnv(key: string, fallback: number): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function readNonNegativeIntEnv(key: string, fallback: number): number {
+  const raw = process.env[key];
+  if (typeof raw !== "string" || raw.trim().length === 0) return fallback;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
 function readPositiveNumberEnv(key: string, fallback: number): number {
   const raw = process.env[key];
   if (typeof raw !== "string" || raw.trim().length === 0) return fallback;
@@ -96,12 +106,18 @@ function readPositiveNumberEnv(key: string, fallback: number): number {
 
 export type StaleReadVerdict =
   | { clears: true; ageMs: number; projectedPercent: number }
-  | { clears: false; ageMs: number | null; projectedPercent: number | null; why: "no_read_time" | "too_old" | "no_headroom" };
+  | {
+      clears: false;
+      ageMs: number | null;
+      projectedPercent: number | null;
+      why: "disabled" | "no_read_time" | "too_old" | "no_headroom";
+    };
 
 /**
- * Pure check: may a stale below-limit read still clear a run? Only when the
- * read is young enough and, after allowing for usage drift since it was
- * taken, still sits under the limit.
+ * Pure check: may a stale below-limit read still clear a run? Never by
+ * default. When an operator opts in with a maximum age, only a read younger
+ * than that which, after allowing for usage drift since it was taken, still
+ * sits under the limit.
  */
 export function judgeStaleRead(input: {
   usedPercent: number;
@@ -113,6 +129,7 @@ export function judgeStaleRead(input: {
 }): StaleReadVerdict {
   const maxAgeMs = input.maxAgeMs ?? SUBSCRIPTION_WINDOW_STALE_READ_MAX_AGE_MS;
   const drift = input.driftPercentPerMinute ?? SUBSCRIPTION_WINDOW_USAGE_DRIFT_PERCENT_PER_MINUTE;
+  if (maxAgeMs <= 0) return { clears: false, ageMs: null, projectedPercent: null, why: "disabled" };
   const observed = input.observedAt ? new Date(input.observedAt).getTime() : Number.NaN;
   if (Number.isNaN(observed)) return { clears: false, ageMs: null, projectedPercent: null, why: "no_read_time" };
   const ageMs = Math.max(0, input.now.getTime() - observed);
@@ -133,6 +150,7 @@ export function isSubscriptionUsageHeld(input: {
   stale: boolean;
   observedAt: string | null | undefined;
   now?: Date;
+  staleReadMaxAgeMs?: number;
 }): boolean {
   if (input.limitPercent <= 0) return false;
   if (input.usedPercent == null) return true;
@@ -143,6 +161,7 @@ export function isSubscriptionUsageHeld(input: {
     limitPercent: input.limitPercent,
     observedAt: input.observedAt,
     now: input.now ?? new Date(),
+    maxAgeMs: input.staleReadMaxAgeMs,
   }).clears;
 }
 
@@ -221,10 +240,10 @@ export function observeSubscriptionWindow(
  * `unknownWaitMs` and re-checks; only a scope with no limit stays open. A
  * stale result (the last good read, reused because the latest refresh was
  * throttled or failed) at or above the limit defers to the reset as usual.
- * Below the limit it clears the run only while it is young and leaves enough
- * headroom for the drift since it was taken (see judgeStaleRead); otherwise
- * real usage may have crossed the limit, so the run holds for a re-check
- * instead. When several policies block at once, the wait ends at the latest
+ * Below the limit it never clears the run by default, because real usage may
+ * have crossed the limit since that read, so the run holds for a re-check; an
+ * operator may opt in to accepting young reads with headroom (see
+ * judgeStaleRead). When several policies block at once, the wait ends at the latest
  * resume time, because every blocking window has to clear before a run can
  * start, so a known saturated window outranks an unknown one.
  */
@@ -278,6 +297,10 @@ export function decideSubscriptionWindowWait(input: {
         const failed = `the latest provider read ${result?.rateLimited ? "was throttled" : "failed"}${result?.error ? ` (${result.error})` : ""}`;
         const last = `the last good read of ${usedPercent}%${result?.observedAt ? ` at ${result.observedAt}` : ""}`;
         if (!staleVerdict || staleVerdict.clears) return `${failed}, and ${last} cannot clear the limit`;
+        if (staleVerdict.why === "disabled") {
+          return `${failed}, and ${last} cannot clear the limit (stale reads are not accepted unless ` +
+            "PAPERCLIP_SUBSCRIPTION_WINDOW_STALE_READ_MAX_AGE_MS is set)";
+        }
         if (staleVerdict.why === "no_read_time") return `${failed}, and ${last} has no read time`;
         const ageMin = Math.round((staleVerdict.ageMs ?? 0) / 6_000) / 10;
         if (staleVerdict.why === "too_old") return `${failed}, and ${last} is ${ageMin} min old, older than the gate accepts`;
