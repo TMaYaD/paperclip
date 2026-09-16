@@ -114,8 +114,7 @@ function BudgetUsageBar({
           aria-hidden
           className="absolute inset-0 bg-(--status-task-blocked)/25"
           style={{
-            backgroundImage:
-              "repeating-linear-gradient(135deg, var(--status-task-blocked) 0 2px, transparent 2px 5px)",
+            backgroundImage: "var(--hatch-blocked)",
           }}
         />
       ) : null}
@@ -127,8 +126,7 @@ function BudgetUsageBar({
           style={{
             left: `${limit}%`,
             width: `${overLimit}%`,
-            backgroundImage:
-              "repeating-linear-gradient(135deg, var(--status-task-blocked) 0 2px, transparent 2px 5px)",
+            backgroundImage: "var(--hatch-blocked)",
           }}
         />
       ) : null}
