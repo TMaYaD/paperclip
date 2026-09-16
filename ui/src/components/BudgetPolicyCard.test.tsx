@@ -71,7 +71,7 @@ describe("BudgetPolicyCard", () => {
     expect(bar.style.width).toBe("40%");
     expect(bar.getAttribute("aria-valuenow")).toBe("40");
     expect(bar.getAttribute("aria-label")).toBe("Window usage: 40% used, limit 80%");
-    expect(marker?.style.left).toBe("calc(80% - 1px)");
+    expect(marker?.style.left).toBe("80%");
     expect(marker?.getAttribute("title")).toBe("Limit 80%");
     expect(over).toBeNull();
     expect(container.textContent).toContain("Remaining");
@@ -85,7 +85,7 @@ describe("BudgetPolicyCard", () => {
     );
     expect(bar.style.width).toBe("50%");
     expect(bar.className).toContain("bg-(--status-task-blocked)");
-    expect(marker?.style.left).toBe("calc(50% - 1px)");
+    expect(marker?.style.left).toBe("50%");
     expect(over?.style.left).toBe("50%");
     expect(over?.style.width).toBe("15%");
     expect(container.textContent).toContain("Over limit by 15%");
@@ -111,7 +111,7 @@ describe("BudgetPolicyCard", () => {
       subscriptionSummary({ amount: 80, observedAmount: 40, usageStale: true, usageObservedAt: observedAt }),
     );
     expect(bar.style.width).toBe("40%");
-    expect(marker?.style.left).toBe("calc(80% - 1px)");
+    expect(marker?.style.left).toBe("80%");
     expect(held).not.toBeNull();
     expect(container.textContent).toContain("40%");
     expect(container.textContent).toContain(
@@ -134,7 +134,7 @@ describe("BudgetPolicyCard", () => {
       }),
     );
     expect(bar.style.width).toBe("40%");
-    expect(marker?.style.left).toBe("calc(80% - 1px)");
+    expect(marker?.style.left).toBe("80%");
     expect(held).toBeNull();
     expect(container.textContent).toContain("Healthy");
     expect(container.textContent).toContain("latest read failed; new runs still clear on this read");
@@ -161,7 +161,7 @@ describe("BudgetPolicyCard", () => {
     );
     expect(bar.style.width).toBe("0%");
     expect(bar.getAttribute("aria-label")).toBe("Window usage unknown, limit 80%; new runs are held");
-    expect(marker?.style.left).toBe("calc(80% - 1px)");
+    expect(marker?.style.left).toBe("80%");
     expect(held).not.toBeNull();
     expect(over).toBeNull();
     expect(container.textContent).toContain("Runs held");

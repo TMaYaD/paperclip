@@ -675,6 +675,55 @@ describe("createQuotaSnapshotReader", () => {
     expect(rows.find((row) => row.provider === "openai")).toMatchObject({ ok: true, source: "codex-run-stream" });
   });
 
+  it("keeps a window observed while a probe was in flight over the probe's older copy", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    let resolveProbe: (rows: ProviderQuotaResult[]) => void = () => {};
+    const fetch = vi.fn(() => new Promise<ProviderQuotaResult[]>((resolve) => { resolveProbe = resolve; }));
+    const read = createQuotaSnapshotReader({ fetch, ttlMs: 120_000 });
+
+    // The probe starts now and will answer with data from this moment.
+    const pending = read({ now: NOW });
+    expect(fetch).toHaveBeenCalledTimes(1);
+
+    // A run reports the session window at the limit while the probe is out.
+    const observedAt = new Date(NOW.getTime() + 5_000);
+    vi.setSystemTime(observedAt);
+    read.observe?.({
+      provider: "anthropic",
+      window: window({ key: "five_hour", usedPercent: 85 }),
+      observedAt,
+      source: "claude-run-stream",
+    });
+
+    // The probe lands afterwards with its older, lower reading.
+    vi.setSystemTime(new Date(NOW.getTime() + 8_000));
+    resolveProbe([
+      {
+        provider: "anthropic",
+        ok: true,
+        windows: [
+          window({ key: "five_hour", usedPercent: 40 }),
+          window({ key: "seven_day", usedPercent: 70 }),
+        ],
+      },
+    ]);
+    const snapshot = await pending;
+    const row = snapshot.results[0];
+    expect(row?.ok).toBe(true);
+    expect(row?.windows.find((w) => w.key === "five_hour")?.usedPercent).toBe(85);
+    expect(row?.windows.find((w) => w.key === "seven_day")?.usedPercent).toBe(70);
+
+    // A later probe supersedes that observation: it started after the observation.
+    const later = new Date(NOW.getTime() + 130_000);
+    vi.setSystemTime(later);
+    const next = read({ now: later });
+    resolveProbe([
+      { provider: "anthropic", ok: true, windows: [window({ key: "five_hour", usedPercent: 12 })] },
+    ]);
+    expect((await next).results[0]?.windows.find((w) => w.key === "five_hour")?.usedPercent).toBe(12);
+  });
+
   it("attributes a fetch that throws outright to every known provider so their last good read stands in", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(NOW);
