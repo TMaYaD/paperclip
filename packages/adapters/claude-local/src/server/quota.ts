@@ -234,6 +234,21 @@ export async function fetchWithTimeout(url: string, init: RequestInit, ms = 8000
   }
 }
 
+/**
+ * The usage endpoint allows roughly one read per minute per account and
+ * answers 429 with `retry-after: 0` for the rest of the window. That is a
+ * throttle on a healthy endpoint, not a broken probe, and callers treat it
+ * differently: retry gently, and never fall back to the CLI `/usage` panel,
+ * which reads the same endpoint and would only spend another request.
+ */
+export class ClaudeUsageRateLimitedError extends Error {
+  readonly status = 429;
+  constructor() {
+    super("anthropic usage api returned 429 (rate limited; the endpoint allows about one read per minute)");
+    this.name = "ClaudeUsageRateLimitedError";
+  }
+}
+
 export async function fetchClaudeQuota(token: string): Promise<QuotaWindow[]> {
   const resp = await fetchWithTimeout("https://api.anthropic.com/api/oauth/usage", {
     headers: {
@@ -241,6 +256,7 @@ export async function fetchClaudeQuota(token: string): Promise<QuotaWindow[]> {
       "anthropic-beta": "oauth-2025-04-20",
     },
   });
+  if (resp.status === 429) throw new ClaudeUsageRateLimitedError();
   if (!resp.ok) throw new Error(`anthropic usage api returned ${resp.status}`);
   const body = (await resp.json()) as AnthropicUsageResponse;
   const windows: QuotaWindow[] = [];
@@ -646,6 +662,16 @@ export async function getQuotaWindows(): Promise<ProviderQuotaResult> {
       return { provider: "anthropic", source: CLAUDE_USAGE_SOURCE_OAUTH, ok: true, windows };
     } catch (error) {
       errors.push(formatProviderError("Anthropic OAuth usage", error));
+      if (error instanceof ClaudeUsageRateLimitedError) {
+        return {
+          provider: "anthropic",
+          source: CLAUDE_USAGE_SOURCE_OAUTH,
+          ok: false,
+          rateLimited: true,
+          error: errors[0],
+          windows: [],
+        };
+      }
     }
   }
 
