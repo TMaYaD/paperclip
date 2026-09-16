@@ -559,6 +559,7 @@ describeEmbeddedPostgres("budgetService release gate enforcement", () => {
     expect(failedFetch.policies[0]).toMatchObject({
       metric: "subscription_percent",
       usageUnavailable: true,
+      usageHeld: true,
       observedAmount: 0,
       status: "ok",
     });
@@ -611,7 +612,7 @@ describeEmbeddedPostgres("budgetService release gate enforcement", () => {
       status: "hard_stop",
     });
     expect(reported.policies[0]?.windowEnd.toISOString()).toBe("2099-01-01T00:00:00.000Z");
-    expect(reported.policies[0]).toMatchObject({ usageStale: false, usageObservedAt: null });
+    expect(reported.policies[0]).toMatchObject({ usageStale: false, usageHeld: false, usageObservedAt: null });
 
     // A failed refresh keeps the last good read: still a measurement, flagged
     // as stale with its read time, never a flip back to "unavailable".
@@ -631,10 +632,31 @@ describeEmbeddedPostgres("budgetService release gate enforcement", () => {
     expect(stale.policies[0]).toMatchObject({
       usageUnavailable: false,
       usageStale: true,
+      // That read is far older than the gate accepts, so runs are held.
+      usageHeld: true,
       usageObservedAt: "2026-09-13T11:58:00.000Z",
       observedAmount: 60,
       status: "warning",
     });
+
+    // A stale read from a minute ago with headroom still clears runs, and the
+    // summary says so, so the card does not claim a hold the gate is not making.
+    const recent = new Date(Date.now() - 60_000).toISOString();
+    quota = [
+      {
+        provider: "openai",
+        ok: true,
+        stale: true,
+        rateLimited: true,
+        observedAt: recent,
+        error: "usage api returned 429",
+        windows: [
+          { key: "five_hour", label: "5h limit", usedPercent: 40, resetsAt: null, valueLabel: null, detail: null },
+        ],
+      },
+    ];
+    const youngStale = await service.overview(companyId);
+    expect(youngStale.policies[0]).toMatchObject({ usageStale: true, usageHeld: false, usageObservedAt: recent, observedAmount: 40 });
   });
 
   it("hard-stops project work until a valid budget raise resumes it and overview reconciles ledger spend", async () => {

@@ -54,6 +54,13 @@ export interface BudgetPolicySummary {
   usageStale?: boolean;
   /** ISO timestamp of the provider read behind `observedAmount` (subscription policies only). */
   usageObservedAt?: string | null;
+  /**
+   * True when the dispatch gate is holding new runs for this policy on the
+   * current observation: usage unreadable under a limit, or a stale read too
+   * old or too close to the limit to clear a run. Computed with the gate's
+   * own rule so the card and the gate agree.
+   */
+  usageHeld?: boolean;
   warnPercent: number;
   hardStopEnabled: boolean;
   notifyEnabled: boolean;

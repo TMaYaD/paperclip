@@ -92,7 +92,7 @@ bogus far-future reset cannot hold a run past the bound either.
 ## Quota snapshot
 
 `readQuotaSnapshot()` memoizes `fetchAllQuotaWindows()` process-wide with a
-TTL (`PAPERCLIP_QUOTA_SNAPSHOT_TTL_MS`, default 60s) and shares one in-flight
+TTL (`PAPERCLIP_QUOTA_SNAPSHOT_TTL_MS`, default 120s) and shares one in-flight
 fetch between concurrent callers. Provider usage endpoints are rate limited and
 the Claude CLI fallback runs a terminal probe, so enforcement never fetches per
 dispatch. The same snapshot feeds the budget overview and the
@@ -101,17 +101,31 @@ the placeholder cards, and the Providers tab all show the same percent used
 and the provider's reset time as the window end, and one probe serves every
 surface.
 
+The Anthropic OAuth usage endpoint allows about one read per minute per
+account, shared with every other client of that account (the Claude Code
+`/usage` panel included), and answers 429 with `retry-after: 0` for the rest
+of the window. The Claude adapter reports such a read as `rateLimited` and
+does not fall back to the CLI `/usage` panel, which reads the same endpoint
+and would only spend another request. The reader retries a throttled read
+after `PAPERCLIP_QUOTA_SNAPSHOT_THROTTLE_RETRY_MS` (default 20s), at most
+`PAPERCLIP_QUOTA_SNAPSHOT_THROTTLE_RETRIES` times (default 2) per cycle,
+before waiting out the TTL; the cap keeps a sustained throttle from becoming
+the retry loop that public reports say can get a token flagged.
+
 Single provider reads fail now and then: the Anthropic usage endpoint is rate
 limited and the Claude CLI fallback scrapes a terminal. A failed refresh
 therefore keeps the provider's last successful result, marked `stale` and
 carrying the new `error`, for up to `PAPERCLIP_QUOTA_SNAPSHOT_MAX_STALE_MS`
 (default 10 minutes). Every ok result is stamped with `observedAt`. Past the
-bound the provider is reported as unavailable again. A stale result can only
-tighten the gate: at or above the limit it defers to the reset as a fresh read
-would, but below the limit it cannot clear a run, because real usage may have
-crossed the limit since that read, so the run holds for the unknown-usage
-re-check instead. The reuse therefore serves the summaries and the cards,
-which keep showing the last measurement and how old it is. The alternative,
+bound the provider is reported as unavailable again. A stale result at or
+above the limit defers to the reset as a fresh read would. Below the limit it
+clears a run only while it is young (`PAPERCLIP_SUBSCRIPTION_WINDOW_STALE_READ_MAX_AGE_MS`,
+default 3 minutes) and still under the limit after allowing for drift since
+it was taken (`PAPERCLIP_SUBSCRIPTION_WINDOW_USAGE_DRIFT_PERCENT_PER_MINUTE`,
+default 1, the burn rate observed on a busy session window); otherwise real
+usage may have crossed the limit and the run holds for the unknown-usage
+re-check. That keeps a throttled minute from holding every queued run while
+still refusing to dispatch on a reading that could be wrong. The alternative,
 treating a failed refresh as unknown for one TTL, made the budget cards flip
 between a measured percent and "unavailable" on every blip and, while the gate
 still failed open, admitted every queued run for a minute each time.
@@ -134,8 +148,10 @@ that state means the gate is holding new runs, so the card keeps the limit
 marker over a hatched track and reads "Runs held"; without a limit it reads
 "Unknown". When only the latest read failed the summary carries `usageStale`
 and `usageObservedAt`, and the card keeps the last measurement and says how
-old it is. Under a limit it also reads "Runs held" over the hatched track,
-because the gate does not clear runs on a stale read. Agent and project scoped
+old it is. The summary also carries `usageHeld`, computed with the gate's own
+rule, and the card reads "Runs held" over the hatched track only when that is
+true, so the card and the gate never disagree about whether runs are waiting.
+Agent and project scoped
 subscription policies are created through the existing policies API.
 
 ## Follow-ups (not in this change)

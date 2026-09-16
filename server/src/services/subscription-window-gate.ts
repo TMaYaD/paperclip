@@ -49,6 +49,21 @@ export const SUBSCRIPTION_WINDOW_UNKNOWN_WAIT_MS = readPositiveIntEnv(
   5 * 60 * 1000,
 );
 /**
+ * A stale read (the last good value, reused because the latest refresh was
+ * throttled or failed) may still clear a run when it is young enough and
+ * leaves enough headroom for usage to have drifted since. The drift allowance
+ * is per minute of age; one percent a minute is the burn rate observed on a
+ * busy session window. Older or tighter stale reads hold for a re-check.
+ */
+export const SUBSCRIPTION_WINDOW_STALE_READ_MAX_AGE_MS = readPositiveIntEnv(
+  "PAPERCLIP_SUBSCRIPTION_WINDOW_STALE_READ_MAX_AGE_MS",
+  3 * 60 * 1000,
+);
+export const SUBSCRIPTION_WINDOW_USAGE_DRIFT_PERCENT_PER_MINUTE = readPositiveNumberEnv(
+  "PAPERCLIP_SUBSCRIPTION_WINDOW_USAGE_DRIFT_PERCENT_PER_MINUTE",
+  1,
+);
+/**
  * Upper bound on how long one run may keep waiting, measured from its first
  * consecutive deferral by this gate. A weekly window can stay legitimately
  * saturated for seven days, and the Claude CLI fallback reports no reset time
@@ -70,6 +85,65 @@ function readPositiveIntEnv(key: string, fallback: number): number {
   if (typeof raw !== "string" || raw.trim().length === 0) return fallback;
   const parsed = Number.parseInt(raw, 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function readPositiveNumberEnv(key: string, fallback: number): number {
+  const raw = process.env[key];
+  if (typeof raw !== "string" || raw.trim().length === 0) return fallback;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+export type StaleReadVerdict =
+  | { clears: true; ageMs: number; projectedPercent: number }
+  | { clears: false; ageMs: number | null; projectedPercent: number | null; why: "no_read_time" | "too_old" | "no_headroom" };
+
+/**
+ * Pure check: may a stale below-limit read still clear a run? Only when the
+ * read is young enough and, after allowing for usage drift since it was
+ * taken, still sits under the limit.
+ */
+export function judgeStaleRead(input: {
+  usedPercent: number;
+  limitPercent: number;
+  observedAt: string | null | undefined;
+  now: Date;
+  maxAgeMs?: number;
+  driftPercentPerMinute?: number;
+}): StaleReadVerdict {
+  const maxAgeMs = input.maxAgeMs ?? SUBSCRIPTION_WINDOW_STALE_READ_MAX_AGE_MS;
+  const drift = input.driftPercentPerMinute ?? SUBSCRIPTION_WINDOW_USAGE_DRIFT_PERCENT_PER_MINUTE;
+  const observed = input.observedAt ? new Date(input.observedAt).getTime() : Number.NaN;
+  if (Number.isNaN(observed)) return { clears: false, ageMs: null, projectedPercent: null, why: "no_read_time" };
+  const ageMs = Math.max(0, input.now.getTime() - observed);
+  const projectedPercent = input.usedPercent + drift * (ageMs / 60_000);
+  if (ageMs > maxAgeMs) return { clears: false, ageMs, projectedPercent, why: "too_old" };
+  if (projectedPercent >= input.limitPercent) return { clears: false, ageMs, projectedPercent, why: "no_headroom" };
+  return { clears: true, ageMs, projectedPercent };
+}
+
+/**
+ * Whether the gate would hold new runs for a policy given the observation the
+ * summary shows: unreadable usage under a limit, or a stale read that is too
+ * old or too close to the limit. Used to label the budget card honestly.
+ */
+export function isSubscriptionUsageHeld(input: {
+  limitPercent: number;
+  usedPercent: number | null;
+  stale: boolean;
+  observedAt: string | null | undefined;
+  now?: Date;
+}): boolean {
+  if (input.limitPercent <= 0) return false;
+  if (input.usedPercent == null) return true;
+  if (input.usedPercent >= input.limitPercent) return false;
+  if (!input.stale) return false;
+  return !judgeStaleRead({
+    usedPercent: input.usedPercent,
+    limitPercent: input.limitPercent,
+    observedAt: input.observedAt,
+    now: input.now ?? new Date(),
+  }).clears;
 }
 
 export type SubscriptionWindowPolicy = {
@@ -145,10 +219,11 @@ export function observeSubscriptionWindow(
  * A policy whose window cannot be read (the provider row is missing or not ok,
  * the window is absent, or it carries no utilization) holds the run for
  * `unknownWaitMs` and re-checks; only a scope with no limit stays open. A
- * stale result (the last good read, reused because the latest refresh failed)
- * can only tighten the gate: at or above the limit it defers to the reset as
- * usual, but below the limit it cannot clear the run, because real usage may
- * have crossed the limit since that read, so the run holds for a re-check
+ * stale result (the last good read, reused because the latest refresh was
+ * throttled or failed) at or above the limit defers to the reset as usual.
+ * Below the limit it clears the run only while it is young and leaves enough
+ * headroom for the drift since it was taken (see judgeStaleRead); otherwise
+ * real usage may have crossed the limit, so the run holds for a re-check
  * instead. When several policies block at once, the wait ends at the latest
  * resume time, because every blocking window has to clear before a run can
  * start, so a known saturated window outranks an unknown one.
@@ -161,6 +236,8 @@ export function decideSubscriptionWindowWait(input: {
   now?: Date;
   defaultWaitMs?: number;
   unknownWaitMs?: number;
+  staleReadMaxAgeMs?: number;
+  usageDriftPercentPerMinute?: number;
 }): SubscriptionWindowWait | null {
   const now = input.now ?? new Date();
   const defaultWaitMs = input.defaultWaitMs ?? SUBSCRIPTION_WINDOW_WAIT_DEFAULT_MS;
@@ -184,9 +261,28 @@ export function decideSubscriptionWindowWait(input: {
     };
     const window = windows ? findQuotaWindow(windows, policy.windowKind) : null;
     const usedPercent = window?.usedPercent ?? null;
-    const staleBelowLimit = stale && usedPercent != null && usedPercent < policy.amount;
+    const staleVerdict =
+      stale && usedPercent != null && usedPercent < policy.amount
+        ? judgeStaleRead({
+            usedPercent,
+            limitPercent: policy.amount,
+            observedAt: result?.observedAt,
+            now,
+            maxAgeMs: input.staleReadMaxAgeMs,
+            driftPercentPerMinute: input.usageDriftPercentPerMinute,
+          })
+        : null;
     let candidate: SubscriptionWindowWait;
-    if (usedPercent == null || staleBelowLimit) {
+    if (usedPercent == null || (staleVerdict && !staleVerdict.clears)) {
+      const staleCause = () => {
+        const failed = `the latest provider read ${result?.rateLimited ? "was throttled" : "failed"}${result?.error ? ` (${result.error})` : ""}`;
+        const last = `the last good read of ${usedPercent}%${result?.observedAt ? ` at ${result.observedAt}` : ""}`;
+        if (!staleVerdict || staleVerdict.clears) return `${failed}, and ${last} cannot clear the limit`;
+        if (staleVerdict.why === "no_read_time") return `${failed}, and ${last} has no read time`;
+        const ageMin = Math.round((staleVerdict.ageMs ?? 0) / 6_000) / 10;
+        if (staleVerdict.why === "too_old") return `${failed}, and ${last} is ${ageMin} min old, older than the gate accepts`;
+        return `${failed}, and ${last} is ${ageMin} min old, which with usage drift may already be at the limit`;
+      };
       const cause =
         windows == null
           ? `provider usage could not be read${result?.error ? ` (${result.error})` : ""}`
@@ -194,8 +290,7 @@ export function decideSubscriptionWindowWait(input: {
             ? "the provider did not report this window"
             : usedPercent == null
               ? "the provider reported this window without utilization"
-              : `the latest provider read failed${result?.error ? ` (${result.error})` : ""}, and the last good read of ` +
-                `${usedPercent}%${result?.observedAt ? ` at ${result.observedAt}` : ""} cannot clear the limit`;
+              : staleCause();
       candidate = {
         ...base,
         usedPercent: null,
