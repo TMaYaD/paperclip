@@ -40,8 +40,9 @@ Knobs are environment variables read by `deploy.sh` and set in the plist:
 
 Run as `paperclipai`. Prerequisites already on the box: the managed
 `paperclipai` install at `~/.local/bin/paperclipai`, node 24 at
-`~/opt/node24/bin`, git at `~/.local/bin/git`, and passwordless `sudo` for
-`launchctl`.
+`~/opt/node24/bin`, git at `~/.local/bin/git` (a custom build under
+`~/opt/git`; the plist sets `GIT_EXEC_PATH` so its remote helpers resolve
+under launchd), and passwordless `sudo` for `launchctl`.
 
 ```sh
 # 1. gitmon binary: the release asset is a bare executable, not an archive
