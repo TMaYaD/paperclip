@@ -1659,7 +1659,7 @@ export function DesignGuide() {
         </div>
         <SubSection title="Subscription limit card">
           <p className="text-sm text-muted-foreground">
-            The bar is the whole provider window. The fill is the observed usage and the dark marker is the limit. A progressive limit adds a second indicator for the share released so far, and hatches usage past it in the warning tone.
+            The bar is the whole provider window. The fill is the observed usage; the tall marker in the foreground colour is the limit. A progressive limit adds a green marker for the share released so far, hatches usage past it in the warning tone, and a legend under the bar names both ticks.
           </p>
           <div className="grid gap-4 xl:grid-cols-2">
             {BUDGET_CARD_EXAMPLES.map(({ label, summary }) => (
