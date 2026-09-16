@@ -70,6 +70,7 @@ describe("BudgetPolicyCard", () => {
       releasedMarker: query('[data-testid="budget-released-marker"]'),
       overReleased: query('[data-testid="budget-over-released"]'),
       toggle: query('[data-testid="budget-progressive-toggle"]'),
+      legend: query('[data-testid="budget-marker-legend"]'),
       saveButton: Array.from(container.querySelectorAll("button")).find((button) =>
         /Set limit|Update limit|Set budget|Update budget/.test(button.textContent ?? ""),
       ) as HTMLButtonElement | undefined,
@@ -92,12 +93,18 @@ describe("BudgetPolicyCard", () => {
   it("draws subscription usage on the whole window with a marker at the limit", () => {
     // 40% of the window used, limit at 80%: the fill is the usage itself, not
     // the 50% utilization-of-limit, so "Remaining 40%" is the visible gap.
-    const { bar, marker, over } = render(subscriptionSummary({ amount: 80, observedAmount: 40 }));
+    const { bar, marker, over, legend } = render(subscriptionSummary({ amount: 80, observedAmount: 40 }));
     expect(bar.style.width).toBe("40%");
     expect(bar.getAttribute("aria-valuenow")).toBe("40");
     expect(bar.getAttribute("aria-label")).toBe("Window usage: 40% used, limit 80%");
     expect(marker?.style.left).toBe("calc(80% - 1px)");
     expect(marker?.getAttribute("title")).toBe("Limit 80%");
+    // The marker stands proud of the track (no clipping) and carries a halo,
+    // so it reads over any fill; the legend names it in text.
+    expect(marker?.className).toContain("-inset-y-1.5");
+    expect(marker?.className).toContain("ring-1");
+    expect(bar.parentElement?.className).not.toContain("overflow-hidden");
+    expect(legend?.textContent).toBe("Limit 80%");
     expect(over).toBeNull();
     expect(container.textContent).toContain("Remaining");
     expect(container.textContent).toContain("40%");
@@ -230,6 +237,7 @@ describe("BudgetPolicyCard", () => {
     expect(over).toBeNull();
     expect(releasedMarker).toBeNull();
     expect(toggle).toBeNull();
+    expect(container.querySelector('[data-testid="budget-marker-legend"]')).toBeNull();
     expect(saveButton?.textContent).toBe("Update budget");
     expect(container.textContent).toContain("$75.00");
     expect(container.textContent).not.toContain("Progressive release");
@@ -239,7 +247,7 @@ describe("BudgetPolicyCard", () => {
     // 20% used against 30% released of a 70% limit: the fill is the usage,
     // the tinted track and its marker show what is released so far, the
     // limit marker stays at 70%, and "Remaining" is the gap to the release.
-    const { bar, marker, over, overReleased, releasedTrack, releasedMarker } = render(
+    const { bar, marker, over, overReleased, releasedTrack, releasedMarker, legend } = render(
       progressiveWeek({ observedAmount: 20, remainingAmount: 10, utilizationPercent: 28.57 }),
     );
     expect(bar.style.width).toBe("20%");
@@ -247,6 +255,8 @@ describe("BudgetPolicyCard", () => {
     expect(releasedTrack?.style.width).toBe("30%");
     expect(releasedMarker?.style.left).toBe("calc(30% - 1px)");
     expect(releasedMarker?.getAttribute("title")).toBe("Released 30% so far");
+    expect(releasedMarker?.className).toContain("bg-(--status-task-done)");
+    expect(legend?.textContent).toBe("Released 30% so farLimit 70%");
     expect(marker?.style.left).toBe("calc(70% - 1px)");
     expect(over).toBeNull();
     expect(overReleased).toBeNull();
@@ -289,6 +299,7 @@ describe("BudgetPolicyCard", () => {
     expect(overReleased).toBeNull();
     expect(marker?.style.left).toBe("calc(70% - 1px)");
     expect(over?.style.width).toBe("10%");
+    expect(container.querySelector('[data-testid="budget-marker-legend"]')?.textContent).toBe("Limit 70%");
     expect(container.textContent).toContain("Over limit by 10%");
     expect(container.textContent).toContain("Hard stop");
     expect(container.textContent).toContain("Progressive release · 10% per day · fully released");

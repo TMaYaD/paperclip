@@ -76,11 +76,13 @@ function clampPercent(value: number) {
  * the fill is the observed usage, a marker sits at the configured limit, and
  * any usage past the limit is hatched so "remaining" reads as the gap between
  * the fill and the marker. A progressive limit adds a second indicator: the
- * released share so far is tinted on the track and closed by a lighter
- * marker, and usage past it but under the limit is hatched in the warning
- * tone, because runs wait there for the next release rather than the reset.
- * Money budgets have no natural ceiling, so their bar stays a plain
- * utilization-of-budget fill.
+ * released share so far is tinted on the track and closed by a green marker,
+ * and usage past it but under the limit is hatched in the warning tone,
+ * because runs wait there for the next release rather than the reset. Both
+ * markers stand taller than the track and carry a halo in the card colour,
+ * so they read over any fill, including a red one at the limit. Money budgets
+ * have no natural ceiling, so their bar stays a plain utilization-of-budget
+ * fill.
  */
 function BudgetUsageBar({
   usedPercent,
@@ -133,13 +135,15 @@ function BudgetUsageBar({
       ? `Budget utilization: ${Math.round(used)}% used`
       : `Window usage: ${Math.round(used)}% used, limit ${Math.round(limit)}%` +
         (released != null ? `, ${Math.round(released)}% released so far` : "");
+  // No overflow clipping on the track: the markers stand proud of it, so the
+  // overlays round their own outer corners instead.
   return (
-    <div className={cn("relative h-2 overflow-hidden rounded-full", className)}>
+    <div className={cn("relative h-2 rounded-full", className)}>
       {released != null ? (
         <div
           data-testid="budget-released-track"
           aria-hidden
-          className="absolute inset-y-0 left-0 bg-(--status-task-done)/20"
+          className="absolute inset-y-0 left-0 rounded-l-full bg-(--status-task-done)/25"
           style={{ width: `${released}%` }}
         />
       ) : null}
@@ -157,7 +161,7 @@ function BudgetUsageBar({
         <div
           data-testid="budget-usage-held"
           aria-hidden
-          className="absolute inset-0 bg-(--status-task-blocked)/25"
+          className="absolute inset-0 rounded-full bg-(--status-task-blocked)/25"
           style={{
             backgroundImage: "var(--hatch-blocked)",
           }}
@@ -167,7 +171,7 @@ function BudgetUsageBar({
         <div
           data-testid="budget-over-released"
           aria-hidden
-          className="absolute inset-y-0 bg-(--status-task-todo)/40"
+          className={cn("absolute inset-y-0 bg-(--status-task-todo)/40", released === 0 && "rounded-l-full")}
           style={{
             left: `${released}%`,
             width: `${overReleased}%`,
@@ -180,7 +184,7 @@ function BudgetUsageBar({
         <div
           data-testid="budget-over-limit"
           aria-hidden
-          className="absolute inset-y-0 bg-(--status-task-blocked)/40"
+          className={cn("absolute inset-y-0 bg-(--status-task-blocked)/40", used >= 100 && "rounded-r-full")}
           style={{
             left: `${limit}%`,
             width: `${overLimit}%`,
@@ -193,7 +197,7 @@ function BudgetUsageBar({
           data-testid="budget-released-marker"
           aria-hidden
           title={`Released ${Math.round(released)}% so far`}
-          className="absolute inset-y-0 w-0.5 bg-foreground/40"
+          className="absolute -inset-y-1 w-0.5 rounded-full bg-(--status-task-done) ring-1 ring-background"
           style={{ left: `calc(${released}% - 1px)` }}
         />
       ) : null}
@@ -202,10 +206,28 @@ function BudgetUsageBar({
           data-testid="budget-limit-marker"
           aria-hidden
           title={`Limit ${Math.round(limit)}%`}
-          className="absolute inset-y-0 w-0.5 bg-foreground/70"
+          className="absolute -inset-y-1.5 w-0.5 rounded-full bg-foreground ring-1 ring-background"
           style={{ left: `calc(${limit}% - 1px)` }}
         />
       ) : null}
+    </div>
+  );
+}
+
+/** Names the bar's markers, so nobody has to hover a two-pixel tick to learn what it is. */
+function BudgetMarkerLegend({ limitPercent, releasedPercent }: { limitPercent: number; releasedPercent: number | null }) {
+  return (
+    <div data-testid="budget-marker-legend" className="flex flex-wrap items-center gap-x-4 gap-y-1 pt-1 text-xs text-muted-foreground">
+      {releasedPercent != null && releasedPercent < limitPercent ? (
+        <span className="inline-flex items-center gap-1.5">
+          <span aria-hidden className="inline-block h-3 w-0.5 rounded-full bg-(--status-task-done)" />
+          Released {formatPercent(releasedPercent)} so far
+        </span>
+      ) : null}
+      <span className="inline-flex items-center gap-1.5">
+        <span aria-hidden className="inline-block h-3.5 w-0.5 rounded-full bg-foreground" />
+        Limit {formatPercent(limitPercent)}
+      </span>
     </div>
   );
 }
@@ -403,6 +425,9 @@ export function BudgetPolicyCard({
           className={isPlain ? "bg-border/70" : "bg-muted/70"}
         />
       )}
+      {percentMode && summary.amount > 0 ? (
+        <BudgetMarkerLegend limitPercent={summary.amount} releasedPercent={progressive ? releasedAmount : null} />
+      ) : null}
     </div>
   );
 
