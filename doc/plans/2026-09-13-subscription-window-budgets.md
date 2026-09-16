@@ -119,13 +119,15 @@ carrying the new `error`, for up to `PAPERCLIP_QUOTA_SNAPSHOT_MAX_STALE_MS`
 (default 10 minutes). Every ok result is stamped with `observedAt`. Past the
 bound the provider is reported as unavailable again. A stale result at or
 above the limit defers to the reset as a fresh read would. Below the limit it
-clears a run only while it is young (`PAPERCLIP_SUBSCRIPTION_WINDOW_STALE_READ_MAX_AGE_MS`,
-default 3 minutes) and still under the limit after allowing for drift since
-it was taken (`PAPERCLIP_SUBSCRIPTION_WINDOW_USAGE_DRIFT_PERCENT_PER_MINUTE`,
-default 1, the burn rate observed on a busy session window); otherwise real
-usage may have crossed the limit and the run holds for the unknown-usage
-re-check. That keeps a throttled minute from holding every queued run while
-still refusing to dispatch on a reading that could be wrong. The alternative,
+never clears a run by default: nothing bounds how far usage has moved since
+the read, so the run holds for the unknown-usage re-check. An operator may
+opt in by setting `PAPERCLIP_SUBSCRIPTION_WINDOW_STALE_READ_MAX_AGE_MS` (unset
+or 0 keeps the strict default); a stale read younger than that then clears a
+run while it is still under the limit after allowing for drift since it was
+taken (`PAPERCLIP_SUBSCRIPTION_WINDOW_USAGE_DRIFT_PERCENT_PER_MINUTE`, default
+1, the burn rate observed on a busy session window). The opt-in keeps a
+throttled minute from holding every queued run at the cost of dispatching on
+a reading up to that age old. The alternative,
 treating a failed refresh as unknown for one TTL, made the budget cards flip
 between a measured percent and "unavailable" on every blip and, while the gate
 still failed open, admitted every queued run for a minute each time.
