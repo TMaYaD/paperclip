@@ -22592,7 +22592,21 @@ export function heartbeatService(
             resetsAt: observed.window.resetsAt,
           };
           if (observed.first) {
-            logger.info({ ...fields, raw: observation.info }, "quota harvest: first provider window observed from a run stream");
+            // Only allowlisted scalar fields from the provider payload reach the
+            // log: enough to confirm the reported scale, never the raw record.
+            const info = observation.info;
+            const scalar = (value: unknown) =>
+              typeof value === "number" || typeof value === "string" ? value : null;
+            logger.info(
+              {
+                ...fields,
+                rateLimitType: scalar(info.rateLimitType),
+                rateLimitStatus: scalar(info.status),
+                rawUtilization: scalar(info.utilization),
+                rawResetsAt: scalar(info.resetsAt),
+              },
+              "quota harvest: first provider window observed from a run stream",
+            );
           } else {
             logger.debug(fields, "quota harvest: provider window observed from a run stream");
           }
