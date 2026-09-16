@@ -147,6 +147,25 @@ describe("BudgetPolicyCard", () => {
     expect(container.textContent).not.toContain("Healthy");
   });
 
+  it("trusts the server's held flag: a young stale read with headroom is not held", () => {
+    const observedAt = new Date(Date.now() - 60_000).toISOString();
+    const { bar, marker, held } = render(
+      subscriptionSummary({
+        amount: 80,
+        observedAmount: 40,
+        usageStale: true,
+        usageHeld: false,
+        usageObservedAt: observedAt,
+      }),
+    );
+    expect(bar.style.width).toBe("40%");
+    expect(marker?.style.left).toBe("calc(80% - 1px)");
+    expect(held).toBeNull();
+    expect(container.textContent).toContain("Healthy");
+    expect(container.textContent).toContain("latest read failed; new runs still clear on this read");
+    expect(container.textContent).not.toContain("Runs held");
+  });
+
   it("shows a stale read without a limit as plain usage, nothing held", () => {
     const observedAt = new Date(Date.now() - 3 * 60_000).toISOString();
     const { bar, held } = render(
