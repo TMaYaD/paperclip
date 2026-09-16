@@ -399,6 +399,12 @@ export interface ProviderQuotaResult {
   errorFamily?: AdapterExecutionErrorFamily | null;
   /** error message when ok is false */
   error?: string;
+  /**
+   * True when the provider throttled the usage read (HTTP 429). The usage
+   * endpoint itself is healthy, so the reader may retry after a short delay,
+   * and no fallback that reads the same endpoint should run.
+   */
+  rateLimited?: boolean;
   windows: QuotaWindow[];
 }
 
