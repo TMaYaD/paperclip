@@ -1,4 +1,4 @@
-import type { ProviderQuotaResult } from "@paperclipai/shared";
+import type { ProviderQuotaResult, QuotaWindow } from "@paperclipai/shared";
 import { listServerAdapters } from "../adapters/registry.js";
 
 const QUOTA_PROVIDER_TIMEOUT_MS = 20_000;
@@ -87,7 +87,23 @@ export type QuotaSnapshot = {
   fetchedAt: Date;
 };
 
-export type QuotaSnapshotReader = (input?: { now?: Date }) => Promise<QuotaSnapshot>;
+/** One provider window observed outside the probe, e.g. from a live run's stream. */
+export type QuotaWindowObservation = {
+  provider: string;
+  window: QuotaWindow;
+  observedAt: Date;
+  /** Where the observation came from, recorded as the row's source when it starts one. */
+  source?: string | null;
+};
+
+export type QuotaSnapshotReader = ((input?: { now?: Date }) => Promise<QuotaSnapshot>) & {
+  /**
+   * Folds an observation into the snapshot immediately: the provider's last
+   * good row gains or replaces that window, is stamped with the observation
+   * time, and stands as a fresh (not stale) result until the next probe.
+   */
+  observe?: (observation: QuotaWindowObservation) => void;
+};
 
 function parseObservedAt(result: ProviderQuotaResult): number | null {
   if (!result.observedAt) return null;
@@ -161,7 +177,27 @@ export function createQuotaSnapshotReader(options: {
     });
   }
 
-  return async (input = {}) => {
+  function observe(observation: QuotaWindowObservation) {
+    const observedAt = observation.observedAt.toISOString();
+    const previous = lastGood.get(observation.provider);
+    const windows = (previous?.windows ?? []).filter((window) => window.key !== observation.window.key);
+    windows.push(observation.window);
+    const fresh: ProviderQuotaResult = {
+      provider: observation.provider,
+      ok: true,
+      source: previous?.source ?? observation.source ?? null,
+      windows,
+      observedAt,
+    };
+    lastGood.set(observation.provider, fresh);
+    // Readers see it at once. The probe schedule is untouched: a run's stream
+    // reports one window at a time, so the probe still fills in the rest.
+    const results = (cached?.results ?? []).filter((row) => row.provider !== observation.provider);
+    results.push(fresh);
+    cached = { results, fetchedAt: cached?.fetchedAt ?? observation.observedAt };
+  }
+
+  const read: QuotaSnapshotReader = async (input = {}) => {
     const now = input.now ?? new Date();
     if (cached && now.getTime() < refreshAt) return cached;
     if (inFlight) return inFlight;
@@ -198,6 +234,8 @@ export function createQuotaSnapshotReader(options: {
       });
     return inFlight;
   };
+  read.observe = observe;
+  return read;
 }
 
 let sharedQuotaSnapshotReader: QuotaSnapshotReader | null = null;
@@ -206,6 +244,83 @@ let sharedQuotaSnapshotReader: QuotaSnapshotReader | null = null;
 export function readQuotaSnapshot(input?: { now?: Date }): Promise<QuotaSnapshot> {
   sharedQuotaSnapshotReader ??= createQuotaSnapshotReader();
   return sharedQuotaSnapshotReader(input);
+}
+
+/** Folds an observation into the process-wide snapshot (see QuotaSnapshotReader.observe). */
+export function observeQuotaWindow(observation: QuotaWindowObservation): void {
+  sharedQuotaSnapshotReader ??= createQuotaSnapshotReader();
+  sharedQuotaSnapshotReader.observe?.(observation);
+}
+
+/** Claude Code `rate_limit_event` window types that map onto known quota windows. */
+const CLAUDE_RATE_LIMIT_WINDOWS: Record<string, { key: string; label: string }> = {
+  five_hour: { key: "five_hour", label: "Current session" },
+  seven_day: { key: "seven_day", label: "Current week (all models)" },
+  seven_day_sonnet: { key: "seven_day_sonnet", label: "Current week (Sonnet only)" },
+  seven_day_opus: { key: "seven_day_opus", label: "Current week (Opus only)" },
+};
+
+function rateLimitPercent(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return null;
+  // The SDK reports utilization as the API's ratio, so at most 1 means a
+  // fraction; larger values are already percents (a defensive reading).
+  const percent = value <= 1 ? value * 100 : value;
+  return Math.min(100, Math.round(percent));
+}
+
+function rateLimitResetsAt(value: unknown): string | null {
+  if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+    // Epoch seconds unless it already looks like milliseconds.
+    const ms = value < 1e12 ? value * 1000 : value;
+    return new Date(ms).toISOString();
+  }
+  if (typeof value === "string" && value.trim().length > 0) {
+    const parsed = new Date(value);
+    return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
+  }
+  return null;
+}
+
+/**
+ * Normalizes Claude Code's `rate_limit_info` (from the SDK's `rate_limit_event`,
+ * forwarded by the Claude ACP bridge as usage-update meta) into a quota
+ * window. Overage and unknown window types yield null.
+ */
+export function claudeRateLimitInfoToWindow(info: Record<string, unknown>): QuotaWindow | null {
+  const type = typeof info.rateLimitType === "string" ? info.rateLimitType : null;
+  const known = type ? CLAUDE_RATE_LIMIT_WINDOWS[type] : undefined;
+  if (!known) return null;
+  return {
+    key: known.key,
+    label: known.label,
+    usedPercent: rateLimitPercent(info.utilization),
+    resetsAt: rateLimitResetsAt(info.resetsAt),
+    valueLabel: null,
+    detail: null,
+  };
+}
+
+const CLAUDE_RUN_STREAM_SOURCE = "claude-run-stream";
+const harvestedProviderWindows = new Set<string>();
+
+/**
+ * Records a Claude rate-limit observation from a live run against `provider`.
+ * Returns the window it became, and whether this process has seen that
+ * provider window before, so the caller can log the first one for operators
+ * to confirm the payload's scale.
+ */
+export function observeClaudeRateLimitInfo(
+  provider: string,
+  info: Record<string, unknown>,
+  observedAt: Date,
+): { window: QuotaWindow; first: boolean } | null {
+  const window = claudeRateLimitInfoToWindow(info);
+  if (!window || window.usedPercent == null) return null;
+  observeQuotaWindow({ provider, window, observedAt, source: CLAUDE_RUN_STREAM_SOURCE });
+  const seenKey = `${provider}:${window.key}`;
+  const first = !harvestedProviderWindows.has(seenKey);
+  harvestedProviderWindows.add(seenKey);
+  return { window, first };
 }
 
 async function withQuotaTimeout(

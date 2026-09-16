@@ -20,6 +20,7 @@ import {
   subscriptionWindowGateService,
   type SubscriptionWindowWait,
 } from "./subscription-window-gate.js";
+import { observeClaudeRateLimitInfo, providerSlugForAdapterType } from "./quota-windows.js";
 import {
   legacyExecutionNeedsReconciliation,
   terminalizeLegacyExecution,
@@ -258,6 +259,7 @@ import { getServerAdapter, runningProcesses } from "../adapters/index.js";
 import type {
   AdapterExecutionResult,
   AdapterInvocationMeta,
+  AdapterExecutionContext,
   AdapterRuntimeEvent,
   AdapterRuntimeMcpAccess,
   AdapterRuntimeMcpServer,
@@ -22568,6 +22570,33 @@ export function heartbeatService(
             payload: event.payload,
           });
         };
+        // Provider usage harvested from the run's own stream refreshes the
+        // quota snapshot without spending a read on the rate-limited usage
+        // endpoint. The first window seen per process is logged with its raw
+        // payload so an operator can confirm the provider's scale.
+        const onProviderQuotaObserved: AdapterExecutionContext["onProviderQuotaObserved"] = async (observation) => {
+          if (observation.kind !== "claude_rate_limit_info") return;
+          const provider = providerSlugForAdapterType(agent.adapterType);
+          const observed = observeClaudeRateLimitInfo(
+            provider,
+            observation.info,
+            new Date(observation.observedAt),
+          );
+          if (!observed) return;
+          const fields = {
+            runId: run.id,
+            agentId: agent.id,
+            provider,
+            key: observed.window.key,
+            usedPercent: observed.window.usedPercent,
+            resetsAt: observed.window.resetsAt,
+          };
+          if (observed.first) {
+            logger.info({ ...fields, raw: observation.info }, "quota harvest: first provider window observed from a run stream");
+          } else {
+            logger.debug(fields, "quota harvest: provider window observed from a run stream");
+          }
+        };
 
         const adapter = getServerAdapter(agent.adapterType);
         const durableGoalControlRun =
@@ -23888,6 +23917,7 @@ export function heartbeatService(
                     onLog,
                     onMeta: onAdapterMeta,
                     onEvent: onAdapterEvent,
+                    onProviderQuotaObserved,
                     startupTraceContext: getStartupTraceContext(),
                     onRuntimeProgress: async (progress) => {
                       await recordCurrentHeartbeatRunRuntimeProgress(

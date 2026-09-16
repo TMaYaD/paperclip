@@ -194,6 +194,20 @@ export interface AdapterRuntimeEvent {
   payload?: Record<string, unknown>;
 }
 
+/**
+ * A provider usage observation harvested from a live run's stream, such as
+ * Claude Code's `rate_limit_event`, which carries the same subscription
+ * window utilization the usage endpoint reports but costs no request.
+ */
+export interface AdapterProviderQuotaObservation {
+  /** Which provider payload `info` is; the host normalizes per kind. */
+  kind: "claude_rate_limit_info";
+  /** The raw provider payload, passed through untouched. */
+  info: Record<string, unknown>;
+  /** ISO timestamp of when the run reported it. */
+  observedAt: string;
+}
+
 export interface AdapterExecutionContext {
   /** Run-scoped operator cancellation; adapters must settle before returning. */
   signal?: AbortSignal;
@@ -223,6 +237,12 @@ export interface AdapterExecutionContext {
   onLog: (stream: "stdout" | "stderr", chunk: string) => Promise<void>;
   onMeta?: (meta: AdapterInvocationMeta) => Promise<void>;
   onEvent?: (event: AdapterRuntimeEvent) => Promise<void>;
+  /**
+   * Best-effort: the run's stream reported provider usage (see
+   * AdapterProviderQuotaObservation). The host folds it into its quota
+   * snapshot; adapters never wait on or fail because of it.
+   */
+  onProviderQuotaObserved?: (observation: AdapterProviderQuotaObservation) => Promise<void>;
   onRuntimeProgress?: RuntimeStatusSink;
   /**
    * Reports that execution has crossed the adapter's dispatch boundary.

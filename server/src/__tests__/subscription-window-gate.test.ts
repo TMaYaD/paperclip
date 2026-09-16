@@ -8,7 +8,11 @@ import {
   observeSubscriptionWindow,
   type SubscriptionWindowPolicy,
 } from "../services/subscription-window-gate.ts";
-import { createQuotaSnapshotReader, isRateLimitedQuotaResult } from "../services/quota-windows.ts";
+import {
+  claudeRateLimitInfoToWindow,
+  createQuotaSnapshotReader,
+  isRateLimitedQuotaResult,
+} from "../services/quota-windows.ts";
 
 const NOW = new Date("2026-09-13T12:00:00.000Z");
 
@@ -268,6 +272,42 @@ describe("decideSubscriptionWindowWait", () => {
       now: NOW,
     });
     expect(mislabeled).toMatchObject({ usageUnknown: true, usedPercent: null });
+  });
+});
+
+describe("claudeRateLimitInfoToWindow", () => {
+  it("maps the SDK's rate_limit_info onto the known quota windows", () => {
+    expect(
+      claudeRateLimitInfoToWindow({ status: "allowed", rateLimitType: "five_hour", utilization: 0.42, resetsAt: 1757775600 }),
+    ).toEqual({
+      key: "five_hour",
+      label: "Current session",
+      usedPercent: 42,
+      resetsAt: "2025-09-13T15:00:00.000Z",
+      valueLabel: null,
+      detail: null,
+    });
+    expect(claudeRateLimitInfoToWindow({ rateLimitType: "seven_day", utilization: 79 })).toMatchObject({
+      key: "seven_day",
+      label: "Current week (all models)",
+      usedPercent: 79,
+      resetsAt: null,
+    });
+    expect(claudeRateLimitInfoToWindow({ rateLimitType: "seven_day_opus", utilization: 1 })).toMatchObject({
+      key: "seven_day_opus",
+      usedPercent: 100,
+    });
+    // Milliseconds and ISO strings are accepted for the reset time.
+    expect(claudeRateLimitInfoToWindow({ rateLimitType: "seven_day_sonnet", utilization: 0.5, resetsAt: 1757775600000 })?.resetsAt).toBe("2025-09-13T15:00:00.000Z");
+    expect(claudeRateLimitInfoToWindow({ rateLimitType: "five_hour", utilization: 0.5, resetsAt: "2026-09-13T15:00:00Z" })?.resetsAt).toBe("2026-09-13T15:00:00.000Z");
+  });
+
+  it("yields null for overage and unknown window types and null usage when utilization is absent", () => {
+    expect(claudeRateLimitInfoToWindow({ rateLimitType: "overage", utilization: 0.1 })).toBeNull();
+    expect(claudeRateLimitInfoToWindow({ rateLimitType: "seven_day_overage_included", utilization: 0.1 })).toBeNull();
+    expect(claudeRateLimitInfoToWindow({ status: "allowed" })).toBeNull();
+    expect(claudeRateLimitInfoToWindow({ rateLimitType: "five_hour" })?.usedPercent).toBeNull();
+    expect(claudeRateLimitInfoToWindow({ rateLimitType: "five_hour", utilization: -3 })?.usedPercent).toBeNull();
   });
 });
 
@@ -572,6 +612,67 @@ describe("createQuotaSnapshotReader", () => {
     expect(isRateLimitedQuotaResult({ provider: "anthropic", ok: false, error: "usage api returned 429", windows: [] })).toBe(true);
     expect(isRateLimitedQuotaResult({ provider: "anthropic", ok: false, error: "probe ended early", windows: [] })).toBe(false);
     expect(isRateLimitedQuotaResult({ provider: "anthropic", ok: true, windows: [] })).toBe(false);
+  });
+
+  it("folds a harvested window into the snapshot as a fresh row and keeps it through a throttled probe", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const probed: ProviderQuotaResult = {
+      provider: "anthropic",
+      source: "anthropic-oauth",
+      ok: true,
+      windows: [
+        window({ key: "five_hour", usedPercent: 40, resetsAt: "2026-09-13T15:00:00.000Z" }),
+        window({ key: "seven_day", usedPercent: 70 }),
+      ],
+    };
+    const fetch = vi
+      .fn<() => Promise<ProviderQuotaResult[]>>()
+      .mockResolvedValueOnce([probed])
+      .mockResolvedValue([{ provider: "anthropic", ok: false, rateLimited: true, error: "429", windows: [] }]);
+    const read = createQuotaSnapshotReader({ fetch, ttlMs: 120_000, maxStaleMs: 10 * 60_000, maxThrottleRetries: 0 });
+    await read({ now: NOW });
+
+    // A run reports the session window a minute later: readers see it at
+    // once, the other window is kept, and the row is fresh, not stale.
+    const harvestedAt = new Date(NOW.getTime() + 60_000);
+    read.observe?.({
+      provider: "anthropic",
+      window: window({ key: "five_hour", usedPercent: 55, resetsAt: "2026-09-13T15:00:00.000Z" }),
+      observedAt: harvestedAt,
+      source: "claude-run-stream",
+    });
+    const afterHarvest = await read({ now: harvestedAt });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(afterHarvest.results[0]).toMatchObject({
+      provider: "anthropic",
+      ok: true,
+      source: "anthropic-oauth",
+      observedAt: harvestedAt.toISOString(),
+    });
+    expect(afterHarvest.results[0]?.stale).toBeUndefined();
+    expect(afterHarvest.results[0]?.windows.map((w) => [w.key, w.usedPercent])).toEqual([
+      ["seven_day", 70],
+      ["five_hour", 55],
+    ]);
+
+    // The next probe is throttled: the harvested row is what stands in.
+    const later = new Date(NOW.getTime() + 121_000);
+    vi.setSystemTime(later);
+    const throttled = await read({ now: later });
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(throttled.results[0]).toMatchObject({ ok: true, stale: true, rateLimited: true, observedAt: harvestedAt.toISOString() });
+    expect(throttled.results[0]?.windows.find((w) => w.key === "five_hour")?.usedPercent).toBe(55);
+
+    // A provider nobody has probed yet gets a row of its own.
+    read.observe?.({
+      provider: "openai",
+      window: window({ key: "five_hour", usedPercent: 12 }),
+      observedAt: later,
+      source: "codex-run-stream",
+    });
+    const rows = (await read({ now: later })).results;
+    expect(rows.find((row) => row.provider === "openai")).toMatchObject({ ok: true, source: "codex-run-stream" });
   });
 
   it("attributes a fetch that throws outright to every known provider so their last good read stands in", async () => {
