@@ -1,3 +1,4 @@
+import { mapCodexRpcQuota } from "../../../packages/adapters/codex-local/src/server/quota.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ProviderQuotaResult, QuotaWindow } from "@paperclipai/shared";
 import {
@@ -764,5 +765,69 @@ describe("createQuotaSnapshotReader", () => {
         windows: [window({ key: "seven_day", usedPercent: 70 })],
       }),
     ]);
+  });
+});
+
+
+describe("Codex quota mapping through snapshots and subscription enforcement", () => {
+  const now = new Date("2026-09-21T03:30:00.000Z");
+  const weekly = { usedPercent: 8, windowDurationMins: 10_080, resetsAt: 1_790_502_487 };
+  const session = { usedPercent: 85, windowDurationMins: 300, resetsAt: now.getTime() / 1000 + 3600 };
+
+  async function snapshot(primary: typeof weekly, secondary: typeof weekly | null) {
+    const read = createQuotaSnapshotReader({ fetch: async () => [{
+      provider: "openai", ok: true,
+      windows: mapCodexRpcQuota({ rateLimits: { limitId: "codex", primary, secondary } }).windows,
+    }] });
+    return (await read()).results[0]!;
+  }
+
+  it("exposes captured weekly usage and leaves an unreported session unknown", async () => {
+    const result = await snapshot(weekly, null);
+    expect(observeSubscriptionWindow(result, "provider_week")).toMatchObject({
+      usedPercent: 8, resetsAt: "2026-09-27T09:48:07.000Z",
+    });
+    expect(observeSubscriptionWindow(result, "provider_session")).toBeNull();
+    const decide = (windowKind: SubscriptionWindowPolicy["windowKind"], amount: number) =>
+      decideSubscriptionWindowWait({ policies: [policy({ windowKind, amount })], result, provider: "openai", now });
+    expect(decide("provider_week", 80)).toBeNull();
+    const wait = decide("provider_week", 5);
+    expect(wait).toMatchObject({ quotaKey: "seven_day", usedPercent: 8, usageUnknown: false });
+    expect(wait!.resumeAt.toISOString()).toBe("2026-09-27T09:48:37.000Z");
+    expect(decide("provider_session", 80)).toMatchObject({ quotaKey: "five_hour", usedPercent: null, usageUnknown: true });
+  });
+
+  it("replaces the old positional snapshot on refresh instead of retaining its false session key", async () => {
+    const corrected: ProviderQuotaResult = {
+      provider: "openai", ok: true,
+      windows: mapCodexRpcQuota({ rateLimits: { limitId: "codex", primary: weekly } }).windows,
+    };
+    const fetch = vi.fn()
+      .mockResolvedValueOnce([{ ...corrected, windows: [{ ...corrected.windows[0], key: "five_hour" }] }])
+      .mockResolvedValueOnce([corrected]);
+    const read = createQuotaSnapshotReader({ fetch, ttlMs: 1 });
+    const before = await read();
+    expect(observeSubscriptionWindow(before.results[0], "provider_session")?.usedPercent).toBe(8);
+    const after = await read({ now: new Date(before.fetchedAt.getTime() + 2) });
+    expect(observeSubscriptionWindow(after.results[0], "provider_session")).toBeNull();
+    expect(observeSubscriptionWindow(after.results[0], "provider_week")?.usedPercent).toBe(8);
+  });
+
+  it("uses actual session usage, reset and five-hour bounds even in secondary", async () => {
+    const result = await snapshot(weekly, session);
+    const observation = observeSubscriptionWindow(result, "provider_session")!;
+    expect(observation.usedPercent).toBe(85);
+    const release = releaseSubscriptionLimit({ windowKind: "provider_session", limitPercent: 80, progressive: true, resetsAt: observation.resetsAt, now });
+    expect(release.windowEnd!.getTime() - release.windowStart!.getTime()).toBe(5 * 3600_000);
+    expect(release.windowEnd!.getTime() - now.getTime()).toBe(3600_000);
+    expect(release.releasedPercent).toBe(64);
+    const wait = decideSubscriptionWindowWait({
+      policies: [policy(), policy({ id: "week", windowKind: "provider_week" })], result, provider: "openai", now,
+    });
+    expect(wait).toMatchObject({ quotaKey: "five_hour", usedPercent: 85, usageUnknown: false });
+    expect(wait!.resumeAt.getTime() - now.getTime()).toBe(3630_000);
+    const week = releaseSubscriptionLimit({ windowKind: "provider_week", limitPercent: 80, progressive: true, resetsAt: observeSubscriptionWindow(result, "provider_week")!.resetsAt, now });
+    expect(week.windowEnd!.getTime() - week.windowStart!.getTime()).toBe(168 * 3600_000);
+    expect(week.windowEnd!.getTime() - now.getTime()).toBeLessThan(168 * 3600_000);
   });
 });

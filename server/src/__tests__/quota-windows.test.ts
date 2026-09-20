@@ -139,7 +139,7 @@ describe("WHAM used_percent normalization via fetchCodexQuota", () => {
     expect(windows[0]!.usedPercent).toBe(50);
   });
 
-  it("treats values < 1 as fraction and multiplies by 100 (0.5 → 50%)", async () => {
+  it("preserves fractional percentages (0.5 → 0.5%)", async () => {
     mockFetch({
       rate_limit: {
         primary_window: {
@@ -150,11 +150,10 @@ describe("WHAM used_percent normalization via fetchCodexQuota", () => {
       },
     });
     const windows = await fetchCodexQuota("token", null);
-    expect(windows[0]!.usedPercent).toBe(50);
+    expect(windows[0]!.usedPercent).toBe(0.5);
   });
 
-  it("treats value exactly 1.0 as 1% (not 100%) — the < 1 heuristic boundary", async () => {
-    // 1.0 is NOT < 1, so it is treated as already-percentage → 1%
+  it("treats value exactly 1.0 as 1% (not 100%)", async () => {
     mockFetch({
       rate_limit: {
         primary_window: {
@@ -741,7 +740,7 @@ describe("fetchCodexQuota", () => {
     });
     const windows = await fetchCodexQuota("token", null);
     expect(windows).toHaveLength(1);
-    expect(windows[0]).toMatchObject({ label: "5h limit", usedPercent: 30, resetsAt: "2026-01-02T00:00:00.000Z" });
+    expect(windows[0]).toMatchObject({ key: null, label: "24h limit", usedPercent: 30, resetsAt: "2026-01-02T00:00:00.000Z" });
   });
 
   it("parses secondary_window alongside primary_window", async () => {

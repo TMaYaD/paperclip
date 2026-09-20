@@ -272,8 +272,9 @@ async function readResponseTextPrefix(
 }
 
 function normalizeCodexUsedPercent(rawPct: number | null | undefined): number | null {
-  if (rawPct == null) return null;
-  return Math.min(100, Math.round(rawPct < 1 ? rawPct * 100 : rawPct));
+  if (typeof rawPct !== "number" || !Number.isFinite(rawPct)) return null;
+  // Both Codex transports report percent, not a utilization ratio.
+  return Math.max(0, Math.min(100, rawPct));
 }
 
 export async function fetchCodexQuota(
@@ -299,25 +300,13 @@ export async function fetchCodexQuota(
   const windows: QuotaWindow[] = [];
 
   const rateLimit = body.rate_limit;
-  if (rateLimit?.primary_window != null) {
-    const w = rateLimit.primary_window;
+  // WHAM durations are seconds; RPC durations are minutes. Slot order does
+  // not identify the window (weekly-only plans put the week in primary).
+  for (const w of [rateLimit?.primary_window, rateLimit?.secondary_window]) {
+    if (!w) continue;
+    const durationMins = typeof w.limit_window_seconds === "number" ? w.limit_window_seconds / 60 : null;
     windows.push({
-      key: "five_hour",
-      label: "5h limit",
-      usedPercent: normalizeCodexUsedPercent(w.used_percent),
-      resetsAt:
-        typeof w.reset_at === "number"
-          ? unixSecondsToIso(w.reset_at)
-          : (w.reset_at ?? null),
-      valueLabel: null,
-      detail: null,
-    });
-  }
-  if (rateLimit?.secondary_window != null) {
-    const w = rateLimit.secondary_window;
-    windows.push({
-      key: "seven_day",
-      label: "Weekly limit",
+      ...codexWindowIdentity(durationMins, true),
       usedPercent: normalizeCodexUsedPercent(w.used_percent),
       resetsAt:
         typeof w.reset_at === "number"
@@ -385,18 +374,31 @@ export interface CodexRpcQuotaSnapshot {
 
 function unixSecondsToIso(value: number | null | undefined): string | null {
   if (typeof value !== "number" || !Number.isFinite(value)) return null;
-  return new Date(value * 1000).toISOString();
+  const date = new Date(value * 1000);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+/** Only explicit, recognized durations on the account bucket get budget keys. */
+function codexWindowIdentity(durationMins: number | null | undefined, accountLimit: boolean) {
+  const key = durationMins === 300 ? "five_hour" : durationMins === 10_080 ? "seven_day" : null;
+  const label = durationMins === 300 ? "5h limit"
+    : durationMins === 10_080 ? "Weekly limit"
+      : typeof durationMins === "number" && Number.isFinite(durationMins) && durationMins > 0
+        ? `${durationMins % 60 === 0 ? `${durationMins / 60}h` : `${durationMins}m`} limit`
+        : "Usage limit";
+  return { key: accountLimit ? key : null, label };
 }
 
 function buildCodexRpcWindow(
-  label: string,
+  prefix: string,
   window: CodexRpcWindow | null | undefined,
-  key: string | null = null,
+  accountLimit: boolean,
 ): QuotaWindow | null {
   if (!window) return null;
+  const identity = codexWindowIdentity(window.windowDurationMins, accountLimit);
   return {
-    key,
-    label,
+    key: identity.key,
+    label: `${prefix}${identity.label}`,
     usedPercent: normalizeCodexUsedPercent(window.usedPercent),
     resetsAt: unixSecondsToIso(window.resetsAt),
     valueLabel: null,
@@ -420,34 +422,31 @@ function parseCreditBalance(value: string | number | null | undefined): string |
 
 export function mapCodexRpcQuota(result: CodexRpcRateLimitsResult, account?: CodexRpcAccountResult | null): CodexRpcQuotaSnapshot {
   const windows: QuotaWindow[] = [];
-  const limitOrder = ["codex"];
   const limitsById = result.rateLimitsByLimitId ?? {};
-  for (const key of Object.keys(limitsById)) {
-    if (!limitOrder.includes(key)) limitOrder.push(key);
-  }
-
   const rootLimit = result.rateLimits ?? null;
   const allLimits = new Map<string, CodexRpcLimit>();
-  if (rootLimit?.limitId) allLimits.set(rootLimit.limitId, rootLimit);
+  // Older servers omit limitId on the single account-bucket view. An
+  // explicitly named special-purpose root must never be promoted to codex.
+  if (rootLimit) allLimits.set(rootLimit.limitId ?? "codex", rootLimit);
   for (const [key, value] of Object.entries(limitsById)) {
     allLimits.set(key, value);
   }
-  if (!allLimits.has("codex") && rootLimit) allLimits.set("codex", rootLimit);
-
+  const limitOrder = ["codex", ...[...allLimits.keys()].filter((key) => key !== "codex")];
   for (const limitId of limitOrder) {
     const limit = allLimits.get(limitId);
     if (!limit) continue;
+    const accountLimit = limitId === "codex" && (limit.limitId == null || limit.limitId === "codex");
     const prefix =
-      limitId === "codex"
+      accountLimit
         ? ""
         : `${limit.limitName ?? limitId} · `;
     // Only the root Codex limit maps onto the stable five_hour / seven_day keys;
     // per-model limits keep a null key so budget gates never read them by mistake.
-    const primary = buildCodexRpcWindow(`${prefix}5h limit`, limit.primary, limitId === "codex" ? "five_hour" : null);
+    const primary = buildCodexRpcWindow(prefix, limit.primary, accountLimit);
     if (primary) windows.push(primary);
-    const secondary = buildCodexRpcWindow(`${prefix}Weekly limit`, limit.secondary, limitId === "codex" ? "seven_day" : null);
+    const secondary = buildCodexRpcWindow(prefix, limit.secondary, accountLimit);
     if (secondary) windows.push(secondary);
-    if (limitId === "codex" && limit.credits && limit.credits.unlimited !== true) {
+    if (accountLimit && limit.credits && limit.credits.unlimited !== true) {
       windows.push({
         key: "credits",
         label: "Credits",
@@ -481,7 +480,7 @@ type PendingRequest = {
 class CodexRpcClient {
   private proc = spawn(
     "codex",
-    ["-s", "read-only", "-a", "untrusted", "app-server"],
+    ["-s", "read-only", "-a", "on-request", "app-server"],
     { stdio: ["pipe", "pipe", "pipe"], env: process.env },
   );
 
