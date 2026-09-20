@@ -95,7 +95,7 @@ describe("CodexRpcClient spawn failures", () => {
       vi.fn(async () => new Response(
         JSON.stringify({
           rate_limit: {
-            primary_window: { used_percent: 0.5, reset_at: 1_711_111_111 },
+            primary_window: { used_percent: 0.5, limit_window_seconds: 18000, reset_at: 1_711_111_111 },
           },
         }),
         { status: 200, headers: { "content-type": "application/json" } },
@@ -110,7 +110,7 @@ describe("CodexRpcClient spawn failures", () => {
     expect(result.windows).toEqual([
       expect.objectContaining({
         label: "5h limit",
-        usedPercent: 50,
+        usedPercent: 0.5,
         resetsAt: "2024-03-22T12:38:31.000Z",
       }),
     ]);
