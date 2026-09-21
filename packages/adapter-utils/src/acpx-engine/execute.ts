@@ -4834,6 +4834,19 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
               // segment while updates must not create extra boundaries.
               flushOutputSegment();
             }
+            if (event.type === "status" && event.tag === "codex_rate_limits") {
+              const info = (event as Record<string, unknown>).rateLimits;
+              if (ctx.agent.adapterType === "codex_local" && info && typeof info === "object" && !Array.isArray(info)) {
+                try {
+                  await ctx.onProviderQuotaObserved?.({
+                    kind: "codex_rate_limits", info: info as Record<string, unknown>, observedAt: new Date().toISOString(),
+                  });
+                } catch {
+                  // Quota collection must not fail an otherwise healthy run.
+                }
+              }
+              continue;
+            }
             if (event.type === "status" && event.tag === "usage_update") {
               eventBreakdown = event.breakdown ?? eventBreakdown;
               eventCostUsd = usdCostAmount(event.cost) ?? eventCostUsd;

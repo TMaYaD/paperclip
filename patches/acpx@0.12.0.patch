@@ -1,8 +1,7 @@
 diff --git a/dist/live-checkpoint-ClPCSdrW.js b/dist/live-checkpoint-ClPCSdrW.js
-index 243c9d13bcba520923b63adfddad75cf2d94362d..643315c1e9b529768695c863eae7a29e9f5a3dac 100644
 --- a/dist/live-checkpoint-ClPCSdrW.js
 +++ b/dist/live-checkpoint-ClPCSdrW.js
-@@ -1532,7 +1532,7 @@ const ZED_TAG_KEYS = /* @__PURE__ */ new Set([
+@@ -1532,7 +1532,7 @@
  	"RedactedThinking",
  	"ToolUse"
  ]);
@@ -11,7 +10,7 @@ index 243c9d13bcba520923b63adfddad75cf2d94362d..643315c1e9b529768695c863eae7a29e
  const OPAQUE_VALUE_PATHS = /* @__PURE__ */ new Set([
  	"agent_capabilities",
  	"messages.Agent.content.ToolUse.input",
-@@ -2557,7 +2557,7 @@ function readCommandLineChar(state) {
+@@ -2557,7 +2557,7 @@
  		escaping: false,
  		hasPart: true
  	};
@@ -20,7 +19,7 @@ index 243c9d13bcba520923b63adfddad75cf2d94362d..643315c1e9b529768695c863eae7a29e
  		current: state.current,
  		quote: state.quote,
  		escaping: true,
-@@ -2912,8 +2912,8 @@ function promotePrefixedAuthEnvironment(env) {
+@@ -2912,8 +2912,8 @@
  	}
  	return protectedKeys;
  }
@@ -31,7 +30,7 @@ index 243c9d13bcba520923b63adfddad75cf2d94362d..643315c1e9b529768695c863eae7a29e
  	const protectedAuthEnvKeys = promotePrefixedAuthEnvironment(env);
  	if (authCredentials) for (const [methodId, credential] of Object.entries(authCredentials)) {
  		addAuthCredentialEnvKeys(protectedAuthEnvKeys, methodId, credential);
-@@ -2955,10 +2955,10 @@ function resolveConfiguredAuthCredential(methodId, authCredentials) {
+@@ -2955,10 +2955,10 @@
  	const configCredentials = authCredentials ?? {};
  	return configCredentials[methodId] ?? configCredentials[toEnvToken(methodId)];
  }
@@ -44,7 +43,7 @@ index 243c9d13bcba520923b63adfddad75cf2d94362d..643315c1e9b529768695c863eae7a29e
  		stdio: [
  			"pipe",
  			"pipe",
-@@ -3724,10 +3724,13 @@ function resolveClientCapabilities(params) {
+@@ -3724,10 +3724,13 @@
  		},
  		terminal: params.terminal
  	};
@@ -60,7 +59,7 @@ index 243c9d13bcba520923b63adfddad75cf2d94362d..643315c1e9b529768695c863eae7a29e
  	};
  }
  function isDevinRequestDiagnosticsMethod(method) {
-@@ -3957,9 +3960,26 @@ var AcpClient = class {
+@@ -3957,9 +3960,26 @@
  		this.lastAgentExit = void 0;
  		this.lastKnownPid = child.pid ?? void 0;
  		this.attachAgentLifecycleObservers(child);
@@ -87,7 +86,7 @@ index 243c9d13bcba520923b63adfddad75cf2d94362d..643315c1e9b529768695c863eae7a29e
  			if (!this.options.verbose) return;
  			process.stderr.write(chunk);
  		});
-@@ -3994,7 +4014,7 @@ var AcpClient = class {
+@@ -3994,7 +4014,7 @@
  			geminiAcp: isGeminiAcpCommand(spawnCommand, args),
  			copilotAcp: isCopilotAcpCommand(spawnCommand, args),
  			claudeAcp: isClaudeAcpCommand(spawnCommand, args),
@@ -96,7 +95,7 @@ index 243c9d13bcba520923b63adfddad75cf2d94362d..643315c1e9b529768695c863eae7a29e
  		};
  	}
  	logAgentLaunch(plan) {
-@@ -6070,6 +6090,27 @@ async function withConnectedSession(options) {
+@@ -6070,6 +6090,27 @@
  //#region src/runtime/engine/prompt-turn.ts
  const SESSION_REPLY_IDLE_MS = 1e3;
  const SESSION_REPLY_DRAIN_TIMEOUT_MS = 5e3;
@@ -124,7 +123,7 @@ index 243c9d13bcba520923b63adfddad75cf2d94362d..643315c1e9b529768695c863eae7a29e
  async function runPromptTurn(params) {
  	try {
  		const promptPromise = params.client.prompt(params.sessionId, params.prompt);
-@@ -6079,6 +6120,9 @@ async function runPromptTurn(params) {
+@@ -6079,6 +6120,9 @@
  			idleMs: SESSION_REPLY_IDLE_MS,
  			timeoutMs: SESSION_REPLY_DRAIN_TIMEOUT_MS
  		}).catch(() => {});
@@ -135,10 +134,9 @@ index 243c9d13bcba520923b63adfddad75cf2d94362d..643315c1e9b529768695c863eae7a29e
  		return {
  			stopReason: response.stopReason,
 diff --git a/dist/runtime.d.ts b/dist/runtime.d.ts
-index ccdbe5b032521518022223733049b8b38793473b..a04948e2b1ab8e169778e0d839ab5bf680573266 100644
 --- a/dist/runtime.d.ts
 +++ b/dist/runtime.d.ts
-@@ -266,6 +266,10 @@ type AcpRuntimeOptions = {
+@@ -266,6 +266,10 @@
    timeoutMs?: number;
    probeAgent?: string;
    verbose?: boolean;
@@ -150,10 +148,27 @@ index ccdbe5b032521518022223733049b8b38793473b..a04948e2b1ab8e169778e0d839ab5bf6
      signal: AbortSignal;
    }) => Promise<AcpPermissionDecision | undefined>;
 diff --git a/dist/runtime.js b/dist/runtime.js
-index 6c9cc999e50a11c399c68b3a0f1b7af4bc2317c0..7ec28ecf778623c6e63a2149a599172c184c49bd 100644
 --- a/dist/runtime.js
 +++ b/dist/runtime.js
-@@ -744,7 +744,8 @@ var AcpRuntimeManager = class {
+@@ -424,6 +424,17 @@
+ 	}
+ }
+ function statusUpdateEvent(tag, payload) {
++	if (tag === "session_info_update" && isRecord(payload._meta?.codex?.rateLimits)) {
++		const limits = payload._meta.codex.rateLimits;
++		const window = (value) => isRecord(value) ? {
++			usedPercent: value.usedPercent,
++			windowDurationMins: value.windowDurationMins,
++			resetsAt: value.resetsAt
++		} : null;
++		return { type: "status", tag: "codex_rate_limits", text: "Codex quota updated",
++			rateLimits: { limitId: limits.limitId, primary: window(limits.primary), secondary: window(limits.secondary) }
++		};
++	}
+ 	const text = resolveStatusTextForTag({
+ 		tag,
+ 		payload
+@@ -744,7 +755,8 @@
  		this.deps = deps;
  	}
  	createClient(options) {
@@ -164,10 +179,9 @@ index 6c9cc999e50a11c399c68b3a0f1b7af4bc2317c0..7ec28ecf778623c6e63a2149a599172c
  	async readPendingPersistentClient(record, options) {
  		const pendingClient = this.pendingPersistentClients.get(record.acpxRecordId);
 diff --git a/dist/session-options-jkYbBxGE.d.ts b/dist/session-options-jkYbBxGE.d.ts
-index 9d37f377fb6a0828e0d2bc5a48754f3aa71509a4..22dda59e0b7616a20ad45218913e5d8f884bae49 100644
 --- a/dist/session-options-jkYbBxGE.d.ts
 +++ b/dist/session-options-jkYbBxGE.d.ts
-@@ -84,6 +84,10 @@ type AcpClientOptions = {
+@@ -84,6 +84,10 @@
    terminal?: boolean;
    suppressSdkConsoleErrors?: boolean;
    verbose?: boolean;

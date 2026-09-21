@@ -1,3 +1,4 @@
+import { codexQuotaObservations } from "../services/codex-quota-observations.js";
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 
 vi.mock("../adapters/registry.js", () => ({
@@ -15,6 +16,22 @@ describe("fetchAllQuotaWindows", () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.restoreAllMocks();
+  });
+
+  it("skips the Codex probe while passive data is fresh without starving Claude", async () => {
+    const passive = { provider: "openai", source: "codex-run-stream", ok: true, windows: [] };
+    const read = vi.spyOn(codexQuotaObservations, "read").mockResolvedValue(passive);
+    const codex = vi.fn().mockResolvedValue({ ...passive, source: "codex-rpc" });
+    const claude = vi.fn().mockResolvedValue({ provider: "anthropic", ok: true, windows: [] });
+    vi.mocked(listServerAdapters).mockReturnValue([
+      { type: "codex_local", getQuotaWindows: codex }, { type: "claude_local", getQuotaWindows: claude },
+    ] as never);
+    expect((await fetchAllQuotaWindows())[0]).toEqual(passive);
+    expect(codex).not.toHaveBeenCalled();
+    expect(claude).toHaveBeenCalledOnce();
+    read.mockResolvedValue(null);
+    expect((await fetchAllQuotaWindows())[0].source).toBe("codex-rpc");
+    expect(codex).toHaveBeenCalledOnce();
   });
 
   it("returns adapter results without waiting for a slower provider to finish forever", async () => {
