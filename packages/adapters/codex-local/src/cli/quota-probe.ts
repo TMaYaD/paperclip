@@ -43,7 +43,7 @@ async function main() {
 
   const result: Record<string, unknown> = {
     timestamp: new Date().toISOString(),
-    auth,
+    auth: auth ? { email: auth.email, planType: auth.planType, lastRefresh: auth.lastRefresh } : null,
     tokenAvailable: token != null,
   };
 
@@ -108,7 +108,7 @@ async function main() {
     console.log(JSON.stringify({ ok, ...result }, null, 2));
   } else {
     console.log(`timestamp: ${result.timestamp}`);
-    console.log(`auth: ${JSON.stringify(auth)}`);
+    console.log(`auth: ${JSON.stringify(result.auth)}`);
     console.log(`tokenAvailable: ${token != null}`);
     if (result.rpc) console.log(`rpc: ${JSON.stringify(result.rpc, null, 2)}`);
     if (result.wham) console.log(`wham: ${JSON.stringify(result.wham, null, 2)}`);
