@@ -223,6 +223,12 @@ export interface AdapterExecutionContext {
   onLog: (stream: "stdout" | "stderr", chunk: string) => Promise<void>;
   onMeta?: (meta: AdapterInvocationMeta) => Promise<void>;
   onEvent?: (event: AdapterRuntimeEvent) => Promise<void>;
+  /** Provider quota metadata from a running transport; never credentials or model output. */
+  onProviderQuotaObserved?: (observation: {
+    kind: "codex_rate_limits";
+    info: Record<string, unknown>;
+    observedAt: string;
+  }) => Promise<void>;
   onRuntimeProgress?: RuntimeStatusSink;
   /**
    * Reports that execution has crossed the adapter's dispatch boundary.

@@ -1,3 +1,5 @@
+import { nativeCodexQuotaObservation } from "./codex-quota-observation.js";
+import type { AdapterExecutionContext } from "@paperclipai/adapter-utils";
 import { readVerifiedRemoteWorkspaceFile } from "./remote-deliverable-file.js";
 import { copyBackCodexAuth } from "@paperclipai/adapter-codex-local/server";
 import { nativeCompletionFeedback } from "./native-completion-feedback.js";
@@ -6851,6 +6853,7 @@ export async function executePaperclipNativeSession(input: {
   chatAttachmentReadScope?: NativeChatAttachmentReadScope;
   onLog?: (stream: "stdout" | "stderr", chunk: string) => Promise<void>;
   onEvent?: (event: AdapterRuntimeEvent) => Promise<void>;
+  onProviderQuotaObserved?: AdapterExecutionContext["onProviderQuotaObserved"];
   /** Persist task-level continuity before a durable goal can outlive this run. */
   onGoalCheckpoint?: (snapshot: PersistedNativeSession) => Promise<void>;
   sessionGoalControl?: NativeSessionGoalControl | null;
@@ -7399,6 +7402,14 @@ async function executePaperclipNativeSessionWithinScope(
     },
     {
       onCommittedEvent: async (event) => {
+        const quotaObservation = nativeCodexQuotaObservation(input.execution.provider.kind, event);
+        if (quotaObservation) {
+          try {
+            await input.onProviderQuotaObserved?.(quotaObservation);
+          } catch {
+            // Passive quota collection never changes run completion semantics.
+          }
+        }
         if (event.eventType === "item.completed" &&
             record(event.payload).kind === "agentMessage" &&
             record(event.payload).channel === "final") {

@@ -583,6 +583,35 @@ pub fn normalize_codex_notification(method: &str, params: &Value) -> Vec<Normali
     };
 
     match method {
+        "account/rateLimits/updated" => {
+            let limits = params.get("rateLimits").unwrap_or(&Value::Null);
+            if limits.get("limitId").and_then(Value::as_str) == Some("codex") {
+                let window = |name: &str| {
+                    let value = limits.get(name).unwrap_or(&Value::Null);
+                    if !value.is_object() {
+                        return Value::Null;
+                    }
+                    json!({
+                        "usedPercent": value.get("usedPercent").and_then(Value::as_f64),
+                        "windowDurationMins": value.get("windowDurationMins").and_then(Value::as_i64),
+                        "resetsAt": value.get("resetsAt").and_then(Value::as_i64),
+                    })
+                };
+                push(
+                    &mut events,
+                    "harness.diagnostic",
+                    EventPriority::P1,
+                    json!({
+                        "code": "codex_quota_updated",
+                        "rateLimits": {
+                            "limitId": "codex",
+                            "primary": window("primary"),
+                            "secondary": window("secondary"),
+                        },
+                    }),
+                );
+            }
+        }
         "thread/compacted" => push(
             &mut events,
             "context.compacted",
@@ -1290,6 +1319,34 @@ fn has_rfc_uri_scheme_prefix(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relays_only_codex_account_quota_fields() {
+        let events = normalize_codex_notification(
+            "account/rateLimits/updated",
+            &json!({"rateLimits": {
+                "limitId": "codex", "token": "must-not-leak",
+                "primary": {"usedPercent": 12, "windowDurationMins": 10080,
+                    "resetsAt": 1790502487, "secret": "must-not-leak"},
+                "secondary": null
+            }}),
+        );
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, "harness.diagnostic");
+        assert_eq!(events[0].payload["code"], "codex_quota_updated");
+        assert_eq!(
+            events[0].payload["rateLimits"]["primary"]["windowDurationMins"],
+            10080
+        );
+        assert!(!events[0].payload.to_string().contains("must-not-leak"));
+        assert!(
+            normalize_codex_notification(
+                "account/rateLimits/updated",
+                &json!({"rateLimits": {"limitId": "base_model_inference"}}),
+            )
+            .is_empty()
+        );
+    }
 
     #[test]
     fn preserves_codex_notice_text_from_current_and_legacy_payloads() {

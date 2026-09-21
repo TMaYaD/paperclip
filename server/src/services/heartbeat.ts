@@ -1,3 +1,5 @@
+import { codexQuotaObservations } from "./codex-quota-observations.js";
+import { observeQuotaResult } from "./quota-windows.js";
 import { AGENT_CHAT_DIRECTIVE, conversationReplay, isConversation, isConversationExecutionWake, isWaitingConversation, prepareConversationTurn, settleConversationTurn } from "./agent-conversations.js";
 import { PROCESS_IDENTITY_RECORDED, recordNativeLocalProcessStop } from "./native-local-process-stop.js";
 import { hasAcknowledgedNativeStopIntent, isAcknowledgedNativeStop, acknowledgedNativeStopExecutionHasStopped } from "./acknowledged-native-stop.js";
@@ -256,6 +258,7 @@ import {
 } from "./provider-trace-store.js";
 import { getServerAdapter, runningProcesses } from "../adapters/index.js";
 import type {
+  AdapterExecutionContext,
   AdapterExecutionResult,
   AdapterInvocationMeta,
   AdapterRuntimeEvent,
@@ -22561,6 +22564,20 @@ export function heartbeatService(
           });
         };
 
+        const onProviderQuotaObserved: AdapterExecutionContext["onProviderQuotaObserved"] = async (observation) => {
+          if (observation.kind !== "codex_rate_limits") return;
+          const env = parseObject(resolvedConfig.env);
+          const codexHome = readNonEmptyString(env.CODEX_HOME);
+          // Never guess which isolated/remote account produced a notification.
+          if (!codexHome || readNonEmptyString(env.OPENAI_API_KEY)) return;
+          try {
+            const result = await codexQuotaObservations.observe({ ...observation, codexHome });
+            if (result) observeQuotaResult(result);
+          } catch {
+            // Best effort; polling remains the fallback and quota cannot fail a run.
+          }
+        };
+
         const onAdapterEvent = async (event: AdapterRuntimeEvent) => {
           const eventType = event.eventType.trim();
           if (!eventType) return;
@@ -23714,6 +23731,7 @@ export function heartbeatService(
                       },
                       onLog,
                       onEvent: onAdapterEvent,
+                      onProviderQuotaObserved,
                       preparationSpans: nativeRunnerPreparationSpans,
                       // Bootstrap with executable/home discovery while keeping
                       // configured provider values and the server-selected
@@ -23893,6 +23911,7 @@ export function heartbeatService(
                     onLog,
                     onMeta: onAdapterMeta,
                     onEvent: onAdapterEvent,
+                    onProviderQuotaObserved,
                     startupTraceContext: getStartupTraceContext(),
                     onRuntimeProgress: async (progress) => {
                       await recordCurrentHeartbeatRunRuntimeProgress(
