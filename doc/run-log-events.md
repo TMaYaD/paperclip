@@ -168,3 +168,15 @@ and records cumulative usage counters. It does not include provider credentials
 or message content. The event establishes the accounting baseline; it is not a
 new billable usage receipt or a user-facing provider warning. Other provider
 identity checks remain in force.
+
+
+### Codex subscription quota observation
+
+The native Codex runner emits `harness.diagnostic` with code
+`codex_quota_updated` for `account/rateLimits/updated` notifications on the
+`codex` bucket. Its `rateLimits` object includes only `limitId`, `primary`, and
+`secondary`; windows include only `usedPercent`, `windowDurationMins`, and
+`resetsAt`. It contains no tokens, account IDs, credit details, or free-form
+provider metadata. The server uses the original event timestamp when updating
+its passive quota cache, so replay cannot make old usage fresh. This is a local
+run-log event, not first-party Telemetry or an OpenTelemetry span.

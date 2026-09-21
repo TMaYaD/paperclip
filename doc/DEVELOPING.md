@@ -597,6 +597,11 @@ Codex quota windows are identified by explicit duration, never by `primary`/`sec
 
 Quota polling reads the server process's Codex home/account, not each agent's isolated home. Multi-bucket RPC results represent metered limits, not multiple accounts. To compare normalized RPC and HTTP results, run `pnpm --filter @paperclipai/adapter-codex-local probe:quota` in the server's environment (or add `--rpc-only` / `--wham-only` to the probe command). The probe includes account email/plan metadata but omits auth tokens. See the [Codex app-server field definitions](https://learn.chatgpt.com/docs/app-server#6-rate-limits-chatgpt). Changes take effect after restarting the server or refreshing its in-memory quota snapshot; no database quota migration is needed.
 
+Codex ACP runs forward `account/rateLimits/updated` through the patched ACP bridge and ACPX runtime. Native Codex app-server runs forward the same allowlisted fields in a local runner diagnostic. The host accepts only the explicitly identified `codex` bucket, and only when the configured run home and server quota home both report the same subscription account ID. Unknown or different accounts, API-key overrides, unsupported transports, and unavailable local credential homes retain active polling. This extends the existing server-account budget model; it does not add budgets for separate accounts.
+
+Accepted updates immediately refresh the quota snapshot. At the next scheduled refresh, fresh passive data replaces the active Codex probe; other providers keep their own polling behavior. Polling resumes after `PAPERCLIP_QUOTA_SNAPSHOT_TTL_MS` of inactivity (120 seconds by default), at a reported reset, or when the account cannot be verified. A bucket update replaces its main-window snapshot, so a missing session cannot inherit stale usage. Reserve/model updates do not renew freshness. Native replay retains the original event timestamp, and a live update received during an older poll wins the race. Passive quota failures never fail the agent run.
+
+
 Local adapters require their corresponding CLI/session setup on the machine running Paperclip. External adapters are installed through the adapter/plugin flow and should not require hardcoded imports in `server/` or `ui/`.
 
 ## Config Freshness

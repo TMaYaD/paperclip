@@ -1337,6 +1337,58 @@ describe("shared ACPX engine runtime behavior", () => {
     expect(result.billingType).toBe("unknown");
   });
 
+  it.each([false, true])("relays Codex quota without failing runs when the observer throws (%s)", async (fails) => {
+    const quota = { limitId: "codex", primary: { usedPercent: 12, windowDurationMins: 10080, resetsAt: 1790502487 }, secondary: null };
+    const onProviderQuotaObserved = vi.fn(async () => { if (fails) throw new Error("observer unavailable"); });
+    const root = await makeTempRoot();
+    const stateDir = path.join(root, "state");
+    const execute = createAcpxEngineExecutor({
+      createRuntime: () => ({
+        ensureSession: async () => ({
+          backendSessionId: "backend-session",
+          agentSessionId: "agent-session",
+          runtimeSessionName: "runtime-session",
+        }),
+        startTurn: () => ({
+          events: (async function* () {
+            yield {
+              type: "status",
+              text: "usage",
+              tag: "codex_rate_limits",
+              rateLimits: quota,
+              cost: { amount: 0.31, currency: "USD" },
+              breakdown: { inputTokens: 40, outputTokens: 700, cachedReadTokens: 60 },
+            };
+            yield { type: "done", stopReason: "end_turn" };
+          })(),
+          result: Promise.resolve({ status: "completed", stopReason: "end_turn" }),
+          cancel: async () => {},
+        }),
+        close: async () => {},
+      }) as never,
+    });
+
+    const result = await execute({
+      runId: "run-usage-event-fallback",
+      agent: {
+        id: "agent-1",
+        companyId: "company-1",
+        adapterType: "codex_local",
+      },
+      runtime: {},
+      config: { agent: "custom", agentCommand: "node ./fake-acp.js", stateDir },
+      context: {},
+      onLog: async () => {},
+      onMeta: async () => {},
+      onProviderQuotaObserved,
+    } as never);
+
+    expect(result.exitCode).toBe(0);
+    expect(onProviderQuotaObserved).toHaveBeenCalledWith({
+      kind: "codex_rate_limits", info: quota, observedAt: expect.any(String),
+    });
+  });
+
   it.skipIf(process.platform === "win32")("materializes ACPX Claude skills without symlinked descendants", async () => {
     const root = await makeTempRoot();
     const skillRoot = path.join(root, "skills");

@@ -13,7 +13,30 @@ diff --git a/package.json b/package.json
 diff --git a/dist/index.js b/dist/index.js
 --- a/dist/index.js
 +++ b/dist/index.js
-@@ -25341,7 +25341,7 @@
+@@ -23929,9 +23929,20 @@
+       case "item/mcpToolCall/progress":
+         this.completeRetryIncidentOnTurnProgress();
+         return this.createMcpToolProgressEvent(notification.params);
+-      case "account/rateLimits/updated":
++      case "account/rateLimits/updated": {
+         this.handleRateLimitsUpdated(notification.params);
+-        return null;
++        const limits = notification.params.rateLimits;
++        const window = (value) => value ? {
++          usedPercent: value.usedPercent,
++          windowDurationMins: value.windowDurationMins,
++          resetsAt: value.resetsAt
++        } : null;
++        return this.createCodexSessionInfoUpdate({ rateLimits: {
++          limitId: limits.limitId,
++          primary: window(limits.primary),
++          secondary: window(limits.secondary)
++        } });
++      }
+       case "configWarning":
+         return await this.createConfigWarningEvent(notification.params);
+       case "warning":
+@@ -25341,7 +25352,7 @@
    async handleElicitation(params) {
      try {
        const context = this.createMcpElicitationContext(params);
@@ -22,7 +45,7 @@ diff --git a/dist/index.js b/dist/index.js
          const response2 = await this.connection.request(
            methods.client.elicitation.create,
            this.buildElicitationRequest(params, context),
-@@ -25563,7 +25563,7 @@
+@@ -25563,9 +25574,9 @@
              toolCall: {
                toolCallId: context.correlatedCallId,
                kind: "execute",
@@ -32,7 +55,11 @@ diff --git a/dist/index.js b/dist/index.js
                // content: [messageContent],   — omitted: already rendered via item/started
 -              // rawInput: { ... }            — omitted: same reason
              },
-@@ -26988,4 +26988,18 @@
+             _meta: { is_mcp_tool_approval: true },
+             options
+@@ -26986,6 +26997,20 @@
+ var SUPPORTED_GATEWAY_PROTOCOLS = {
+   openai: "responses"
  };
 +function paperclipBaseInstructions(request) {
 +  if (process.env.PAPERCLIP_ACPX_ISOLATED_CONTEXT !== "1") return void 0;
@@ -51,7 +78,7 @@ diff --git a/dist/index.js b/dist/index.js
  var CodexAcpClient = class {
    codexClient;
    config;
-@@ -27288,6 +27297,7 @@
+@@ -27288,6 +27313,7 @@
      const response = await this.codexClient.threadResume({
        config: await this.createSessionConfig(request.cwd, additionalDirectories, request.mcpServers ?? []),
        cwd: request.cwd,
@@ -59,7 +86,7 @@ diff --git a/dist/index.js b/dist/index.js
        modelProvider: await this.getResumeModelProvider(),
        threadId: request.sessionId
      });
-@@ -27310,6 +27320,7 @@
+@@ -27310,6 +27336,7 @@
      const response = await this.codexClient.threadResume({
        config: await this.createSessionConfig(request.cwd, additionalDirectories, request.mcpServers ?? []),
        cwd: request.cwd,
@@ -67,14 +94,16 @@ diff --git a/dist/index.js b/dist/index.js
        modelProvider: await this.getResumeModelProvider(),
        threadId: request.sessionId
      });
-@@ -27337,5 +27348,6 @@
+@@ -27337,6 +27364,7 @@
      const response = await this.codexClient.threadStart({
        config: await this.createSessionConfig(request.cwd, additionalDirectories, request.mcpServers),
        modelProvider: this.getModelProvider(),
 +      baseInstructions: paperclipBaseInstructions(request),
        cwd: request.cwd
      });
-@@ -27437,5 +27449,12 @@
+     const codexModels = await this.fetchAvailableModels();
+@@ -27436,6 +27464,13 @@
+     });
      const mergedConfig = {
        ...mergeGatewayConfig(this.config, this.gatewayConfig),
 +      ...(process.env.PAPERCLIP_ACPX_ISOLATED_CONTEXT === "1" ? {
@@ -87,7 +116,7 @@ diff --git a/dist/index.js b/dist/index.js
        projects: Object.fromEntries(sessionRoots.map((root) => [root, {
          trust_level: "trusted"
        }]))
-@@ -27449,7 +27468,7 @@
+@@ -27449,7 +27484,7 @@
        server: mcp
      }));
      let serversToConfigure = requestedServers;
@@ -96,8 +125,7 @@ diff --git a/dist/index.js b/dist/index.js
        const existingNames = await this.getConfigMcpServerNames(projectPath);
        serversToConfigure = requestedServers.filter((mcp) => !existingNames.has(mcp.name));
      }
-@@ -27483,14 +27502,15 @@
-   async refreshSkills(cwd, additionalRoots) {
+@@ -27484,13 +27519,14 @@
      if (!cwd) {
        return;
      }
@@ -114,7 +142,7 @@ diff --git a/dist/index.js b/dist/index.js
        forceReload: true
      });
    }
-@@ -27600,7 +27624,7 @@
+@@ -27599,7 +27635,7 @@
        threadId: request.sessionId,
        input,
        approvalPolicy: agentMode.approvalPolicy,
@@ -123,13 +151,13 @@ diff --git a/dist/index.js b/dist/index.js
        summary: disableSummary ? "none" : "auto",
        effort,
        model: modelId.model,
-@@ -30595,6 +30614,9 @@
+@@ -30612,6 +30648,9 @@
+               goalControlGeneration,
                updatedGoal
              );
-           }
++          }
 +          if (this.goalPublishIsCurrent(sessionState, sessionGeneration)) {
 +            await this.publishCurrentGoal(sessionState, sessionGeneration, true);
-+          }
+           }
          } else if (methodRequest.params.action === "pause") {
            const goal = await this.runWithProcessCheck(() => this.codexAcpClient.setGoalStatus(sessionState.sessionId, "paused"));
-           if (this.goalPublishIsCurrent(sessionState, sessionGeneration)) {

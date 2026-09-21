@@ -1,4 +1,5 @@
 import type { ProviderQuotaResult } from "@paperclipai/shared";
+import { codexQuotaObservations } from "./codex-quota-observations.js";
 import { listServerAdapters } from "../adapters/registry.js";
 
 const QUOTA_PROVIDER_TIMEOUT_MS = 20_000;
@@ -67,7 +68,13 @@ export async function fetchAllQuotaWindows(): Promise<ProviderQuotaResult[]> {
   const adapters = listServerAdapters().filter((a) => a.getQuotaWindows != null);
 
   const settled = await Promise.allSettled(
-    adapters.map((adapter) => withQuotaTimeout(adapter.type, adapter.getQuotaWindows!())),
+    adapters.map((adapter) => withQuotaTimeout(adapter.type, (async () => {
+      if (adapter.type === "codex_local") {
+        const passive = await codexQuotaObservations.read(QUOTA_SNAPSHOT_TTL_MS).catch(() => null);
+        if (passive) return passive;
+      }
+      return adapter.getQuotaWindows!();
+    })())),
   );
 
   return settled.map((result, i) => {
@@ -87,7 +94,9 @@ export type QuotaSnapshot = {
   fetchedAt: Date;
 };
 
-export type QuotaSnapshotReader = (input?: { now?: Date }) => Promise<QuotaSnapshot>;
+export type QuotaSnapshotReader = ((input?: { now?: Date }) => Promise<QuotaSnapshot>) & {
+  observe?: (result: ProviderQuotaResult) => void;
+};
 
 function parseObservedAt(result: ProviderQuotaResult): number | null {
   if (!result.observedAt) return null;
@@ -132,12 +141,15 @@ export function createQuotaSnapshotReader(options: {
   let inFlight: Promise<QuotaSnapshot> | null = null;
   /** Last ok result per provider, reused while that provider's refresh fails. */
   const lastGood = new Map<string, ProviderQuotaResult>();
+  const observationVersions = new Map<string, number>();
 
-  function reconcile(results: ProviderQuotaResult[], fetchedAt: Date): ProviderQuotaResult[] {
+  function reconcile(results: ProviderQuotaResult[], fetchedAt: Date, versionsAtStart: Map<string, number>): ProviderQuotaResult[] {
     const observedAt = fetchedAt.toISOString();
     return results.map((result) => {
+      const newer = lastGood.get(result.provider);
+      if (newer && (observationVersions.get(result.provider) ?? 0) > (versionsAtStart.get(result.provider) ?? 0)) return newer;
       if (result.ok) {
-        const fresh: ProviderQuotaResult = { ...result, observedAt };
+        const fresh: ProviderQuotaResult = { ...result, observedAt: result.observedAt ?? observedAt };
         lastGood.set(result.provider, fresh);
         return fresh;
       }
@@ -161,10 +173,15 @@ export function createQuotaSnapshotReader(options: {
     });
   }
 
-  return async (input = {}) => {
+  const read: QuotaSnapshotReader = async (input = {}) => {
     const now = input.now ?? new Date();
-    if (cached && now.getTime() < refreshAt) return cached;
+    const expiredPassive = cached?.results.some((row) => row.source === "codex-run-stream" && (
+      now.getTime() - (parseObservedAt(row) ?? 0) >= ttlMs ||
+      row.windows.some((window) => window.resetsAt && Date.parse(window.resetsAt) <= now.getTime())
+    ));
+    if (cached && !expiredPassive && now.getTime() < refreshAt) return cached;
     if (inFlight) return inFlight;
+    const versionsAtStart = new Map(observationVersions);
     inFlight = fetch()
       .then(
         (results) => results,
@@ -189,7 +206,7 @@ export function createQuotaSnapshotReader(options: {
           throttleRetries = 0;
           refreshAt = fetchedAt.getTime() + ttlMs;
         }
-        const snapshot: QuotaSnapshot = { results: reconcile(results, fetchedAt), fetchedAt };
+        const snapshot: QuotaSnapshot = { results: reconcile(results, fetchedAt, versionsAtStart), fetchedAt };
         cached = snapshot;
         return snapshot;
       })
@@ -198,6 +215,19 @@ export function createQuotaSnapshotReader(options: {
       });
     return inFlight;
   };
+  read.observe = (result) => {
+    if (!result.ok || !result.observedAt) return;
+    const previous = lastGood.get(result.provider);
+    if ((parseObservedAt(previous ?? result) ?? 0) > (parseObservedAt(result) ?? 0)) return;
+    lastGood.set(result.provider, result);
+    observationVersions.set(result.provider, (observationVersions.get(result.provider) ?? 0) + 1);
+    if (cached) cached = {
+      ...cached,
+      results: [...cached.results.filter((row) => row.provider !== result.provider), result],
+    };
+    // Do not postpone other providers' refreshes when Codex is active.
+  };
+  return read;
 }
 
 let sharedQuotaSnapshotReader: QuotaSnapshotReader | null = null;
@@ -230,4 +260,10 @@ async function withQuotaTimeout(
   } finally {
     if (timeoutId) clearTimeout(timeoutId);
   }
+}
+
+/** Make a validated live observation immediately visible to budget readers. */
+export function observeQuotaResult(result: ProviderQuotaResult): void {
+  sharedQuotaSnapshotReader ??= createQuotaSnapshotReader();
+  sharedQuotaSnapshotReader.observe?.(result);
 }
