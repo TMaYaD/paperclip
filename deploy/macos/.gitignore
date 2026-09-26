@@ -1,0 +1,3 @@
+*.local.json
+*.plist
+__pycache__/

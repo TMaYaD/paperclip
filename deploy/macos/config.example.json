@@ -1,0 +1,13 @@
+{
+  "user": "<service-account>",
+  "group": "<service-group>",
+  "home": "<absolute-home-directory>",
+  "checkout": "<absolute-monitored-checkout>",
+  "gitmon_bin": "<absolute-path-to-gitmon>",
+  "path": "<node-and-git-bin-directories>:/usr/bin:/bin:/usr/sbin:/sbin",
+  "repo": "<owner>/<repository>",
+  "api_base": "<http-or-https-server-bind-url>",
+  "instance": "default",
+  "build_when": "idle",
+  "poll_seconds": 300
+}
