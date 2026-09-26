@@ -1663,7 +1663,7 @@ export function attentionService(db: Db, serviceOptions: AttentionServiceOptions
       }
 
       const exhaustedRunRows = await db
-        .select({
+        .selectDistinctOn([heartbeatRuns.id], {
           id: heartbeatRuns.id,
           companyId: heartbeatRuns.companyId,
           agentId: heartbeatRuns.agentId,
@@ -1671,7 +1671,7 @@ export function attentionService(db: Db, serviceOptions: AttentionServiceOptions
           status: heartbeatRuns.status,
           error: heartbeatRuns.error,
           errorCode: heartbeatRuns.errorCode,
-          contextSnapshot: heartbeatRuns.contextSnapshot,
+          contextSnapshot: sql<Record<string, unknown>>`jsonb_build_object('issueId', ${heartbeatRuns.contextSnapshot} -> 'issueId', 'taskId', ${heartbeatRuns.contextSnapshot} -> 'taskId')`,
           createdAt: heartbeatRuns.createdAt,
           updatedAt: heartbeatRuns.updatedAt,
           finishedAt: heartbeatRuns.finishedAt,
@@ -1689,13 +1689,13 @@ export function attentionService(db: Db, serviceOptions: AttentionServiceOptions
           eq(heartbeatRunEvents.eventType, "lifecycle"),
           sql`${heartbeatRunEvents.message} like 'Bounded retry exhausted%'`,
         ))
-        .orderBy(desc(heartbeatRuns.createdAt), desc(heartbeatRunEvents.id));
+        .orderBy(heartbeatRuns.id, desc(heartbeatRunEvents.id));
 
       const latestExhaustedByRunId = new Map<string, (typeof exhaustedRunRows)[number]>();
       for (const row of exhaustedRunRows) {
         if (!latestExhaustedByRunId.has(row.id)) latestExhaustedByRunId.set(row.id, row);
       }
-      const failedRows = [...latestExhaustedByRunId.values()];
+      const failedRows = [...latestExhaustedByRunId.values()].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
       const failedIssueIds = failedRows.map((row) => readRunIssueId(row.contextSnapshot));
       const failedAgentIds = [...new Set(failedRows.map((row) => row.agentId))];
       const oldestFailedRunCreatedAt = failedRows.reduce<Date | null>((oldest, row) => {
