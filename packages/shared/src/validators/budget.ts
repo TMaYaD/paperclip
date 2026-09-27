@@ -4,6 +4,7 @@ import {
   BUDGET_METRICS,
   BUDGET_SCOPE_TYPES,
   BUDGET_WINDOW_KINDS,
+  SUBSCRIPTION_BUDGET_PROVIDERS,
   isSubscriptionBudgetWindowKind,
 } from "../constants.js";
 
@@ -11,6 +12,7 @@ export const upsertBudgetPolicySchema = z.object({
   scopeType: z.enum(BUDGET_SCOPE_TYPES),
   scopeId: z.string().guid(),
   metric: z.enum(BUDGET_METRICS).optional().default("billed_cents"),
+  provider: z.enum(SUBSCRIPTION_BUDGET_PROVIDERS).nullable().optional(),
   windowKind: z.enum(BUDGET_WINDOW_KINDS).optional().default("calendar_month_utc"),
   amount: z.number().int().nonnegative(),
   // No default: an omitted flag keeps the stored value on an existing policy.
@@ -22,6 +24,9 @@ export const upsertBudgetPolicySchema = z.object({
 }).superRefine((value, ctx) => {
   const subscriptionWindow = isSubscriptionBudgetWindowKind(value.windowKind);
   if (value.metric === "subscription_percent") {
+    if (!value.provider) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Subscription rules require a provider", path: ["provider"] });
+    }
     if (!subscriptionWindow) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -42,6 +47,9 @@ export const upsertBudgetPolicySchema = z.object({
       message: "provider_session and provider_week windows require the subscription_percent metric",
       path: ["windowKind"],
     });
+  }
+  if (value.metric !== "subscription_percent" && value.provider != null) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Money budgets cannot select a subscription provider", path: ["provider"] });
   }
   if (value.progressive === true && value.metric !== "subscription_percent") {
     ctx.addIssue({

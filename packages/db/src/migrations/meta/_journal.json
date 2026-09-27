@@ -1940,6 +1940,13 @@
       "when": 1789481839880,
       "tag": "0278_progressive_budgets",
       "breakpoints": true
+    },
+    {
+      "idx": 279,
+      "version": "7",
+      "when": 1790481816894,
+      "tag": "0279_spicy_warlock",
+      "breakpoints": true
     }
   ]
 }

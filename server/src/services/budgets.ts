@@ -11,6 +11,7 @@ import {
 } from "@paperclipai/db";
 import {
   SUBSCRIPTION_BUDGET_WINDOW_DURATION_MS,
+  SUBSCRIPTION_BUDGET_PROVIDERS,
   isSubscriptionBudgetWindowKind,
   type BudgetIncident,
   type BudgetIncidentResolutionInput,
@@ -24,10 +25,9 @@ import {
   type BudgetThresholdType,
   type BudgetWindowKind,
 } from "@paperclipai/shared";
-import { notFound, unprocessable } from "../errors.js";
+import { conflict, notFound, unprocessable } from "../errors.js";
 import { logActivity } from "./activity-log.js";
 import {
-  providerSlugForAdapterType,
   readQuotaSnapshot as readSharedQuotaSnapshot,
   type QuotaSnapshotReader,
 } from "./quota-windows.js";
@@ -355,32 +355,16 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
   }
 
   /**
-   * Reads the current provider window for a `subscription_percent` policy. An
-   * agent scope reads its own adapter's provider; company and project scopes
-   * span every agent, so they report the most-used provider window.
+   * Reads the current provider window for a `subscription_percent` policy. Each
+   * rule reads only its selected provider, matching the dispatch gate. Provider
+   * windows have independent reset times and must never share a summary.
    */
   async function observeSubscriptionPolicy(policy: PolicyRow): Promise<SubscriptionWindowObservation | null> {
     const windowKind = policy.windowKind;
     if (policy.metric !== "subscription_percent" || !isSubscriptionBudgetWindowKind(windowKind)) return null;
     const snapshot = await readQuotaSnapshot();
-    let providers: string[] | null = null;
-    if (policy.scopeType === "agent") {
-      const agent = await db
-        .select({ adapterType: agents.adapterType })
-        .from(agents)
-        .where(eq(agents.id, policy.scopeId))
-        .then((rows) => rows[0] ?? null);
-      if (!agent) return null;
-      providers = [providerSlugForAdapterType(agent.adapterType)];
-    }
-    let best: SubscriptionWindowObservation | null = null;
-    for (const result of snapshot.results) {
-      if (providers && !providers.includes(result.provider)) continue;
-      const observation = observeSubscriptionWindow(result, windowKind);
-      if (!observation) continue;
-      if (!best || (observation.usedPercent ?? -1) > (best.usedPercent ?? -1)) best = observation;
-    }
-    return best;
+    const result = snapshot.results.find((row) => row.provider === policy.provider);
+    return observeSubscriptionWindow(result, windowKind);
   }
 
   async function buildPolicySummary(policy: PolicyRow): Promise<BudgetPolicySummary> {
@@ -430,7 +414,7 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
     // while runs are flowing or the other way round.
     const usageHeld = isSubscription
       ? isSubscriptionUsageHeld({
-          limitPercent: amount > 0 ? releasedAmount : 0,
+          limitPercent: amount > 0 ? release?.release.releasedPercent ?? amount : 0,
           usedPercent: observation?.usedPercent ?? null,
           stale: observation?.stale === true,
           observedAt: observation?.observedAt,
@@ -443,6 +427,7 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
       scopeType: policy.scopeType as BudgetScopeType,
       scopeId: policy.scopeId,
       scopeName: normalizeScopeName(policy.scopeType as BudgetScopeType, scope.name),
+      provider: policy.provider || null,
       metric: policy.metric as BudgetMetric,
       windowKind: policy.windowKind as BudgetWindowKind,
       amount,
@@ -633,6 +618,7 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
       companyId: string,
       input: BudgetPolicyUpsertInput,
       actorUserId: string | null,
+      policyId?: string,
     ): Promise<BudgetPolicySummary> => {
       const scope = await resolveScopeRecord(db, input.scopeType, input.scopeId);
       if (scope.companyId !== companyId) {
@@ -641,9 +627,22 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
 
       const metric = input.metric ?? "billed_cents";
       const windowKind = input.windowKind ?? (input.scopeType === "project" ? "lifetime" : "calendar_month_utc");
+      const provider = input.provider ?? "";
+      if (metric === "subscription_percent") {
+        if (!(SUBSCRIPTION_BUDGET_PROVIDERS as readonly string[]).includes(provider) || !isSubscriptionBudgetWindowKind(windowKind) || input.amount > 100) {
+          throw unprocessable("Subscription rules require a supported provider, provider window, and a limit no greater than 100%");
+        }
+      } else if (provider) {
+        throw unprocessable("Money budgets cannot select a subscription provider");
+      }
+      const editing = policyId ? await getPolicyRow(policyId) : null;
+      if (editing && editing.companyId !== companyId) throw notFound("Budget policy not found");
+      if (editing && (editing.metric !== "subscription_percent" || metric !== editing.metric || editing.scopeType !== input.scopeType || editing.scopeId !== input.scopeId)) {
+        throw unprocessable("Only subscription rules can be edited by ID, within their existing scope");
+      }
       const amount = Math.max(0, Math.floor(input.amount));
       const nextIsActive = amount > 0 && (input.isActive ?? true);
-      const existing = await db
+      const matching = await db
         .select()
         .from(budgetPolicies)
         .where(
@@ -653,20 +652,27 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
             eq(budgetPolicies.scopeId, input.scopeId),
             eq(budgetPolicies.metric, metric),
             eq(budgetPolicies.windowKind, windowKind),
+            eq(budgetPolicies.provider, provider),
           ),
         )
         .then((rows) => rows[0] ?? null);
 
+      if (metric === "subscription_percent" && matching && matching.id !== editing?.id) {
+        throw conflict("A rule already exists for this provider and window. Edit that rule instead.");
+      }
+      const existing = editing ?? matching;
       const now = new Date();
       // Progressive release only means something on a subscription window. An
       // omitted flag keeps what is stored, so an amount-only update cannot
       // silently switch a policy back to releasing its limit all at once.
       const progressive =
         metric === "subscription_percent" ? input.progressive ?? existing?.progressive ?? false : false;
-      const row = existing
+      const writePolicy = async () => existing
         ? await db
           .update(budgetPolicies)
           .set({
+            provider,
+            windowKind,
             amount,
             progressive,
             warnPercent: input.warnPercent ?? existing.warnPercent,
@@ -686,6 +692,7 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
             scopeType: input.scopeType,
             scopeId: input.scopeId,
             metric,
+            provider,
             windowKind,
             amount,
             progressive,
@@ -698,6 +705,16 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
           })
           .returning()
           .then((rows) => rows[0]);
+
+      const row = await writePolicy().catch((error: unknown) => {
+        const cause = error as { code?: string; cause?: { code?: string } };
+        if (cause.code === "23505" || cause.cause?.code === "23505") {
+          throw conflict("A rule already exists for this provider and window. Edit that rule instead.");
+        }
+        throw error;
+      });
+
+      if (!row) throw notFound("Budget policy not found");
 
       if (input.scopeType === "company" && windowKind === "calendar_month_utc") {
         await db
@@ -754,11 +771,28 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
           scopeId: row.scopeId,
           amount: row.amount,
           windowKind: row.windowKind,
+          provider: row.provider || null,
           progressive: row.progressive,
         },
       });
 
       return buildPolicySummary(row);
+    },
+
+    deletePolicy: async (companyId: string, policyId: string, actorUserId: string | null): Promise<void> => {
+      const policy = await getPolicyRow(policyId);
+      if (policy.companyId !== companyId) throw notFound("Budget policy not found");
+      if (policy.metric !== "subscription_percent") throw unprocessable("Only subscription rules can be deleted");
+      await db.delete(budgetPolicies).where(and(eq(budgetPolicies.id, policyId), eq(budgetPolicies.companyId, companyId)));
+      await logActivity(db, {
+        companyId,
+        actorType: "user",
+        actorId: actorUserId ?? "board",
+        action: "budget.policy_deleted",
+        entityType: "budget_policy",
+        entityId: policyId,
+        details: { scopeType: policy.scopeType, scopeId: policy.scopeId, provider: policy.provider, windowKind: policy.windowKind, amount: policy.amount, progressive: policy.progressive },
+      });
     },
 
     overview: async (companyId: string): Promise<BudgetOverview> => {

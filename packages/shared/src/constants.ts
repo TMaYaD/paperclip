@@ -892,6 +892,8 @@ export type BudgetWindowKind = (typeof BUDGET_WINDOW_KINDS)[number];
  * bounds come from the provider quota snapshot, not from the calendar.
  */
 export const SUBSCRIPTION_BUDGET_WINDOW_KINDS = ["provider_session", "provider_week"] as const;
+export const SUBSCRIPTION_BUDGET_PROVIDERS = ["anthropic", "openai"] as const;
+export type SubscriptionBudgetProvider = (typeof SUBSCRIPTION_BUDGET_PROVIDERS)[number];
 export type SubscriptionBudgetWindowKind = (typeof SUBSCRIPTION_BUDGET_WINDOW_KINDS)[number];
 
 /** Stable machine keys for provider quota windows, independent of display labels. */

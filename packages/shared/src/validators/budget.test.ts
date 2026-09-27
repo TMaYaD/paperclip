@@ -16,6 +16,7 @@ describe("upsertBudgetPolicySchema", () => {
         scopeType: "agent",
         scopeId,
         metric: "subscription_percent",
+        provider: "openai",
         windowKind,
         amount: 80,
       });
@@ -29,6 +30,7 @@ describe("upsertBudgetPolicySchema", () => {
         scopeType: "company",
         scopeId,
         metric: "subscription_percent",
+        provider: "openai",
         windowKind: "calendar_month_utc",
         amount: 80,
       }).success,
@@ -38,6 +40,7 @@ describe("upsertBudgetPolicySchema", () => {
         scopeType: "company",
         scopeId,
         metric: "subscription_percent",
+        provider: "openai",
         windowKind: "provider_week",
         amount: 101,
       }).success,
@@ -49,6 +52,7 @@ describe("upsertBudgetPolicySchema", () => {
       scopeType: "company",
       scopeId,
       metric: "subscription_percent",
+        provider: "openai",
       windowKind: "provider_week",
       amount: 70,
       progressive: true,
@@ -59,6 +63,7 @@ describe("upsertBudgetPolicySchema", () => {
       scopeType: "company",
       scopeId,
       metric: "subscription_percent",
+        provider: "openai",
       windowKind: "provider_week",
       amount: 70,
     });
@@ -87,5 +92,18 @@ describe("upsertBudgetPolicySchema", () => {
         amount: 5000,
       }).success,
     ).toBe(false);
+  });
+});
+
+// A provider is a rule dimension, not a label inferred from the largest usage.
+describe("provider budget rules", () => {
+  const base = { scopeType: "company", scopeId, metric: "subscription_percent", windowKind: "provider_week", amount: 100 };
+  it("requires an explicit supported subscription provider", () => {
+    expect(upsertBudgetPolicySchema.safeParse(base).success).toBe(false);
+    expect(upsertBudgetPolicySchema.safeParse({ ...base, provider: "other" }).success).toBe(false);
+    for (const provider of ["openai", "anthropic"]) expect(upsertBudgetPolicySchema.safeParse({ ...base, provider }).success).toBe(true);
+  });
+  it("rejects provider selection on money budgets", () => {
+    expect(upsertBudgetPolicySchema.safeParse({ scopeType: "company", scopeId, amount: 100, provider: "openai" }).success).toBe(false);
   });
 });

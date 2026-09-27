@@ -9,6 +9,8 @@ export const budgetPolicies = pgTable(
     scopeType: text("scope_type").notNull(),
     scopeId: uuid("scope_id").notNull(),
     metric: text("metric").notNull().default("billed_cents"),
+    // Empty for money budgets; subscription rules always name their provider.
+    provider: text("provider").notNull().default(""),
     windowKind: text("window_kind").notNull(),
     amount: integer("amount").notNull().default(0),
     // subscription_percent only: release `amount` evenly over the provider window.
@@ -40,6 +42,7 @@ export const budgetPolicies = pgTable(
       table.scopeId,
       table.metric,
       table.windowKind,
+      table.provider,
     ),
   }),
 );

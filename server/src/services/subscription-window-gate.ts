@@ -174,6 +174,7 @@ export function isSubscriptionUsageHeld(input: {
 }
 
 export type SubscriptionWindowPolicy = {
+  provider?: string;
   id: string;
   scopeType: BudgetScopeType;
   scopeId: string;
@@ -384,7 +385,7 @@ export function decideSubscriptionWindowWait(input: {
   let chosen: SubscriptionWindowWait | null = null;
 
   for (const policy of input.policies) {
-    if (policy.amount <= 0) continue;
+    if (policy.amount <= 0 || (policy.provider && policy.provider !== input.provider)) continue;
     const windowLabel = policy.windowKind === "provider_session" ? "session" : "weekly";
     const base = {
       policyId: policy.id,
@@ -555,6 +556,7 @@ export function subscriptionWindowGateService(
     const rows = await db
       .select({
         id: budgetPolicies.id,
+        provider: budgetPolicies.provider,
         scopeType: budgetPolicies.scopeType,
         scopeId: budgetPolicies.scopeId,
         windowKind: budgetPolicies.windowKind,
@@ -576,6 +578,7 @@ export function subscriptionWindowGateService(
       isSubscriptionBudgetWindowKind(row.windowKind)
         ? [{
             id: row.id,
+            provider: row.provider,
             scopeType: row.scopeType as BudgetScopeType,
             scopeId: row.scopeId,
             windowKind: row.windowKind,
@@ -596,10 +599,10 @@ export function subscriptionWindowGateService(
      * instead of letting it through (see decideSubscriptionWindowWait).
      */
     evaluate: async (input: SubscriptionWindowGateInput): Promise<SubscriptionWindowWait | null> => {
-      const policies = await listPolicies(input);
+      const provider = providerSlugForAdapterType(input.adapterType);
+      const policies = (await listPolicies(input)).filter((policy) => policy.provider === provider);
       if (policies.length === 0) return null;
       const now = input.now ?? new Date();
-      const provider = providerSlugForAdapterType(input.adapterType);
       const snapshot = await readQuotaSnapshot({ now });
       const result = snapshot.results.find((row) => row.provider === provider) ?? null;
       return decideSubscriptionWindowWait({ policies, result, provider, now });

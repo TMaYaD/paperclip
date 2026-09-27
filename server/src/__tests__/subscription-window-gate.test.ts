@@ -831,3 +831,18 @@ describe("Codex quota mapping through snapshots and subscription enforcement", (
     expect(week.windowEnd!.getTime() - now.getTime()).toBeLessThan(168 * 3600_000);
   });
 });
+
+
+describe("independent provider rules", () => {
+  it("does not let another provider's rule hold a run, even when usage is unreadable", () => {
+    expect(decideSubscriptionWindowWait({ policies: [policy({ provider: "openai", amount: 1 })], result: null, provider: "anthropic", now: NOW })).toBeNull();
+  });
+  it("uses only the matching provider's progressive or fixed rule", () => {
+    const policies = [policy({ id: "openai", provider: "openai", amount: 100, progressive: true, windowKind: "provider_week" }), policy({ id: "anthropic", provider: "anthropic", amount: 100, progressive: false, windowKind: "provider_week" })];
+    const result = { provider: "openai", ok: true, windows: [window({ key: "seven_day", usedPercent: 4, resetsAt: new Date(NOW.getTime() + 7 * 86400000 - 20 * 60000).toISOString() })] };
+    const held = decideSubscriptionWindowWait({ policies, result, provider: "openai", now: NOW });
+    expect(held).toMatchObject({ policyId: "openai", usedPercent: 4, progressive: true });
+    expect(held?.releasedPercent).toBeLessThan(1);
+    expect(decideSubscriptionWindowWait({ policies, result: { ...result, provider: "anthropic" }, provider: "anthropic", now: NOW })).toBeNull();
+  });
+});

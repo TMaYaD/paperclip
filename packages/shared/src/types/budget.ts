@@ -9,6 +9,8 @@ import type {
 } from "../constants.js";
 
 export interface BudgetPolicy {
+  /** Subscription provider; null for money budgets. */
+  provider?: string | null;
   id: string;
   companyId: string;
   scopeType: BudgetScopeType;
@@ -32,6 +34,8 @@ export interface BudgetPolicy {
 }
 
 export interface BudgetPolicySummary {
+  /** All usage, reset and release values in this row belong to this provider. */
+  provider?: string | null;
   policyId: string;
   companyId: string;
   scopeType: BudgetScopeType;
@@ -134,6 +138,7 @@ export interface BudgetOverview {
 }
 
 export interface BudgetPolicyUpsertInput {
+  provider?: string | null;
   scopeType: BudgetScopeType;
   scopeId: string;
   metric?: BudgetMetric;
