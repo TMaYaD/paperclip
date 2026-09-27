@@ -449,6 +449,28 @@ describe("claude_local ACP lane", () => {
     });
   });
 
+  it.each([undefined, "/sandbox/configured-workspace"])("checks sandbox directories on the sandbox (configured cwd=%s)", async (configuredCwd) => {
+    const remoteCwd = "/sandbox/workspace";
+    const mkdir = vi.spyOn(fs, "mkdir").mockRejectedValue(new Error("Host filesystem must not be used"));
+    const execute = vi.fn(async () => ({
+      exitCode: 0, signal: null, timedOut: false, stdout: "", stderr: "",
+      pid: null, startedAt: new Date().toISOString(),
+    }));
+    try {
+      const result = await testClaudeAcpEnvironment({
+        companyId: "company-1", adapterType: "claude_local",
+        config: { cwd: configuredCwd, agentCommand: "claude-agent-acp", env: { ANTHROPIC_API_KEY: "fixture" } },
+        executionTarget: { kind: "remote", transport: "sandbox", remoteCwd, runner: { execute } },
+      });
+      expect(result.status, JSON.stringify(result.checks)).toBe("pass");
+      expect(result.checks).toContainEqual(expect.objectContaining({
+        code: "claude_acp_cwd_valid", message: `Working directory is valid: ${configuredCwd ?? remoteCwd}`,
+      }));
+      expect(mkdir).not.toHaveBeenCalled();
+      expect(JSON.stringify(execute.mock.calls)).toContain(`mkdir -p '${configuredCwd ?? remoteCwd}'`);
+    } finally { mkdir.mockRestore(); }
+  });
+
   it("reports ACP prerequisites for the ACP lane", async () => {
     const root = await makeTempRoot("paperclip-claude-acp-env-");
     const commandPath = path.join(root, "bin", "claude-agent-acp");
@@ -1022,14 +1044,16 @@ describe("claude_local ACP lane", () => {
         }),
       );
 
-      // Fail-open: the restore miss never changes the run's exit code or
-      // status, and it surfaces as one allowlisted code — never the raw error.
+      // Preserve the execution's exit code while reporting the restore failure.
+      // Only a fixed diagnostic may contain the errno, never the raw error.
       expect(result.exitCode).toBe(0);
       expect(result.resultJson?.workspaceRestoreFailure).toBe("restore_permission_denied");
       const allLogs = loggedLines.join("");
       expect(allLogs).not.toContain("SENTINEL-HOST-PATH-marker");
       expect(allLogs).not.toContain(localCwd);
-      expect(allLogs).not.toContain("EACCES");
+      const diagnostic = '[paperclip] Workspace restore diagnostic: {"phase":"workspace","errorCode":"EACCES"}\n';
+      expect(loggedLines.filter((line) => line.includes("Workspace restore diagnostic:"))).toEqual([diagnostic]);
+      expect(loggedLines.filter((line) => line !== diagnostic).join("")).not.toContain("EACCES");
       expect(allLogs).toContain("permission denied");
     } finally {
       await fs.chmod(localCwd, 0o700).catch(() => undefined);

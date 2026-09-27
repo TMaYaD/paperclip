@@ -1,3 +1,5 @@
+import { AgentCharacter } from "../AgentCharacter";
+import { useAgentAppearanceDraft } from "../../hooks/useAgentAppearanceDraft";
 import { AiConnectionField, aiProviderForAdapter } from "../ai-connections/AiConnectionField";
 import type { AiConnectionBinding } from "@paperclipai/shared";
 import { DEFAULT_CODEX_LOCAL_MODEL } from "@paperclipai/adapter-codex-local";
@@ -51,7 +53,6 @@ import { Field } from "../agent-config-primitives";
 import { SecretPicker } from "../environment-variables-editor/SecretPicker";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
-import { PillGuy } from "../onboarding/PillGuy";
 import {
   OnboardingCard,
   OnboardingHeading,
@@ -107,6 +108,7 @@ function Setup({
   const navigate = useNavigate();
   const cache = useQueryClient();
   const { openNewIssue } = useDialogActions();
+  const appearanceDraft = useAgentAppearanceDraft(`${companyId}:new-agent`);
   const isRunner = adapterType === "paperclip_runner";
   const brandType = isRunner
     ? runnerProvider === "claude"
@@ -497,6 +499,7 @@ function Setup({
       );
       const response = await agentsApi.hire(companyId, {
         name: name.trim(),
+        appearance: appearanceDraft.appearance,
         role: existing.length ? "general" : "ceo",
         ...(leader ? { reportsTo: leader.id } : {}),
         adapterType,
@@ -517,6 +520,7 @@ function Setup({
       setApiKey("");
       setConnection(null);
       setCreated(response.agent);
+      appearanceDraft.clear();
       setScreen("saved");
       navigate(
         `/agents/new?${new URLSearchParams({ name: response.agent.name, adapterType, runnerProvider, createdAgentId: response.agent.id })}`,
@@ -624,10 +628,9 @@ function Setup({
     <MotionConfig reducedMotion="user">
       <div className="mx-auto flex max-w-5xl flex-col gap-8 py-6">
         <header className="flex items-center gap-4">
-          <PillGuy
-            state={created ? "alive" : "dormant"}
-            className="size-14 shrink-0"
-          />
+          <AgentCharacter appearance={created?.appearance ?? appearanceDraft.appearance} size={256} className="size-48" trackingScope="page"
+            state={created || testState === "pass" ? "success" : testState === "running" ? "loading" : "sleepy"}
+            muted={!created && testState !== "pass"} />
           <div className="space-y-2">
             <h1 className="text-2xl font-semibold tracking-tight">{name}</h1>
             <div className="flex items-center gap-2 text-sm text-muted-foreground">
@@ -808,8 +811,21 @@ function Setup({
                     <fieldset disabled={busy} className="space-y-8">
                       <section className="space-y-5">
                         <h3 className="text-sm font-semibold">Runtime</h3>
-                        {aiProviderForAdapter(brandType) && <AiConnectionField companyId={companyId} agentName={name} adapterType={brandType} model={model} environmentId={environmentId ?? undefined} value={aiBinding}
-                          onChange={binding => { setRuntimeAiBinding(binding); resetTest(); }} />}
+                        {aiProviderForAdapter(brandType) && (
+                          connection && !aiBinding ? (
+                            <div className="space-y-3">
+                              <p className="text-sm text-muted-foreground">
+                                Using the connection selected in the Connect step.
+                              </p>
+                              <Button type="button" variant="outline" onClick={() => setScreen("connect")}>
+                                Change connection
+                              </Button>
+                            </div>
+                          ) : (
+                            <AiConnectionField companyId={companyId} agentName={name} adapterType={brandType} model={model} environmentId={environmentId ?? undefined} value={aiBinding}
+                              onChange={binding => { setRuntimeAiBinding(binding); resetTest(); }} />
+                          )
+                        )}
                         {models.error && <p role="alert" className="text-sm text-destructive">Could not load models. Retry or enter a model ID manually.</p>}
                         {((showModel && !usingKimiApi) ||
                           efforts.length > 0) && (

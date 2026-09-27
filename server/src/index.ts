@@ -5,6 +5,7 @@
 // HTTP server, so trace coverage does not depend on incidental timing.
 import { instrumentationReady, shutdownInstrumentation } from "./instrumentation.js";
 import { sentryReady, shutdownSentry, captureException } from "./sentry.js";
+import { waitForPendingRunFailureReports } from "./services/run-failure-report.js";
 import { verifyStoppedNativeSessionForReplacement } from "./services/native-runtime/native-session-executor.js";
 import { embeddedPostgresOwnerPort } from "./embedded-postgres-owner.js";
 import { deliverExecutionStatuses } from "./services/execution-status-delivery.js";
@@ -911,6 +912,7 @@ async function startServerWithDatabaseTeardown(
     chatWebhookPublicBaseUrl: config.chatWebhookPublicBaseUrl,
     authReady,
     companyDeletionEnabled: config.companyDeletionEnabled,
+    announcements: { enabled: config.announcementsEnabled, feedUrl: config.announcementsFeedUrl },
     pluginMigrationDb: pluginMigrationDb as any,
     betterAuthHandler,
     resolveSession,
@@ -1527,6 +1529,7 @@ async function startServerWithDatabaseTeardown(
           reconciled.dispatchRequeued > 0 ||
           reconciled.continuationRequeued > 0 ||
           reconciled.successfulRunHandoffEscalated > 0 ||
+          reconciled.successfulRunHandoffRetried > 0 ||
           reconciled.escalated > 0
         ) {
           logger.warn(
@@ -1767,6 +1770,7 @@ async function startServerWithDatabaseTeardown(
                 reconciled.dispatchRequeued > 0 ||
                 reconciled.continuationRequeued > 0 ||
                 reconciled.successfulRunHandoffEscalated > 0 ||
+                reconciled.successfulRunHandoffRetried > 0 ||
                 reconciled.escalated > 0
               ) {
                 logger.warn(
@@ -1991,6 +1995,7 @@ async function startServerWithDatabaseTeardown(
       shutdownAppServices: appShutdown,
       closeHttpListener: () =>
         closeHttpListenerForShutdown({ server, signal, log: logger }),
+      drainPendingRunFailureReports: waitForPendingRunFailureReports,
       closeDatabase: closeDatabaseClients,
       stopEmbeddedPostgres,
       shutdownInstrumentation,

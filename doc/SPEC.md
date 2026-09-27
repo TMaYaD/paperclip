@@ -432,6 +432,8 @@ No separate "agent API" vs. "board API." Same endpoints, different authorization
 
 Paperclip manages task-linked work artifacts: issue documents (rich-text plans, specs, notes attached to issues) and file attachments. Agents read and write these through the API as part of normal task execution. Full delivery infrastructure (code repos, deployments, production runtime) remains the agent's domain — Paperclip orchestrates the work, not the build pipeline.
 
+Task work mode is explicit persisted state. Requesting a plan in a title or description does not switch the task into planning mode. Standard execution may produce a plan as its requested deliverable; explicit planning mode separately governs plan-only execution and its approval transition.
+
 ### Open Questions
 
 - Real-time updates to the UI — WebSocket? SSE? Polling?
@@ -551,6 +553,12 @@ Things Paperclip explicitly does **not** do:
 8. **Progressive deployment.** Trivial to start local, straightforward to scale to hosted.
 9. **Extensible core.** Clean boundaries so plugins can add capabilities (Adapters, knowledge base, revenue tracking) without modifying core.
 
+## Agent visual identity
+
+Agent appearances are stable, versioned ClipLab end-cap personas, separate from
+behavioral instructions. Compact surfaces use on-demand cached PNG URLs; larger
+placements may use a lazy live character. See [agent-personas.md](agent-personas.md)
+for persistence, migration, rendering, and integration contracts.
 ### Agent chat project handoff (2026-09-11)
 
 Chat supports research and full plan drafting/revision in its existing plan document. On handoff, each ordinary assigned task receives the relevant plan in its own `plan` document, committed with task creation before execution is scheduled. The source plan remains in the conversation. Plan acceptance hands off execution; it never switches the conversation into implementation.
