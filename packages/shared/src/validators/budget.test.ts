@@ -54,7 +54,8 @@ describe("upsertBudgetPolicySchema", () => {
       metric: "subscription_percent",
         provider: "openai",
       windowKind: "provider_week",
-      amount: 70,
+      amount: 100,
+      pacePercent: 20,
       progressive: true,
     });
     expect(progressive.progressive).toBe(true);
@@ -105,5 +106,19 @@ describe("provider budget rules", () => {
   });
   it("rejects provider selection on money budgets", () => {
     expect(upsertBudgetPolicySchema.safeParse({ scopeType: "company", scopeId, amount: 100, provider: "openai" }).success).toBe(false);
+  });
+});
+
+
+describe("composable pace and cap validation", () => {
+  const base = { scopeType: "company", scopeId, metric: "subscription_percent", provider: "openai", windowKind: "provider_week", amount: 100, progressive: true };
+  it("accepts fractional and fast paces independently of the provider ceiling", () => {
+    for (const pacePercent of [0.1, 20, 28, 140.5]) expect(upsertBudgetPolicySchema.safeParse({ ...base, pacePercent }).success).toBe(true);
+  });
+  it("requires a positive finite pace and keeps caps separate", () => {
+    for (const pacePercent of [undefined, null, 0, -1, Infinity, NaN]) expect(upsertBudgetPolicySchema.safeParse({ ...base, pacePercent }).success).toBe(false);
+    expect(upsertBudgetPolicySchema.safeParse({ ...base, pacePercent: 20, amount: 70 }).success).toBe(false);
+    expect(upsertBudgetPolicySchema.safeParse({ ...base, pacePercent: 20, progressive: false }).success).toBe(false);
+    expect(upsertBudgetPolicySchema.safeParse({ ...base, pacePercent: null, progressive: false, amount: 70 }).success).toBe(true);
   });
 });

@@ -400,6 +400,7 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
             limitPercent: amount,
             windowKind,
             progressive,
+            pacePercent: policy.pacePercent,
             resetsAt: observation?.resetsAt,
             now,
           })
@@ -432,6 +433,7 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
       windowKind: policy.windowKind as BudgetWindowKind,
       amount,
       progressive,
+      pacePercent: progressive ? policy.pacePercent : null,
       releasedAmount,
       releaseAt,
       releaseWindowUnknown,
@@ -640,6 +642,14 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
       if (editing && (editing.metric !== "subscription_percent" || metric !== editing.metric || editing.scopeType !== input.scopeType || editing.scopeId !== input.scopeId)) {
         throw unprocessable("Only subscription rules can be edited by ID, within their existing scope");
       }
+      const progressive = metric === "subscription_percent" ? input.progressive ?? editing?.progressive ?? false : false;
+      const pacePercent = progressive ? input.pacePercent ?? editing?.pacePercent ?? null : null;
+      if (!progressive && input.pacePercent != null) {
+        throw unprocessable("Pace is only valid on progressive subscription rules");
+      }
+      if (progressive && (pacePercent == null || !Number.isFinite(pacePercent) || pacePercent <= 0 || input.amount !== 100)) {
+        throw unprocessable("Pace rules require a positive pace and the provider's 100% ceiling; add a separate cap rule for a lower limit");
+      }
       const amount = Math.max(0, Math.floor(input.amount));
       const nextIsActive = amount > 0 && (input.isActive ?? true);
       const matching = await db
@@ -653,20 +663,16 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
             eq(budgetPolicies.metric, metric),
             eq(budgetPolicies.windowKind, windowKind),
             eq(budgetPolicies.provider, provider),
+            eq(budgetPolicies.progressive, progressive),
           ),
         )
         .then((rows) => rows[0] ?? null);
 
       if (metric === "subscription_percent" && matching && matching.id !== editing?.id) {
-        throw conflict("A rule already exists for this provider and window. Edit that rule instead.");
+        throw conflict("A rule of this kind already exists for this provider and window. Edit that rule instead.");
       }
       const existing = editing ?? matching;
       const now = new Date();
-      // Progressive release only means something on a subscription window. An
-      // omitted flag keeps what is stored, so an amount-only update cannot
-      // silently switch a policy back to releasing its limit all at once.
-      const progressive =
-        metric === "subscription_percent" ? input.progressive ?? existing?.progressive ?? false : false;
       const writePolicy = async () => existing
         ? await db
           .update(budgetPolicies)
@@ -675,6 +681,7 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
             windowKind,
             amount,
             progressive,
+            pacePercent,
             warnPercent: input.warnPercent ?? existing.warnPercent,
             hardStopEnabled: input.hardStopEnabled ?? existing.hardStopEnabled,
             notifyEnabled: input.notifyEnabled ?? existing.notifyEnabled,
@@ -696,6 +703,7 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
             windowKind,
             amount,
             progressive,
+            pacePercent,
             warnPercent: input.warnPercent ?? 80,
             hardStopEnabled: input.hardStopEnabled ?? true,
             notifyEnabled: input.notifyEnabled ?? true,
@@ -709,7 +717,7 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
       const row = await writePolicy().catch((error: unknown) => {
         const cause = error as { code?: string; cause?: { code?: string } };
         if (cause.code === "23505" || cause.cause?.code === "23505") {
-          throw conflict("A rule already exists for this provider and window. Edit that rule instead.");
+          throw conflict("A rule of this kind already exists for this provider and window. Edit that rule instead.");
         }
         throw error;
       });
@@ -773,6 +781,7 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
           windowKind: row.windowKind,
           provider: row.provider || null,
           progressive: row.progressive,
+          pacePercent: row.pacePercent,
         },
       });
 
@@ -791,7 +800,7 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
         action: "budget.policy_deleted",
         entityType: "budget_policy",
         entityId: policyId,
-        details: { scopeType: policy.scopeType, scopeId: policy.scopeId, provider: policy.provider, windowKind: policy.windowKind, amount: policy.amount, progressive: policy.progressive },
+        details: { scopeType: policy.scopeType, scopeId: policy.scopeId, provider: policy.provider, windowKind: policy.windowKind, amount: policy.amount, progressive: policy.progressive, pacePercent: policy.pacePercent },
       });
     },
 

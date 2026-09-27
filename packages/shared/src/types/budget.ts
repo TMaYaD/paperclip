@@ -19,10 +19,12 @@ export interface BudgetPolicy {
   windowKind: BudgetWindowKind;
   amount: number;
   /**
-   * Release `amount` evenly over the provider window instead of all at once
+   * Release quota at `pacePercent` per day/hour instead of all at once
    * (`subscription_percent` policies only; always false for money budgets).
    */
   progressive: boolean;
+  /** Progressive pace: percent/day for weekly windows, percent/hour for sessions. */
+  pacePercent?: number | null;
   warnPercent: number;
   hardStopEnabled: boolean;
   notifyEnabled: boolean;
@@ -45,14 +47,16 @@ export interface BudgetPolicySummary {
   windowKind: BudgetWindowKind;
   amount: number;
   /**
-   * True when the limit is released evenly over the provider window instead
+   * True when quota is released at `pacePercent` per day/hour instead
    * of being available in full from the window start (`subscription_percent`
    * policies only).
    */
   progressive?: boolean;
+  /** Progressive pace: percent/day for weekly windows, percent/hour for sessions. */
+  pacePercent?: number | null;
   /**
    * The part of `amount` in force right now: `amount` itself for a fixed
-   * limit, or the elapsed share of the window for a progressive one (the full
+   * limit, or pace multiplied by elapsed time, capped at `amount` (the full
    * `amount` again when the provider reports no reset time, since the window
    * position is then unknown). `remainingAmount` is measured against it.
    */
@@ -146,6 +150,8 @@ export interface BudgetPolicyUpsertInput {
   amount: number;
   /** Omit to keep the stored value on an existing policy. */
   progressive?: boolean;
+  /** Progressive pace: percent/day for weekly windows, percent/hour for sessions. */
+  pacePercent?: number | null;
   warnPercent?: number;
   hardStopEnabled?: boolean;
   notifyEnabled?: boolean;

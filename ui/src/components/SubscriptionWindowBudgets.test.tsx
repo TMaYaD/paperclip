@@ -31,7 +31,7 @@ describe("provider budget rule table", () => {
     expect(openai.textContent).toContain("Released 0.3% so far");
     expect(openai.textContent).toContain("Waiting for release");
     expect(anthropic.textContent).toContain("Released 96.3% so far");
-    expect(anthropic.textContent).toContain("Available");
+    expect(anthropic.textContent).toContain("Within pace");
     expect(openai.querySelector('[role="progressbar"]')).not.toBeNull();
     expect(anthropic.querySelector('[role="progressbar"]')).not.toBeNull();
   });
@@ -39,7 +39,20 @@ describe("provider budget rule table", () => {
     const { onSave } = await render([]);
     await act(async () => button("Add rule").click());
     await act(async () => document.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
-    expect(onSave).toHaveBeenCalledWith({ provider: "openai", windowKind: "provider_week", amount: 100, progressive: true }, undefined);
+    expect(onSave).toHaveBeenCalledWith({ provider: "openai", windowKind: "provider_week", amount: 100, progressive: true, pacePercent: 20 }, undefined);
+  });
+  it("adds a cap alongside an existing pace on the same provider window", async () => {
+    const { onSave } = await render();
+    await act(async () => button("Add rule").click());
+    expect(document.querySelector("label[for=budget-rule-limit]")?.textContent).toBe("Usage cap (%)");
+    await act(async () => document.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+    expect(onSave).toHaveBeenCalledWith({ provider: "openai", windowKind: "provider_week", amount: 100, progressive: false, pacePercent: null }, undefined);
+  });
+  it("preserves the precise migrated pace when its rounded input is unchanged", async () => {
+    const { onSave } = await render([{ ...base, pacePercent: 100 / 7 }]);
+    await act(async () => button("Edit").click());
+    await act(async () => document.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+    expect(onSave).toHaveBeenCalledWith(expect.objectContaining({ pacePercent: 100 / 7 }), base.policyId);
   });
   it("edits the selected rule by ID and keeps failed saves open", async () => {
     const onSave = vi.fn().mockRejectedValue(new Error("Rule changed; try again"));

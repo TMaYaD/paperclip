@@ -1,4 +1,4 @@
-import { boolean, index, integer, pgTable, text, timestamp, uuid, uniqueIndex } from "drizzle-orm/pg-core";
+import { boolean, doublePrecision, index, integer, pgTable, text, timestamp, uuid, uniqueIndex } from "drizzle-orm/pg-core";
 import { companies } from "./companies.js";
 
 export const budgetPolicies = pgTable(
@@ -13,8 +13,10 @@ export const budgetPolicies = pgTable(
     provider: text("provider").notNull().default(""),
     windowKind: text("window_kind").notNull(),
     amount: integer("amount").notNull().default(0),
-    // subscription_percent only: release `amount` evenly over the provider window.
+    // subscription_percent only: release quota at `pacePercent` per day/hour.
     progressive: boolean("progressive").notNull().default(false),
+    // Percent per day for weekly rules; per hour for session rules.
+    pacePercent: doublePrecision("pace_percent"),
     warnPercent: integer("warn_percent").notNull().default(80),
     hardStopEnabled: boolean("hard_stop_enabled").notNull().default(true),
     notifyEnabled: boolean("notify_enabled").notNull().default(true),
@@ -43,6 +45,7 @@ export const budgetPolicies = pgTable(
       table.metric,
       table.windowKind,
       table.provider,
+      table.progressive,
     ),
   }),
 );

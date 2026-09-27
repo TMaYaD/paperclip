@@ -1947,6 +1947,13 @@
       "when": 1790481816894,
       "tag": "0279_spicy_warlock",
       "breakpoints": true
+    },
+    {
+      "idx": 280,
+      "version": "7",
+      "when": 1790498853575,
+      "tag": "0280_daffy_talisman",
+      "breakpoints": true
     }
   ]
 }

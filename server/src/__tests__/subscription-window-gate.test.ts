@@ -846,3 +846,31 @@ describe("independent provider rules", () => {
     expect(decideSubscriptionWindowWait({ policies, result: { ...result, provider: "anthropic" }, provider: "anthropic", now: NOW })).toBeNull();
   });
 });
+
+describe("composable pace and cap rules", () => {
+  const start = new Date("2026-09-21T00:00:00Z");
+  const reset = "2026-09-28T00:00:00.000Z";
+  const pace = policy({ id: "pace", windowKind: "provider_week", amount: 100, progressive: true, pacePercent: 20 });
+  const cap = policy({ id: "cap", windowKind: "provider_week", amount: 70 });
+  const decide = (days: number, usedPercent: number, policies = [pace, cap]) => decideSubscriptionWindowWait({
+    policies, provider: "anthropic", now: new Date(start.getTime() + days * 86400000),
+    result: ok([window({ key: "seven_day", usedPercent, resetsAt: reset })]),
+  });
+  it("releases 20% per day and permits the full quota after five days", () => {
+    expect(decide(1, 30, [pace])).toMatchObject({ policyId: "pace", releasedPercent: 20, releaseAt: "2026-09-22T12:00:00.000Z" });
+    expect(decide(5, 99, [pace])).toBeNull();
+    expect(decide(5, 100, [pace])).toMatchObject({ releaseAt: null, resetsAt: reset });
+  });
+  it("requires both rules and waits for reset once the separate cap is reached", () => {
+    expect(decide(1, 30)).toMatchObject({ policyId: "pace" });
+    expect(decide(4, 69)).toBeNull();
+    expect(decide(4, 70)).toMatchObject({ policyId: "cap", releaseAt: null, resetsAt: reset });
+    expect(decide(1, 70, [cap, pace])).toMatchObject({ policyId: "cap", releaseAt: null });
+    expect(decide(1, 70, [pace, cap])).toMatchObject({ policyId: "cap", releaseAt: null });
+  });
+  it("uses hourly pace for sessions and accepts rates above 100", () => {
+    const result = evaluateSubscriptionRelease({ usedPercent: 75, limitPercent: 100, progressive: true, pacePercent: 150, windowKind: "provider_session", resetsAt: "2026-09-21T05:00:00Z", now: new Date("2026-09-21T00:15:00Z") });
+    expect(result.release.releasedPercent).toBe(37.5);
+    expect(result.releaseAt?.toISOString()).toBe("2026-09-21T00:30:00.000Z");
+  });
+});

@@ -679,7 +679,7 @@ describeEmbeddedPostgres("budgetService release gate enforcement", () => {
       readQuotaSnapshot: async () => ({ results: quota, fetchedAt: new Date() }),
     });
     let policyId: string | undefined;
-    const upsert = async (input: { amount: number; progressive?: boolean }) => {
+    const upsert = async (input: { amount: number; progressive?: boolean; pacePercent?: number | null }) => {
       const result = await service.upsertPolicy(
         companyId,
         { scopeType: "company", scopeId: companyId, metric: "subscription_percent", provider: "openai", windowKind: "provider_session", ...input },
@@ -690,7 +690,7 @@ describeEmbeddedPostgres("budgetService release gate enforcement", () => {
       return result;
     };
 
-    const created = await upsert({ amount: 100, progressive: true });
+    const created = await upsert({ amount: 100, progressive: true, pacePercent: 20 });
     expect(created).toMatchObject({ progressive: true, amount: 100, observedAmount: 40, releaseAt: null, releaseWindowUnknown: false, status: "ok" });
     expect(created.releasedAmount).toBeCloseTo(60, 0);
     expect(created.remainingAmount).toBeCloseTo(20, 0);
@@ -709,7 +709,7 @@ describeEmbeddedPostgres("budgetService release gate enforcement", () => {
     expect(Math.abs(new Date(ahead.releaseAt!).getTime() - (resetsAt.getTime() - 75 * 60 * 1000))).toBeLessThan(1_000);
 
     // An amount-only update keeps the release mode; an explicit false clears it.
-    expect(await upsert({ amount: 90 })).toMatchObject({ progressive: true, amount: 90 });
+    expect(await upsert({ amount: 100 })).toMatchObject({ progressive: true, amount: 100, pacePercent: 20 });
     const cleared = await upsert({ amount: 90, progressive: false });
     expect(cleared).toMatchObject({ progressive: false, releasedAmount: 90, remainingAmount: 15, releaseAt: null });
 
@@ -722,8 +722,8 @@ describeEmbeddedPostgres("budgetService release gate enforcement", () => {
         windows: [{ key: "five_hour", label: "5h limit", usedPercent: 40, resetsAt: null, valueLabel: null, detail: null }],
       },
     ];
-    const unknownReset = await upsert({ amount: 90, progressive: true });
-    expect(unknownReset).toMatchObject({ progressive: true, releasedAmount: 90, releaseAt: null, releaseWindowUnknown: true });
+    const unknownReset = await upsert({ amount: 100, progressive: true, pacePercent: 18 });
+    expect(unknownReset).toMatchObject({ progressive: true, releasedAmount: 100, releaseAt: null, releaseWindowUnknown: true });
 
     // Money budgets never release progressively, whatever the input says.
     const money = await service.upsertPolicy(
@@ -744,7 +744,7 @@ describeEmbeddedPostgres("budgetService release gate enforcement", () => {
     const readQuotaSnapshot = async () => ({ results: quota, fetchedAt: now });
     const service = budgetService(db, { readQuotaSnapshot });
     const gate = subscriptionWindowGateService(db, { readQuotaSnapshot });
-    const input = { scopeType: "company" as const, scopeId: companyId, metric: "subscription_percent" as const, windowKind: "provider_week" as const, amount: 100, progressive: true };
+    const input = { scopeType: "company" as const, scopeId: companyId, metric: "subscription_percent" as const, windowKind: "provider_week" as const, amount: 100, progressive: true, pacePercent: 100 / 7 };
     const openai = await service.upsertPolicy(companyId, { ...input, provider: "openai" }, "board");
     const anthropic = await service.upsertPolicy(companyId, { ...input, provider: "anthropic" }, "board");
     expect(openai.provider).toBe("openai");
@@ -757,7 +757,7 @@ describeEmbeddedPostgres("budgetService release gate enforcement", () => {
     expect(await gate.evaluate({ ...dispatch, adapterType: "claude_local" })).toBeNull();
     await expect(service.upsertPolicy(companyId, { ...input, provider: "openai" }, "board")).rejects.toMatchObject({ status: 409 });
     await expect(service.upsertPolicy(companyId, { ...input, provider: "anthropic" }, "board", openai.policyId)).rejects.toMatchObject({ status: 409 });
-    const changed = await service.upsertPolicy(companyId, { ...input, provider: "openai", progressive: false, amount: 75 }, "board", openai.policyId);
+    const changed = await service.upsertPolicy(companyId, { ...input, provider: "openai", progressive: false, pacePercent: null, amount: 75 }, "board", openai.policyId);
     expect(changed).toMatchObject({ policyId: openai.policyId, provider: "openai", amount: 75, releasedAmount: 75, releaseAt: null });
     expect(await gate.evaluate(dispatch)).toBeNull();
     expect((await service.overview(companyId)).policies.find((p) => p.provider === "anthropic")?.amount).toBe(100);
@@ -770,6 +770,31 @@ describeEmbeddedPostgres("budgetService release gate enforcement", () => {
     const moved = await service.upsertPolicy(companyId, { ...input, provider: "openai", windowKind: "provider_session" }, "board", anthropic.policyId);
     expect(moved).toMatchObject({ provider: "openai", windowKind: "provider_session", usageUnavailable: true, usageHeld: true });
     expect(await gate.evaluate(dispatch)).toMatchObject({ provider: "openai", usageUnknown: true });
+  });
+
+  it("persists pace and cap together and applies both to summaries and dispatch", async () => {
+    const { companyId, agentId } = await createBudgetFixture();
+    const now = new Date();
+    const resetsAt = new Date(now.getTime() + 3 * 86400000).toISOString();
+    const serviceOptions = { readQuotaSnapshot: async () => ({ fetchedAt: now, results: [
+      { provider: "openai", ok: true, windows: [{ key: "seven_day", label: "Week", usedPercent: 70, resetsAt, valueLabel: null, detail: null }] },
+    ] as ProviderQuotaResult[] }) };
+    const service = budgetService(db, serviceOptions);
+    const gate = subscriptionWindowGateService(db, serviceOptions);
+    const input = { scopeType: "company" as const, scopeId: companyId, metric: "subscription_percent" as const, provider: "openai", windowKind: "provider_week" as const };
+    const pace = await service.upsertPolicy(companyId, { ...input, amount: 100, progressive: true, pacePercent: 20 }, "board");
+    const cap = await service.upsertPolicy(companyId, { ...input, amount: 70, progressive: false }, "board");
+    expect(pace).toMatchObject({ pacePercent: 20, amount: 100, releaseAt: null });
+    expect(pace.releasedAmount).toBeCloseTo(80, 2);
+    expect(cap).toMatchObject({ pacePercent: null, amount: 70, releasedAmount: 70 });
+    expect((await service.overview(companyId)).policies).toHaveLength(2);
+    const dispatch = { companyId, agentId, now, adapterType: "codex_local" };
+    expect(await gate.evaluate(dispatch)).toMatchObject({ policyId: cap.policyId, releaseAt: null, resetsAt });
+    await expect(service.upsertPolicy(companyId, { ...input, amount: 80, progressive: false }, "board")).rejects.toMatchObject({ status: 409 });
+    await expect(service.upsertPolicy(companyId, { ...input, amount: 80, progressive: false }, "board", pace.policyId)).rejects.toMatchObject({ status: 409 });
+    await service.deletePolicy(companyId, cap.policyId, "board");
+    expect(await gate.evaluate(dispatch)).toBeNull();
+    expect((await service.overview(companyId)).policies).toHaveLength(1);
   });
 
   it("hard-stops project work until a valid budget raise resumes it and overview reconciles ledger spend", async () => {

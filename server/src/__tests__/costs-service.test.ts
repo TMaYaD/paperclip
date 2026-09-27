@@ -283,7 +283,7 @@ describe("cost routes", () => {
 
   it("routes provider rule edits and deletes by ID for board users", async () => {
     const app = createApp();
-    const body = { scopeType: "company", scopeId: "22222222-2222-4222-8222-222222222222", metric: "subscription_percent", provider: "openai", windowKind: "provider_week", amount: 75, progressive: true };
+    const body = { scopeType: "company", scopeId: "22222222-2222-4222-8222-222222222222", metric: "subscription_percent", provider: "openai", windowKind: "provider_week", amount: 100, progressive: true, pacePercent: 20 };
     mockBudgetService.upsertPolicy.mockResolvedValue({ policyId: "rule-1", ...body });
     expect((await request(app).patch("/api/companies/company-1/budgets/policies/rule-1").send(body)).status).toBe(200);
     expect(mockBudgetService.upsertPolicy).toHaveBeenCalledWith("company-1", expect.objectContaining(body), "board-user", "rule-1");
