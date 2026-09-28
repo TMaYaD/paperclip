@@ -99,7 +99,23 @@ export async function resolveInstallationId(fetchInstallation, token, repo, owne
   );
 }
 
+// Forks cannot use the upstream app's private key. Their base-branch workflow
+// can use its repository-scoped token with the same declared permissions.
+export function getWorkflowFallbackToken(env) {
+  const repo = env.GITHUB_REPOSITORY;
+  if (env.COMMITPERCLIP_KEY || env.GITHUB_ACTIONS !== 'true' ||
+      !repo || !REPO_PATTERN.test(repo) || repo.toLowerCase() === 'paperclipai/paperclip') {
+    return null;
+  }
+  return env.GITHUB_TOKEN || null;
+}
+
 async function main() {
+  const fallback = getWorkflowFallbackToken(process.env);
+  if (fallback) {
+    process.stdout.write(fallback);
+    return;
+  }
   const privateKey = process.env.COMMITPERCLIP_KEY;
   if (!privateKey) {
     console.error('ERROR: COMMITPERCLIP_KEY env var not set.');
