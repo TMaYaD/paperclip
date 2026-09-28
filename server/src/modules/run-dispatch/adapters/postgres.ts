@@ -443,6 +443,30 @@ export function createPostgresRunDispatchAdapter(
     return decideScheduledRetryGate(factsResult.facts, input.now);
   }
 
+  // A provider wait belongs to the provider that created it. Reconsider it on
+  // the next sweep after an adapter change, including waits saved before restart.
+  // Promotion still passes the issue gates and the current provider's quota gate.
+  function retryDuePredicate(now: Date) {
+    return or(
+      lte(heartbeatRuns.scheduledRetryAt, now),
+      and(
+        eq(heartbeatRuns.scheduledRetryReason, "subscription_window_wait"),
+        sql`${heartbeatRuns.scheduledRetryAt} is not null`,
+        sql`exists (
+          select 1 from ${agents}
+          where ${agents.id} = ${heartbeatRuns.agentId}
+            and ${agents.companyId} = ${heartbeatRuns.companyId}
+            and ${heartbeatRuns.resultJson} -> 'subscriptionWindowWait' ->> 'provider'
+              <> case ${agents.adapterType}
+                when 'codex_local' then 'openai'
+                when 'claude_local' then 'anthropic'
+                else ${agents.adapterType}
+              end
+        )`,
+      ),
+    );
+  }
+
   async function listDueRetries(input: ListDueRetriesInput): Promise<DueRetryRun[]> {
     const rows = await db
       .select()
@@ -450,7 +474,7 @@ export function createPostgresRunDispatchAdapter(
       .where(
         and(
           eq(heartbeatRuns.status, "scheduled_retry"),
-          lte(heartbeatRuns.scheduledRetryAt, input.now),
+          retryDuePredicate(input.now),
           input.cutoff ? gte(heartbeatRuns.createdAt, input.cutoff) : undefined,
         ),
       )
@@ -602,7 +626,7 @@ export function createPostgresRunDispatchAdapter(
           eq(heartbeatRuns.id, input.runId),
           eq(heartbeatRuns.companyId, input.companyId),
           eq(heartbeatRuns.status, "scheduled_retry"),
-          lte(heartbeatRuns.scheduledRetryAt, input.now),
+          retryDuePredicate(input.now),
         ),
       )
       .returning();
@@ -615,7 +639,9 @@ export function createPostgresRunDispatchAdapter(
       eventType: "lifecycle",
       stream: "system",
       level: "info",
-      message: "Scheduled retry became due and was promoted to the queued run pool",
+      message: row.scheduledRetryAt && row.scheduledRetryAt > input.now
+        ? "Subscription wait provider changed; queued run for current provider quota evaluation"
+        : "Scheduled retry became due and was promoted to the queued run pool",
       payload: {
         scheduledRetryAttempt: row.scheduledRetryAttempt,
         scheduledRetryAt: row.scheduledRetryAt ? new Date(row.scheduledRetryAt).toISOString() : null,
@@ -644,7 +670,7 @@ export function createPostgresRunDispatchAdapter(
           eq(heartbeatRuns.id, input.runId),
           eq(heartbeatRuns.companyId, input.companyId),
           eq(heartbeatRuns.status, "scheduled_retry"),
-          lte(heartbeatRuns.scheduledRetryAt, input.now),
+          retryDuePredicate(input.now),
         ),
       )
       .returning();
@@ -705,11 +731,16 @@ export function createPostgresRunDispatchAdapter(
     const now = input.now;
 
     const promoteLockedRun = async (tx: Db, run: HeartbeatRun) => {
-      if (
-        run.status !== "scheduled_retry" ||
-        !run.scheduledRetryAt ||
-        new Date(run.scheduledRetryAt).getTime() > now.getTime()
-      ) {
+      const [due] = await tx
+        .select({ id: heartbeatRuns.id })
+        .from(heartbeatRuns)
+        .where(and(
+          eq(heartbeatRuns.id, run.id),
+          eq(heartbeatRuns.companyId, run.companyId),
+          eq(heartbeatRuns.status, "scheduled_retry"),
+          retryDuePredicate(now),
+        ));
+      if (!due) {
         return { outcome: { outcome: "not_promoted" as const }, telemetryRun: null };
       }
       const factsResult = await loadGateFacts(

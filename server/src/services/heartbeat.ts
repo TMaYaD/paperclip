@@ -16501,12 +16501,11 @@ export function heartbeatService(
     // Only this gate's own deferrals count toward the bound. A run promoted
     // after workspace-busy, transient, or continuation retries starts a fresh
     // wait, mirroring how WorkspaceBusyDeferral reads its attempt.
-    const continuing = run.scheduledRetryReason === SUBSCRIPTION_WINDOW_WAIT_RETRY_REASON;
-    const previousWait = continuing
-      ? parseObject(parseObject(run.resultJson).subscriptionWindowWait)
-      : {};
+    const previousWait = parseObject(parseObject(run.resultJson).subscriptionWindowWait);
+    const continuing = run.scheduledRetryReason === SUBSCRIPTION_WINDOW_WAIT_RETRY_REASON
+      && (previousWait.provider == null || previousWait.provider === wait.provider);
     const previousStartedAt =
-      typeof previousWait.waitStartedAt === "string" ? new Date(previousWait.waitStartedAt) : null;
+      continuing && typeof previousWait.waitStartedAt === "string" ? new Date(previousWait.waitStartedAt) : null;
     const waitStartedAt =
       previousStartedAt && !Number.isNaN(previousStartedAt.getTime()) ? previousStartedAt : now;
     const attempt = continuing ? (run.scheduledRetryAttempt ?? 0) + 1 : 1;

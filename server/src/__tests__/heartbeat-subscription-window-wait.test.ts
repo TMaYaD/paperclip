@@ -167,7 +167,7 @@ describeEmbeddedPostgres("heartbeat subscription window wait", () => {
       subscriptionWindowGate: gate,
     });
     await ensureIssueRelationsTable(db);
-  }, 20_000);
+  }, 90_000);
 
   beforeEach(() => {
     mockAdapterExecute.mockClear();
@@ -300,6 +300,49 @@ describeEmbeddedPostgres("heartbeat subscription window wait", () => {
       .where(eq(heartbeatRuns.id, runId))
       .then((rows) => rows[0] ?? null);
   }
+
+  it.each([false, true])("rechecks Claude quota after an OpenAI wait (Claude saturated: %s)", async (saturated) => {
+    const { companyId, agentId, issueId } = await seedCompanyAgentAndIssue();
+    await seedSessionPolicy(companyId, 80);
+    currentQuota = quotaResults({ fiveHourUsedPercent: 85 });
+    const { runId } = await seedQueuedRun({ companyId, agentId, issueId, invocationSource: "assignment" });
+    await heartbeat.resumeQueuedRuns();
+    expect(await waitForCondition(async () => (await readRun(runId))?.status === "scheduled_retry")).toBe(true);
+    const oldWaitStartedAt = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const deferred = await readRun(runId);
+    const oldWait = (deferred?.resultJson as { subscriptionWindowWait: Record<string, unknown> }).subscriptionWindowWait;
+    await db.update(heartbeatRuns).set({
+      resultJson: { subscriptionWindowWait: { ...oldWait, waitStartedAt: oldWaitStartedAt } },
+    }).where(eq(heartbeatRuns.id, runId));
+    await db.insert(budgetPolicies).values({
+      companyId, scopeType: "company", scopeId: companyId, metric: "subscription_percent",
+      windowKind: "provider_session", provider: "anthropic", amount: 80,
+    });
+    currentQuota = [...currentQuota, {
+      ...quotaResults({ fiveHourUsedPercent: saturated ? 90 : 10 })[0]!, provider: "anthropic",
+    }];
+    await db.update(agents).set({ adapterType: "claude_local" }).where(eq(agents.id, agentId));
+    expect((await heartbeat.promoteDueScheduledRetries()).runIds).toContain(runId);
+    await heartbeat.resumeQueuedRuns();
+    if (saturated) {
+      expect(await waitForCondition(async () => {
+        const run = await readRun(runId);
+        return run?.status === "scheduled_retry"
+          && (run.resultJson as { subscriptionWindowWait?: { provider?: string } } | null)?.subscriptionWindowWait?.provider === "anthropic";
+      })).toBe(true);
+      const newWait = await readRun(runId);
+      expect(newWait?.scheduledRetryAttempt).toBe(1);
+      expect((newWait?.resultJson as { subscriptionWindowWait: { waitStartedAt: string } }).subscriptionWindowWait.waitStartedAt)
+        .not.toBe(oldWaitStartedAt);
+      expect(mockAdapterExecute).not.toHaveBeenCalled();
+    } else {
+      expect(await waitForCondition(async () => {
+        const run = await readRun(runId);
+        return mockAdapterExecute.mock.calls.length > 0
+          && run != null && !["queued", "running"].includes(run.status);
+      }, 60_000)).toBe(true);
+    }
+  }, 90_000);
 
   it("defers an assignment run to the window reset instead of cancelling it", async () => {
     const { companyId, agentId, issueId } = await seedCompanyAgentAndIssue();
