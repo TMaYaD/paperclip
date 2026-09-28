@@ -1481,3 +1481,11 @@ including usage outside the company, as before.
 Migration 0280 converts progressive limits to explicit pace and, for old limits
 below 100%, a separate cap. It preserves their combined release curve and active
 state. See DATABASE.md for the stored units and migration details.
+
+### Provider changes during subscription waits
+
+The scheduled-retry sweep rechecks a subscription wait when the agent's current
+provider differs from the provider saved with that wait. It queues the existing
+run through the normal issue gates and current provider quota check. A limit on
+the new provider creates a new wait; changing providers does not bypass budgets.
+Same-provider waits and other retry delays retain their scheduled times.

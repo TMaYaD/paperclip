@@ -48,7 +48,7 @@ describeEmbeddedPostgres("run-dispatch postgres adapter", () => {
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-run-dispatch-postgres-adapter-");
     db = createDb(tempDb.connectionString);
-  }, 20_000);
+  }, 90_000);
 
   afterEach(async () => {
     await db.delete(activityLog);
@@ -715,6 +715,56 @@ describeEmbeddedPostgres("run-dispatch postgres adapter", () => {
         createdAt: input.now,
       });
     }
+
+    it.each([
+      ["openai", "claude_local", "subscription_window_wait", "active", "promoted"],
+      ["anthropic", "codex_local", "subscription_window_wait", "active", "promoted"],
+      ["openai", "codex_local", "subscription_window_wait", "active", "not_promoted"],
+      ["openai", "claude_local", "workspace_busy", "active", "not_promoted"],
+      [null, "claude_local", "subscription_window_wait", "active", "not_promoted"],
+      ["openai", "claude_local", "subscription_window_wait", "paused", "gate_suppressed"],
+    ])("rechecks %s waits with %s (%s, %s): %s", async (provider, adapterType, reason, status, expected) => {
+      const { companyId, agentId } = await seedCompanyAndAgent();
+      const issueId = randomUUID();
+      const runId = randomUUID();
+      const now = new Date();
+      const future = new Date(now.getTime() + 18 * 60 * 60_000);
+      await seedIssue({ companyId, issueId, status: "in_progress", assigneeAgentId: agentId });
+      await seedScheduledRetryRun({ runId, companyId, agentId, issueId, now });
+      await db.update(issues).set({ executionRunId: runId }).where(eq(issues.id, issueId));
+      await db.update(agents).set({ adapterType: adapterType!, status: status! }).where(eq(agents.id, agentId));
+      await db.update(heartbeatRuns).set({
+        scheduledRetryAt: future,
+        scheduledRetryReason: reason,
+        resultJson: { subscriptionWindowWait: { provider } },
+      }).where(eq(heartbeatRuns.id, runId));
+      const adapter = createPostgresRunDispatchAdapter(db);
+      const due = await adapter.listDueRetries({ now, cutoff: null, limit: 50 });
+      expect(due.map((run) => run.runId)).toEqual(expected === "not_promoted" ? [] : [runId]);
+      const result = await adapter.promoteOrCancelDueRetry({ runId, companyId, now });
+      expect(result.outcome).toBe(expected);
+      const duplicate = await adapter.promoteOrCancelDueRetry({ runId, companyId, now });
+      expect(duplicate.outcome).toBe("not_promoted");
+    });
+
+    it("rechecks the provider after listing a stale wait", async () => {
+      const { companyId, agentId } = await seedCompanyAndAgent();
+      const issueId = randomUUID();
+      const runId = randomUUID();
+      const now = new Date();
+      await seedIssue({ companyId, issueId, status: "in_progress", assigneeAgentId: agentId });
+      await seedScheduledRetryRun({ runId, companyId, agentId, issueId, now });
+      await db.update(heartbeatRuns).set({
+        scheduledRetryAt: new Date(now.getTime() + 18 * 60 * 60_000),
+        scheduledRetryReason: "subscription_window_wait",
+        resultJson: { subscriptionWindowWait: { provider: "openai" } },
+      }).where(eq(heartbeatRuns.id, runId));
+      await db.update(agents).set({ adapterType: "claude_local" }).where(eq(agents.id, agentId));
+      const adapter = createPostgresRunDispatchAdapter(db);
+      expect(await adapter.listDueRetries({ now, cutoff: null, limit: 50 })).toHaveLength(1);
+      await db.update(agents).set({ adapterType: "codex_local" }).where(eq(agents.id, agentId));
+      expect((await adapter.promoteOrCancelDueRetry({ runId, companyId, now })).outcome).toBe("not_promoted");
+    });
 
     it("promotes an allowed due retry", async () => {
       const { companyId, agentId } = await seedCompanyAndAgent();
