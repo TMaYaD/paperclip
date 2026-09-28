@@ -263,6 +263,11 @@ async function dragCardToColumn(page: Page, itemTitle: string, fromColumn: strin
   await page.mouse.move(columnBox.x + columnBox.width / 2, columnBox.y + Math.max(88, columnBox.height / 2), { steps: 25 });
   await page.mouse.up();
 
+  // PointerSensor.detach keeps its document-level click suppression listener
+  // for 50 ms after pointerup. A visible dialog can appear before that cleanup,
+  // so an immediate confirmation click is swallowed without sending a request.
+  await page.waitForTimeout(50);
+
   try {
     await expect(page.getByRole("dialog")).toBeVisible({ timeout: 3_000 });
     return true;
@@ -555,7 +560,13 @@ test.describe("Pipelines tutorial UI flow", () => {
     const blogDragged = await dragCardToColumn(page, "Launch blog post", "Drafting", "Assets");
     if (blogDragged) {
       await expect(page.getByRole("heading", { name: "Move Launch blog post?" })).toBeVisible();
-      await page.getByRole("button", { name: "Move it" }).click();
+      const [moveResponse] = await Promise.all([
+        page.waitForResponse((response) =>
+          response.url().endsWith(`/api/cases/${blog!.id}/transition`)
+          && response.request().method() === "POST"),
+        page.getByRole("dialog").getByRole("button", { name: "Move it", exact: true }).click(),
+      ]);
+      await expectOk(moveResponse, "confirm dragged blog move");
     } else {
       await moveItem(board, blog!.id, assets!.key);
       await page.reload();
@@ -572,7 +583,13 @@ test.describe("Pipelines tutorial UI flow", () => {
       await expect(page.getByRole("heading", { name: "This skips the normal flow" })).toBeVisible();
       await page.getByLabel("Reason").fill(overrideReason);
       await expect(page.getByRole("button", { name: "Override and move" })).toBeEnabled();
-      await page.getByRole("button", { name: "Override and move" }).click();
+      const [moveResponse] = await Promise.all([
+        page.waitForResponse((response) =>
+          response.url().endsWith(`/api/cases/${tweet!.id}/transition`)
+          && response.request().method() === "POST"),
+        page.getByRole("dialog").getByRole("button", { name: "Override and move", exact: true }).click(),
+      ]);
+      await expectOk(moveResponse, "confirm dragged tweet override");
     } else {
       await moveItem(board, tweet!.id, published!.key, { reason: overrideReason, force: true });
       await page.reload();
