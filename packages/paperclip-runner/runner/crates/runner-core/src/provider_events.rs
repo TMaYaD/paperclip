@@ -1339,13 +1339,11 @@ mod tests {
             10080
         );
         assert!(!events[0].payload.to_string().contains("must-not-leak"));
-        assert!(
-            normalize_codex_notification(
-                "account/rateLimits/updated",
-                &json!({"rateLimits": {"limitId": "base_model_inference"}}),
-            )
-            .is_empty()
-        );
+        assert!(normalize_codex_notification(
+            "account/rateLimits/updated",
+            &json!({"rateLimits": {"limitId": "base_model_inference"}}),
+        )
+        .is_empty());
     }
 
     #[test]

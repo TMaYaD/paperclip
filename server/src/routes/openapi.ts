@@ -4980,6 +4980,29 @@ registry.registerPath({
 });
 
 registry.registerPath({
+  method: "patch",
+  path: "/api/companies/{companyId}/budgets/policies/{policyId}",
+  tags: ["costs"],
+  summary: "Edit a subscription budget rule",
+  description: "Board-only. Retains the rule ID and scope. Matching pace and cap rules apply together.",
+  request: {
+    params: z.object({ companyId: z.string(), policyId: z.string() }),
+    body: jsonBody(upsertBudgetPolicySchema),
+  },
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict, 422: r.unprocessable },
+});
+
+registry.registerPath({
+  method: "delete",
+  path: "/api/companies/{companyId}/budgets/policies/{policyId}",
+  tags: ["costs"],
+  summary: "Delete a subscription budget rule",
+  description: "Board-only. Removes this rule while retaining other subscription constraints.",
+  request: { params: z.object({ companyId: z.string(), policyId: z.string() }) },
+  responses: { 204: r.noContent, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registry.registerPath({
   method: "post",
   path: "/api/companies/{companyId}/budget-incidents/{incidentId}/resolve",
   tags: ["costs"],

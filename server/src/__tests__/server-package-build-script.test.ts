@@ -26,6 +26,16 @@ describe("server package build script", () => {
     );
   });
 
+  it("orders the UI workspace build before the server copies its output", () => {
+    const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf8")) as {
+      devDependencies?: Record<string, string>;
+    };
+    // Recursive builds follow workspace dependency edges. Without this edge,
+    // prepare:ui-dist can start a second Vite build into the same output while
+    // the first is still stamping sw.js or copying assets.
+    expect(packageJson.devDependencies?.["@paperclipai/ui"]).toBe("workspace:*");
+  });
+
   it("copies static runtime asset directories into dist", () => {
     const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf8")) as {
       scripts?: Record<string, string>;
