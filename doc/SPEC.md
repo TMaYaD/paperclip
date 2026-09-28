@@ -595,3 +595,7 @@ company search share lexical matching and ranking. Known identifiers and direct
 title matches lead; current conversation and document content supplies supporting
 evidence. See [Task search relevance](SEARCH.md) for the evaluation rubric,
 matching contract and reproducible quality tests.
+
+Subscription budgets support independent provider session and weekly windows.
+Operators combine a progressive pace rule with a fixed usage cap; every matching
+rule must permit a new run. See `SPEC-implementation.md` for the contract.

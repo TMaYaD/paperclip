@@ -84,7 +84,7 @@ function clampPercent(value: number) {
  * have no natural ceiling, so their bar stays a plain utilization-of-budget
  * fill.
  */
-function BudgetUsageBar({
+export function BudgetUsageBar({
   usedPercent,
   limitPercent,
   releasedPercent,
@@ -215,7 +215,7 @@ function BudgetUsageBar({
 }
 
 /** Names the bar's markers, so nobody has to hover a two-pixel tick to learn what it is. */
-function BudgetMarkerLegend({ limitPercent, releasedPercent }: { limitPercent: number; releasedPercent: number | null }) {
+export function BudgetMarkerLegend({ limitPercent, releasedPercent, limitLabel = "Limit" }: { limitPercent: number; releasedPercent: number | null; limitLabel?: string }) {
   return (
     <div data-testid="budget-marker-legend" className="flex flex-wrap items-center gap-x-4 gap-y-1 pt-1 text-xs text-muted-foreground">
       {releasedPercent != null && releasedPercent < limitPercent ? (
@@ -226,7 +226,7 @@ function BudgetMarkerLegend({ limitPercent, releasedPercent }: { limitPercent: n
       ) : null}
       <span className="inline-flex items-center gap-1.5">
         <span aria-hidden className="inline-block h-3.5 w-0.5 rounded-full bg-foreground" />
-        Limit {formatPercent(limitPercent)}
+        {limitLabel} {formatPercent(limitPercent)}
       </span>
     </div>
   );

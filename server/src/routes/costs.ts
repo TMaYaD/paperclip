@@ -307,6 +307,25 @@ export function costRoutes(
     },
   );
 
+  router.patch(
+    "/companies/:companyId/budgets/policies/:policyId",
+    validate(upsertBudgetPolicySchema),
+    async (req, res) => {
+      assertBoard(req);
+      const companyId = req.params.companyId as string;
+      assertCompanyAccess(req, companyId);
+      res.json(await budgets.upsertPolicy(companyId, req.body, req.actor.userId ?? "board", req.params.policyId as string));
+    },
+  );
+
+  router.delete("/companies/:companyId/budgets/policies/:policyId", async (req, res) => {
+    assertBoard(req);
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    await budgets.deletePolicy(companyId, req.params.policyId as string, req.actor.userId ?? "board");
+    res.status(204).end();
+  });
+
   router.post(
     "/companies/:companyId/budget-incidents/:incidentId/resolve",
     validate(resolveBudgetIncidentSchema),

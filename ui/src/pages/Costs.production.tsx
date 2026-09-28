@@ -915,20 +915,17 @@ export function Costs() {
               ) : null}
 
               <SubscriptionWindowBudgets
-                companyId={companyId}
-                companyName={selectedCompany?.name ?? "Organization"}
                 policies={subscriptionBudgetPolicies}
-                quotaResults={quotaData ?? []}
-                isSaving={policyMutation.isPending}
-                onSave={({ windowKind, amount, progressive }) =>
-                  policyMutation.mutate({
-                    scopeType: "company",
-                    scopeId: companyId,
-                    amount,
-                    windowKind,
-                    metric: "subscription_percent",
-                    progressive,
-                  })}
+                onSave={async (input, policyId) => {
+                  const data = { ...input, scopeType: "company" as const, scopeId: companyId, metric: "subscription_percent" as const };
+                  if (policyId) await budgetsApi.updatePolicy(companyId, policyId, data);
+                  else await budgetsApi.upsertPolicy(companyId, data);
+                  invalidateBudgetViews();
+                }}
+                onDelete={async (policyId) => {
+                  await budgetsApi.deletePolicy(companyId, policyId);
+                  invalidateBudgetViews();
+                }}
               />
 
               <div className="space-y-5">

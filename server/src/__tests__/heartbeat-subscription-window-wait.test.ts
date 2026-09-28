@@ -235,6 +235,7 @@ describeEmbeddedPostgres("heartbeat subscription window wait", () => {
       scopeType: "company",
       scopeId: companyId,
       metric: "subscription_percent",
+      provider: "openai",
       windowKind: "provider_session",
       amount,
       progressive: options.progressive ?? false,

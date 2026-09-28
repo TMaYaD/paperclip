@@ -1450,3 +1450,34 @@ from stored configuration problems. Verify connection transport and endpoint
 fields before disabling a connection. Verify workspace ownership, active runs,
 Git state, and runtime-service readiness before closing a workspace. A missing
 URL or old workspace timestamp alone does not prove that a row is disposable.
+
+### Provider-specific subscription budget rules
+
+The Costs budget view manages one rule of each kind per scope, provider and
+window. OpenAI and Anthropic each have independent session (five-hour) and
+weekly windows. Each rule selects either a fixed cap or a progressive pace. Weekly pace is
+percent per day; session pace is percent per hour. Pace rules send `amount: 100`,
+`progressive: true`, and a positive finite `pacePercent` (fractional values and
+rates above 100 are allowed). Cap rules send the percentage as `amount` (1–100),
+`progressive: false`, and `pacePercent: null`. A 20%/day rule releases the full
+quota in five days. A separate 70% cap stops usage at 70% until reset. Every
+matching rule must permit dispatch. The full-width rows show usage and released allowance from that exact
+provider observation; quota percentages or reset times are never combined
+across providers. A provider that does not report a configured window holds
+matching runs while its usage is unknown.
+
+Create rules with `POST /api/companies/:companyId/budgets/policies`, including
+`metric: "subscription_percent"`, `provider: "openai" | "anthropic"`, and
+`windowKind: "provider_session" | "provider_week"`. Edit a rule with `PATCH` at
+that path plus `/:policyId`, and remove it with `DELETE`. Edits retain the rule
+ID and scope; duplicate provider/window/kind combinations return 409. Deleting a subscription
+rule removes only its dispatch constraint. Money-budget behavior is unchanged.
+
+Migration 0279 splits each existing shared subscription rule into equivalent
+OpenAI and Anthropic rules, preserving the amount, release mode and active state.
+The original ID is retained for OpenAI. Limits apply to provider account usage,
+including usage outside the company, as before.
+
+Migration 0280 converts progressive limits to explicit pace and, for old limits
+below 100%, a separate cap. It preserves their combined release curve and active
+state. See DATABASE.md for the stored units and migration details.

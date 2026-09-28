@@ -1664,3 +1664,15 @@ with bounded continuation and visible recovery. Preserve explicit approvals,
 current task ownership, cancellation, dependencies, and newer task state. See
 `doc/architecture/native-status-arbitration.md` for finish feedback and the
 provenance-checked cleanup of historical automatic completion reviews.
+
+### Subscription budget rules
+
+Subscription percentage policies are independent by scope, provider and provider
+window (five-hour session or week). Operators can add, edit and delete rules,
+choosing a fixed cap or a progressive pace (% per day for weekly windows, % per
+hour for sessions). Each provider/window can have one rule of each kind; every
+matching rule must permit dispatch. A 20%/day pace releases the full quota after
+five days, while a separate 70% cap holds usage there until reset. Summaries and dispatch use the
+same selected provider's usage/reset observation. Company budget rows retain
+usage bars, limit and released markers, and the reason/timing for a hold. A
+missing provider window remains unknown and holds matching runs under a limit.

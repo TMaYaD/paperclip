@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { flushSync } from "react-dom";
+import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ResolvedWorkspaceResource, WorkspaceFileContent } from "@paperclipai/shared";
@@ -98,14 +98,14 @@ describe("FileViewerSheet copy actions", () => {
   });
 
   afterEach(() => {
-    flushSync(() => root.unmount());
+    act(() => root.unmount());
     container.remove();
     document.body.innerHTML = "";
     vi.clearAllMocks();
   });
 
   function renderSheet() {
-    flushSync(() => {
+    act(() => {
       root.render(
         <FileViewerSheet
           issueId="issue-1"
@@ -126,11 +126,11 @@ describe("FileViewerSheet copy actions", () => {
   async function click(label: string) {
     const button = document.body.querySelector(`button[aria-label="${label}"]`) as HTMLButtonElement | null;
     expect(button).not.toBeNull();
-    flushSync(() => {
+    // Clipboard writes resolve asynchronously. Flush React's resulting update
+    // instead of assuming it commits before an unrelated zero-delay timer.
+    await act(async () => {
       button!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
     });
-    await Promise.resolve();
-    await new Promise((resolve) => setTimeout(resolve, 0));
   }
 
   it("copies file contents and shows confirmation", async () => {

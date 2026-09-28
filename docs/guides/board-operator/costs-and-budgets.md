@@ -37,6 +37,34 @@ PATCH /api/agents/{agentId}
 { "budgetMonthlyCents": 5000 }
 ```
 
+## Subscription Budget Rules
+
+In Costs, use **Add rule**, **Edit**, or **Delete** in the subscription rules table.
+Choose OpenAI or Anthropic, then the provider's session (five hours) or weekly
+(seven days) window. Each row shows that provider's observed usage, release
+allowance, reset time, and the reason a rule is holding new runs.
+
+Each rule has one numeric setting:
+
+- **Pace (progressive release):** quota percentage released per day for weekly
+  windows, or per hour for sessions. Fractional rates are supported. A weekly
+  pace of 20%/day releases the full quota after five days; 28%/day does so after
+  about 3.6 days. Pace starts at the provider's window reset, not a calendar day.
+- **Cap (fixed limit):** the maximum usage percentage for that window, from 1
+  to 100. At the cap, new runs wait until the provider resets the window.
+
+You can combine one pace and one cap for the same provider and window. Every
+matching rule must permit a run. For example, 20%/day plus a 70% cap releases
+20% after one day and 70% after 3.5 days, then holds usage at 70% until reset.
+Deleting either rule leaves the other in effect. A pace alone can release the
+full provider quota before the window ends.
+
+These rules check provider account usage, including use outside Paperclip. They
+hold new runs rather than interrupt work already running, so a run can take
+usage past a threshold. Unknown usage holds matching runs for a fresh reading.
+If usage is known but the reset time is missing, pace falls back to the full
+provider ceiling; any separate cap still applies.
+
 ## Budget Enforcement
 
 Paperclip enforces budgets automatically:

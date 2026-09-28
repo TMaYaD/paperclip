@@ -831,3 +831,46 @@ describe("Codex quota mapping through snapshots and subscription enforcement", (
     expect(week.windowEnd!.getTime() - now.getTime()).toBeLessThan(168 * 3600_000);
   });
 });
+
+
+describe("independent provider rules", () => {
+  it("does not let another provider's rule hold a run, even when usage is unreadable", () => {
+    expect(decideSubscriptionWindowWait({ policies: [policy({ provider: "openai", amount: 1 })], result: null, provider: "anthropic", now: NOW })).toBeNull();
+  });
+  it("uses only the matching provider's progressive or fixed rule", () => {
+    const policies = [policy({ id: "openai", provider: "openai", amount: 100, progressive: true, windowKind: "provider_week" }), policy({ id: "anthropic", provider: "anthropic", amount: 100, progressive: false, windowKind: "provider_week" })];
+    const result = { provider: "openai", ok: true, windows: [window({ key: "seven_day", usedPercent: 4, resetsAt: new Date(NOW.getTime() + 7 * 86400000 - 20 * 60000).toISOString() })] };
+    const held = decideSubscriptionWindowWait({ policies, result, provider: "openai", now: NOW });
+    expect(held).toMatchObject({ policyId: "openai", usedPercent: 4, progressive: true });
+    expect(held?.releasedPercent).toBeLessThan(1);
+    expect(decideSubscriptionWindowWait({ policies, result: { ...result, provider: "anthropic" }, provider: "anthropic", now: NOW })).toBeNull();
+  });
+});
+
+describe("composable pace and cap rules", () => {
+  const start = new Date("2026-09-21T00:00:00Z");
+  const reset = "2026-09-28T00:00:00.000Z";
+  const pace = policy({ id: "pace", windowKind: "provider_week", amount: 100, progressive: true, pacePercent: 20 });
+  const cap = policy({ id: "cap", windowKind: "provider_week", amount: 70 });
+  const decide = (days: number, usedPercent: number, policies = [pace, cap]) => decideSubscriptionWindowWait({
+    policies, provider: "anthropic", now: new Date(start.getTime() + days * 86400000),
+    result: ok([window({ key: "seven_day", usedPercent, resetsAt: reset })]),
+  });
+  it("releases 20% per day and permits the full quota after five days", () => {
+    expect(decide(1, 30, [pace])).toMatchObject({ policyId: "pace", releasedPercent: 20, releaseAt: "2026-09-22T12:00:00.000Z" });
+    expect(decide(5, 99, [pace])).toBeNull();
+    expect(decide(5, 100, [pace])).toMatchObject({ releaseAt: null, resetsAt: reset });
+  });
+  it("requires both rules and waits for reset once the separate cap is reached", () => {
+    expect(decide(1, 30)).toMatchObject({ policyId: "pace" });
+    expect(decide(4, 69)).toBeNull();
+    expect(decide(4, 70)).toMatchObject({ policyId: "cap", releaseAt: null, resetsAt: reset });
+    expect(decide(1, 70, [cap, pace])).toMatchObject({ policyId: "cap", releaseAt: null });
+    expect(decide(1, 70, [pace, cap])).toMatchObject({ policyId: "cap", releaseAt: null });
+  });
+  it("uses hourly pace for sessions and accepts rates above 100", () => {
+    const result = evaluateSubscriptionRelease({ usedPercent: 75, limitPercent: 100, progressive: true, pacePercent: 150, windowKind: "provider_session", resetsAt: "2026-09-21T05:00:00Z", now: new Date("2026-09-21T00:15:00Z") });
+    expect(result.release.releasedPercent).toBe(37.5);
+    expect(result.releaseAt?.toISOString()).toBe("2026-09-21T00:30:00.000Z");
+  });
+});

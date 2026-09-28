@@ -401,3 +401,19 @@ cleanup authority; it does not prove that remote inference has stopped. Recovery
 revokes the previous boot identity with a conditional update. Its own claim also
 expires so another sweep can finish cleanup after a restart. Historical rows keep
 null ownership fields and follow the previous recovery path.
+
+## Provider-specific subscription budget rules
+
+`budget_policies.provider` identifies the subscription provider (`openai` or
+`anthropic`); billed-cents policies retain the empty string. The unique key is
+company, scope type/id, metric, window kind, provider and progressive kind. Migration 0279 converts
+each legacy subscription rule to an OpenAI rule and copies its settings to an
+Anthropic rule, retaining inactive rules and leaving billed-cents policies alone.
+
+Migration 0280 adds `pace_percent`: percent per day for a weekly window, or per
+hour for a session. Pace rules use `amount = 100` as the provider ceiling. Fixed
+caps retain their amount and have no pace. Existing progressive rules retain
+IDs and release rates (`amount / 7` daily or `amount / 5` hourly). A progressive
+ceiling below 100 also creates a fixed cap, preserving the old combined behavior.
+Inactive states and zero settings are retained. Both kinds may coexist for the
+same provider/window; duplicate rules of the same kind are rejected.

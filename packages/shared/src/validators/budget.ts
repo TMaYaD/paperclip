@@ -4,6 +4,7 @@ import {
   BUDGET_METRICS,
   BUDGET_SCOPE_TYPES,
   BUDGET_WINDOW_KINDS,
+  SUBSCRIPTION_BUDGET_PROVIDERS,
   isSubscriptionBudgetWindowKind,
 } from "../constants.js";
 
@@ -11,10 +12,12 @@ export const upsertBudgetPolicySchema = z.object({
   scopeType: z.enum(BUDGET_SCOPE_TYPES),
   scopeId: z.string().guid(),
   metric: z.enum(BUDGET_METRICS).optional().default("billed_cents"),
+  provider: z.enum(SUBSCRIPTION_BUDGET_PROVIDERS).nullable().optional(),
   windowKind: z.enum(BUDGET_WINDOW_KINDS).optional().default("calendar_month_utc"),
   amount: z.number().int().nonnegative(),
   // No default: an omitted flag keeps the stored value on an existing policy.
   progressive: z.boolean().optional(),
+  pacePercent: z.number().positive().finite().nullable().optional(),
   warnPercent: z.number().int().min(1).max(99).optional().default(80),
   hardStopEnabled: z.boolean().optional().default(true),
   notifyEnabled: z.boolean().optional().default(true),
@@ -22,6 +25,9 @@ export const upsertBudgetPolicySchema = z.object({
 }).superRefine((value, ctx) => {
   const subscriptionWindow = isSubscriptionBudgetWindowKind(value.windowKind);
   if (value.metric === "subscription_percent") {
+    if (!value.provider) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Subscription rules require a provider", path: ["provider"] });
+    }
     if (!subscriptionWindow) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -42,6 +48,18 @@ export const upsertBudgetPolicySchema = z.object({
       message: "provider_session and provider_week windows require the subscription_percent metric",
       path: ["windowKind"],
     });
+  }
+  if (value.progressive === true && value.pacePercent == null) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Pace rules require a positive pace", path: ["pacePercent"] });
+  }
+  if (value.pacePercent != null && (value.metric !== "subscription_percent" || value.progressive === false)) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Pace is only valid on progressive subscription rules", path: ["pacePercent"] });
+  }
+  if (value.progressive === true && value.amount !== 100) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Pace rules use the provider's 100% ceiling; use a separate cap rule for a lower limit", path: ["amount"] });
+  }
+  if (value.metric !== "subscription_percent" && value.provider != null) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Money budgets cannot select a subscription provider", path: ["provider"] });
   }
   if (value.progressive === true && value.metric !== "subscription_percent") {
     ctx.addIssue({

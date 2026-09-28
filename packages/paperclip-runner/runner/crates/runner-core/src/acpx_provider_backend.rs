@@ -156,7 +156,7 @@ impl AcpxProviderDescriptor {
                 "1.6.2",
                 Some("@openai/codex"),
                 Some("0.153.4"),
-                "sha256:c4538599d1ab767db5dff50934f13bb5ba313a59d9c4a83e993fac4617ea63d3",
+                "sha256:5d2ebfe01a051503f9b805f80de9323707fdb83685f74aee940be794b2811cb0",
             ),
             "pi" => return Err(DurableRunnerError::invalid(
                 "ACPX agent pi is not executable through the verified runnerd provider boundary",
@@ -1787,7 +1787,7 @@ mod tests {
                     "1.6.2",
                     json!("@openai/codex"),
                     json!("0.153.4"),
-                    "sha256:c4538599d1ab767db5dff50934f13bb5ba313a59d9c4a83e993fac4617ea63d3",
+                    "sha256:5d2ebfe01a051503f9b805f80de9323707fdb83685f74aee940be794b2811cb0",
                 )
             };
         json!({

@@ -105,6 +105,7 @@ const mockBudgetService = vi.hoisted(() => ({
     pendingApprovalCount: 0,
   }),
   upsertPolicy: vi.fn(),
+  deletePolicy: vi.fn(),
   resolveIncident: vi.fn(),
 }));
 const mockAccessService = vi.hoisted(() => ({
@@ -278,6 +279,26 @@ describe("cost routes", () => {
   it("accepts valid finance event list limits", async () => {
     const { parseCostLimit } = loadCostParsers();
     expect(parseCostLimit({ limit: "25" })).toBe(25);
+  });
+
+  it("routes provider rule edits and deletes by ID for board users", async () => {
+    const app = createApp();
+    const body = { scopeType: "company", scopeId: "22222222-2222-4222-8222-222222222222", metric: "subscription_percent", provider: "openai", windowKind: "provider_week", amount: 100, progressive: true, pacePercent: 20 };
+    mockBudgetService.upsertPolicy.mockResolvedValue({ policyId: "rule-1", ...body });
+    expect((await request(app).patch("/api/companies/company-1/budgets/policies/rule-1").send(body)).status).toBe(200);
+    expect(mockBudgetService.upsertPolicy).toHaveBeenCalledWith("company-1", expect.objectContaining(body), "board-user", "rule-1");
+    expect((await request(app).delete("/api/companies/company-1/budgets/policies/rule-1")).status).toBe(204);
+    expect(mockBudgetService.deletePolicy).toHaveBeenCalledWith("company-1", "rule-1", "board-user");
+  });
+
+  it("rejects cross-company and agent deletion of subscription rules", async () => {
+    for (const actor of [
+      { type: "board", userId: "board-user", source: "session", isInstanceAdmin: false, companyIds: ["company-2"] },
+      { type: "agent", agentId: "agent-1", companyId: "company-1" },
+    ]) {
+      expect((await request(createAppWithActor(actor)).delete("/api/companies/company-1/budgets/policies/rule-1")).status).toBe(403);
+    }
+    expect(mockBudgetService.deletePolicy).not.toHaveBeenCalled();
   });
 
   it("rejects company budget updates for board users outside the company", async () => {
