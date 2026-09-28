@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { resolveInstallationId } from '../get-bot-token.mjs';
+import { resolveInstallationId, getWorkflowFallbackToken } from '../get-bot-token.mjs';
 
 test('resolveInstallationId: uses the repo installation endpoint when repo context is available', async () => {
   const seenPaths = [];
@@ -30,4 +30,18 @@ test('resolveInstallationId: rejects ambiguous installations without repo or own
     ]), 'jwt'),
     /Multiple commitperclip installations found/
   );
+});
+
+const workflow = { GITHUB_ACTIONS: 'true', GITHUB_REPOSITORY: 'TMaYaD/paperclip', GITHUB_TOKEN: 'test-workflow-token' };
+test('fork review uses the scoped workflow token only when no app key is configured', () => {
+  assert.equal(getWorkflowFallbackToken(workflow), 'test-workflow-token');
+  assert.equal(getWorkflowFallbackToken({ ...workflow, COMMITPERCLIP_KEY: 'configured' }), null);
+});
+test('upstream review still requires its app key', () => {
+  assert.equal(getWorkflowFallbackToken({ ...workflow, GITHUB_REPOSITORY: 'PaperclipAI/Paperclip' }), null);
+});
+test('fallback requires a GitHub Actions repository context and token', () => {
+  for (const overrides of [{ GITHUB_ACTIONS: '' }, { GITHUB_REPOSITORY: '' }, { GITHUB_REPOSITORY: 'invalid' }, { GITHUB_TOKEN: '' }]) {
+    assert.equal(getWorkflowFallbackToken({ ...workflow, ...overrides }), null);
+  }
 });
