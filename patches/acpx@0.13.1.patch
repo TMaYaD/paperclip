@@ -11,7 +11,7 @@ index 5e2113ac0a1a92c99322cf01e5c106760a0b0dbf..b7b5151f3da45b5e0d12aea55e9f3b07
    private setSessionModelThroughConfig;
    private setSessionModelThroughLegacyMethod;
 diff --git a/dist/live-checkpoint-BSIrfgVo.js b/dist/live-checkpoint-BSIrfgVo.js
-index d454fd7c5bf742b469be75eb8c3988b694a0ffaa..e930a933d259e79a6b03b1148aa58d686b781129 100644
+index d454fd7c5bf742b469be75eb8c3988b694a0ffaa..332a7d84833a9411a6beb980fc069531e82f1bc5 100644
 --- a/dist/live-checkpoint-BSIrfgVo.js
 +++ b/dist/live-checkpoint-BSIrfgVo.js
 @@ -1068,6 +1068,7 @@ function serializeSessionRecordForDisk(record) {
@@ -39,7 +39,20 @@ index d454fd7c5bf742b469be75eb8c3988b694a0ffaa..e930a933d259e79a6b03b1148aa58d68
  const OPAQUE_VALUE_PATHS = /* @__PURE__ */ new Set([
  	"agent_capabilities",
  	"messages.Agent.content.ToolUse.input",
-@@ -3135,8 +3137,18 @@ function promotePrefixedAuthEnvironment(env) {
+@@ -3104,10 +3106,10 @@ function authEnvKey(methodId) {
+ 	authEnvKeyCache.set(methodId, key);
+ 	return key;
+ }
+-function readEnvCredential(methodId) {
++function readEnvCredential(methodId, environment = process.env) {
+ 	const key = authEnvKey(methodId);
+ 	if (!key) return;
+-	const value = process.env[key];
++	const value = environment[key];
+ 	if (typeof value === "string" && value.trim().length > 0) return value;
+ }
+ function protectedEnvKey(key) {
+@@ -3135,8 +3137,21 @@ function promotePrefixedAuthEnvironment(env) {
  	}
  	return protectedKeys;
  }
@@ -50,17 +63,20 @@ index d454fd7c5bf742b469be75eb8c3988b694a0ffaa..e930a933d259e79a6b03b1148aa58d68
 +	const prototype = Object.getPrototypeOf(value);
 +	return (prototype === Object.prototype || prototype === null) && Object.values(value).every((entry) => typeof entry === "string");
 +}
-+function buildAgentEnvironment(authCredentials, sessionEnv, spawnEnvironment) {
++function resolveAgentEnvironment(spawnEnvironment) {
 +	let sourceEnvironment = process.env;
 +	if (spawnEnvironment !== void 0) {
 +		sourceEnvironment = spawnEnvironment();
 +		if (!isPlainStringEnvironment(sourceEnvironment)) throw new TypeError("ACPX spawn environment must be a plain record of string values");
 +	}
-+	const env = { ...sourceEnvironment };
++	return sourceEnvironment;
++}
++function buildAgentEnvironment(authCredentials, sessionEnv, spawnEnvironment) {
++	const env = { ...resolveAgentEnvironment(spawnEnvironment) };
  	const protectedAuthEnvKeys = promotePrefixedAuthEnvironment(env);
  	if (authCredentials) for (const [methodId, credential] of Object.entries(authCredentials)) {
  		addAuthCredentialEnvKeys(protectedAuthEnvKeys, methodId, credential);
-@@ -3178,10 +3190,10 @@ function resolveConfiguredAuthCredential(methodId, authCredentials) {
+@@ -3178,10 +3193,10 @@ function resolveConfiguredAuthCredential(methodId, authCredentials) {
  	const configCredentials = authCredentials ?? {};
  	return configCredentials[methodId] ?? configCredentials[toEnvToken(methodId)];
  }
@@ -73,7 +89,7 @@ index d454fd7c5bf742b469be75eb8c3988b694a0ffaa..e930a933d259e79a6b03b1148aa58d68
  		stdio: [
  			"pipe",
  			"pipe",
-@@ -3961,10 +3973,13 @@ function resolveClientCapabilities(params) {
+@@ -3961,10 +3976,13 @@ function resolveClientCapabilities(params) {
  			...params.elicitationModes.includes("url") ? { url: {} } : {}
  		} } : {}
  	};
@@ -89,7 +105,7 @@ index d454fd7c5bf742b469be75eb8c3988b694a0ffaa..e930a933d259e79a6b03b1148aa58d68
  	};
  }
  function hasResponseField(response, field) {
-@@ -4216,9 +4231,21 @@ var AcpClient = class {
+@@ -4216,9 +4234,21 @@ var AcpClient = class {
  		this.lastAgentExit = void 0;
  		this.lastKnownPid = child.pid ?? void 0;
  		this.attachAgentLifecycleObservers(child);
@@ -111,7 +127,7 @@ index d454fd7c5bf742b469be75eb8c3988b694a0ffaa..e930a933d259e79a6b03b1148aa58d68
  			if (!this.options.verbose) return;
  			process.stderr.write(chunk);
  		});
-@@ -4253,7 +4280,12 @@ var AcpClient = class {
+@@ -4253,7 +4283,12 @@ var AcpClient = class {
  			geminiAcp: isGeminiAcpCommand(spawnCommand, args),
  			copilotAcp: isCopilotAcpCommand(spawnCommand, args),
  			claudeAcp: isClaudeAcpCommand(spawnCommand, args),
@@ -125,7 +141,7 @@ index d454fd7c5bf742b469be75eb8c3988b694a0ffaa..e930a933d259e79a6b03b1148aa58d68
  		};
  	}
  	logAgentLaunch(plan) {
-@@ -4279,10 +4311,17 @@ var AcpClient = class {
+@@ -4279,10 +4314,17 @@ var AcpClient = class {
  	}
  	async spawnAgentProcess(plan) {
  		const spawnCommand = buildAgentSpawnCommand(plan.spawnCommand, plan.args, process.platform, plan.spawnOptions.env);
@@ -145,7 +161,37 @@ index d454fd7c5bf742b469be75eb8c3988b694a0ffaa..e930a933d259e79a6b03b1148aa58d68
  		try {
  			await waitForSpawn$1(spawnedChild);
  		} catch (error) {
-@@ -5028,6 +5067,12 @@ var AcpClient = class {
+@@ -4422,7 +4464,10 @@ var AcpClient = class {
+ 			const createPromise = this.runConnectionRequest(() => connection.newSession({
+ 				cwd: sessionCwd,
+ 				mcpServers: this.options.mcpServers ?? [],
+-				_meta: buildClaudeCodeOptionsMeta(this.options.sessionOptions, claudeAcp)
++				_meta: this.isGrokBuildAcpCommand()
++					? { rules: typeof this.options.sessionOptions?.systemPrompt === "string"
++						? this.options.sessionOptions.systemPrompt : this.options.sessionOptions?.systemPrompt?.append ?? "" }
++					: buildClaudeCodeOptionsMeta(this.options.sessionOptions, claudeAcp)
+ 			}));
+ 			result = claudeAcp ? await withTimeout(createPromise, resolveClaudeAcpSessionCreateTimeoutMs()) : await createPromise;
+ 		} catch (error) {
+@@ -4864,7 +4909,7 @@ var AcpClient = class {
+ 	}
+ 	selectAuthMethod(methods) {
+ 		for (const method of methods) {
+-			const envCredential = readEnvCredential(method.id);
++			const envCredential = readEnvCredential(method.id, resolveAgentEnvironment(this.options.spawnEnvironment));
+ 			if (envCredential) return {
+ 				methodId: method.id,
+ 				credential: envCredential,
+@@ -4890,7 +4935,7 @@ var AcpClient = class {
+ 	}
+ 	readAgentSpecificEnvCredential(methodId) {
+ 		if (!this.isGrokBuildAcpCommand() || methodId !== "xai.api_key") return;
+-		const value = process.env.XAI_API_KEY;
++		const value = (resolveAgentEnvironment(this.options.spawnEnvironment)).XAI_API_KEY;
+ 		return typeof value === "string" && value.trim().length > 0 ? value : void 0;
+ 	}
+ 	selectAgentManagedAuthMethod(methodId) {
+@@ -5028,6 +5073,12 @@ var AcpClient = class {
  	attachAgentLifecycleObservers(child) {
  		child.once("exit", (exitCode, signal) => {
  			this.recordAgentExit("process_exit", exitCode, signal);
@@ -158,7 +204,7 @@ index d454fd7c5bf742b469be75eb8c3988b694a0ffaa..e930a933d259e79a6b03b1148aa58d68
  		});
  		child.once("close", (exitCode, signal) => {
  			this.recordAgentExit("process_close", exitCode, signal);
-@@ -6435,6 +6480,27 @@ async function withConnectedSession(options) {
+@@ -6435,6 +6486,27 @@ async function withConnectedSession(options) {
  //#region src/runtime/engine/prompt-turn.ts
  const SESSION_REPLY_IDLE_MS = 1e3;
  const SESSION_REPLY_DRAIN_TIMEOUT_MS = 5e3;
@@ -186,7 +232,7 @@ index d454fd7c5bf742b469be75eb8c3988b694a0ffaa..e930a933d259e79a6b03b1148aa58d68
  async function runPromptTurn(params) {
  	try {
  		const promptPromise = params.client.prompt(params.sessionId, params.prompt, params.onPromptRequestStarted, params.onElicitation);
-@@ -6444,6 +6510,19 @@ async function runPromptTurn(params) {
+@@ -6444,6 +6516,19 @@ async function runPromptTurn(params) {
  			idleMs: SESSION_REPLY_IDLE_MS,
  			timeoutMs: SESSION_REPLY_DRAIN_TIMEOUT_MS
  		}).catch(() => {});
@@ -304,7 +350,7 @@ index e8102acb03c4c38830ad5ec22f356125eb0423b7..2277321c58c1265ca930c69eb3f8869b
      text: string;
      attachments?: AcpRuntimeTurnAttachment[];
 diff --git a/dist/runtime.js b/dist/runtime.js
-index a1f4a70a003792c6eacf68b6b038f37bfec1db53..61ae4520c53e8aa01ff02734654ab991c6a287e5 100644
+index a1f4a70a003792c6eacf68b6b038f37bfec1db53..df6e2a4e37bae86618c155775f351d841257eb27 100644
 --- a/dist/runtime.js
 +++ b/dist/runtime.js
 @@ -371,7 +371,7 @@ const PROMPT_EVENT_PARSERS = {
@@ -572,3 +618,10 @@ index c3da1645235bbea22de3f8484149051cd7dca56b..ab6c1bf8aaf879800552d22f357e88b5
    title?: string | null;
    messages: SessionMessage[];
    updated_at: string;
+@@ -295,4 +315,4 @@ type SessionAgentOptions = {
+ };
+ //#endregion
+ export { SessionRecord as _, AcpElicitationHandler as a, AcpElicitationResponse as c, AuthPolicy as d, McpServer$1 as f, PermissionStats as g, PermissionPolicy as h, AcpElicitationContext as i, AcpPermissionDecision as l, PermissionMode as m, SystemPromptOption as n, AcpElicitationMode as o, NonInteractivePermissionPolicy as p, AcpClientOptions as r, AcpElicitationRequest as s, SessionAgentOptions as t, AcpPermissionRequest as u, PromptInput as v };
+-//# sourceMappingURL=session-options-DwRDODlr.d.ts.map
+\ No newline at end of file
++//# sourceMappingURL=session-options-DwRDODlr.d.ts.map

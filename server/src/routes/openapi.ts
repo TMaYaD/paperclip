@@ -174,6 +174,7 @@ import {
   withdrawIssueThreadInteractionSchema,
   // Auth / profile
   updateCurrentUserProfileSchema,
+  updateCurrentUserPreferencesSchema,
   // Company portability (legacy routes)
   companyPortabilityExportSchema,
   companyPortabilityPreviewSchema,
@@ -206,6 +207,7 @@ import {
   // Issue recovery and decomposition
   createAcceptedPlanDecompositionSchema,
   resolveIssueRecoveryActionSchema,
+  retryWorkspaceExportSchema,
   cancelIssueThreadInteractionSchema,
   // Secret provider configs and remote import
   createSecretProviderConfigSchema,
@@ -6553,6 +6555,23 @@ registry.registerPath({
   responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
 });
 
+registry.registerPath({
+  method: "get",
+  path: "/api/auth/preferences",
+  tags: ["auth"],
+  summary: "Get the signed-in user's personal preferences",
+  request: { query: z.object({ expectedUserId: z.string().min(1) }) },
+  responses: { 200: r.ok(), 401: r.unauthorized },
+});
+registry.registerPath({
+  method: "patch",
+  path: "/api/auth/preferences",
+  tags: ["auth"],
+  summary: "Update personal preferences with a company audit context",
+  request: { body: jsonBody(updateCurrentUserPreferencesSchema) },
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden },
+});
+
 // ─── Auth / profile ──────────────────────────────────────────────────────────
 
 registry.registerPath({
@@ -9958,6 +9977,15 @@ registerCurrentRoute({
   path: "/api/issues/{id}/recovery-actions",
   tags: ["issues"],
   summary: "List issue recovery actions",
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/issues/{id}/recovery-actions/retry-workspace-export",
+  tags: ["issues"],
+  summary: "Retry only workspace export for a repaired accepted native result",
+  body: retryWorkspaceExportSchema,
+  responses: { 202: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict },
 });
 
 registerCurrentRoute({
