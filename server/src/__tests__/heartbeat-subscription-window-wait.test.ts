@@ -27,6 +27,7 @@ import {
 } from "../services/subscription-window-gate.ts";
 import { WORKSPACE_BUSY_RETRY_REASON } from "../modules/run-dispatch/domain/wake-context.ts";
 import { runningProcesses } from "../adapters/index.ts";
+import { drainHeartbeatRunsToQuiescence } from "./helpers/drain-heartbeat-runs.ts";
 
 const mockAdapterExecute = vi.hoisted(() =>
   vi.fn(async () => ({
@@ -85,7 +86,10 @@ async function waitForCondition(fn: () => Promise<boolean>, timeoutMs = 5_000) {
   return fn();
 }
 
-async function cleanupFixture(db: ReturnType<typeof createDb>) {
+async function cleanupFixture(
+  db: ReturnType<typeof createDb>,
+  heartbeat: ReturnType<typeof heartbeatService>,
+) {
   for (let attempt = 0; attempt < 10; attempt += 1) {
     try {
       await db.execute(sql.raw(`
@@ -106,14 +110,15 @@ async function cleanupFixture(db: ReturnType<typeof createDb>) {
       `));
       return;
     } catch (error) {
-      // Post-run work (follow-up comments, issue checkout) can still be in
-      // flight when the fixture is torn down; give it a moment and retry.
+      // Backstop: post-run work (follow-up comments, issue checkout) that
+      // started after the drain can still hold row locks or insert rows while
+      // the truncate runs. Drain again and back off before retrying.
+      const detail = error instanceof Error ? `${error.message} ${String(error.cause ?? "")}` : "";
       const isLateWorkRace =
-        error instanceof Error &&
-        (error.message.includes("issue_comments_issue_id_issues_id_fk") ||
-          error.message.includes("deadlock detected"));
+        detail.includes("issue_comments_issue_id_issues_id_fk") || detail.includes("deadlock detected");
       if (!isLateWorkRace || attempt === 9) throw error;
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      await drainHeartbeatRunsToQuiescence(db, heartbeat);
+      await new Promise((resolve) => setTimeout(resolve, 100 * (attempt + 1)));
     }
   }
 }
@@ -177,17 +182,14 @@ describeEmbeddedPostgres("heartbeat subscription window wait", () => {
     currentQuota = quotaResults({ fiveHourUsedPercent: 0 });
     // A run that executed is still finishing its post-run lifecycle work when
     // the test body ends, and that work can enqueue and dispatch a follow-up
-    // run for the same agent. Give it a moment to do so, drain the queue, and
-    // only then tear the fixture down and forget the adapter calls; otherwise
-    // a late follow-up executes against a truncated fixture and its call
-    // leaks into the next test.
-    await new Promise((resolve) => setTimeout(resolve, 500));
-    await waitForCondition(async () => {
-      const runs = await db.select({ status: heartbeatRuns.status }).from(heartbeatRuns);
-      return !runs.some((run) => run.status === "queued" || run.status === "running");
-    });
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    await cleanupFixture(db);
+    // run for the same agent. Await the service's in-flight executions (not
+    // just the run table, which marks a run finished before its post-run
+    // writes land) until nothing is queued or running, and only then tear the
+    // fixture down and forget the adapter calls; otherwise a late follow-up
+    // executes against a truncated fixture, deadlocks the truncate, or leaks
+    // its adapter call into the next test.
+    await drainHeartbeatRunsToQuiescence(db, heartbeat);
+    await cleanupFixture(db, heartbeat);
     runningProcesses.clear();
     mockAdapterExecute.mockClear();
   });
