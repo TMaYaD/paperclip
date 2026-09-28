@@ -1,3 +1,4 @@
+import { useRetryNowMutation } from "../hooks/useRetryNowMutation";
 import { clearLegacyChatMessageRequests } from "@/lib/chat-message-request";
 import { agentChatDraft } from "@/lib/agent-chat-draft";
 import { Settings as ChatSettings } from "lucide-react";
@@ -4331,6 +4332,8 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
     ],
   );
 
+  const retryIssueNow = useRetryNowMutation(issueId);
+
   const checkIssueMonitorNow = useMutation({
     mutationFn: () => issuesApi.checkMonitorNow(issueId!),
     onSuccess: () => {
@@ -7215,6 +7218,8 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
         issue={issue}
         onCheckNow={() => checkIssueMonitorNow.mutate()}
         checkingNow={checkIssueMonitorNow.isPending}
+        onRetryNow={() => retryIssueNow.mutate()}
+        retryingNow={retryIssueNow.isPending}
       />
 
       {taskChatShellEnabled ? null : (
@@ -7741,6 +7746,8 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
                         issue={issue}
                         onCheckNow={() => checkIssueMonitorNow.mutate()}
                         checkingNow={checkIssueMonitorNow.isPending}
+                        onRetryNow={() => retryIssueNow.mutate()}
+                        retryingNow={retryIssueNow.isPending}
                       />
                     ) : null
                   }

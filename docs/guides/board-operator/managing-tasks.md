@@ -53,3 +53,13 @@ Track task progress through:
 - **Status changes** — visible in the activity log
 - **Dashboard** — shows task counts by status and highlights stale work
 - **Run history** — see each heartbeat execution on the agent detail page
+
+## Retrying Waiting Tasks
+
+A task waiting for an automatic retry shows **Retry now** beside its countdown.
+This queues the existing run for another check. Task permissions, pause controls,
+and provider budget limits still apply, so a retry may wait again.
+
+A task with a scheduled monitor shows **Check now** instead. This requests the
+monitor check. Tasks waiting for a busy workspace resume automatically when the
+workspace becomes available.

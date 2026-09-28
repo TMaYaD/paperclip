@@ -50,6 +50,7 @@ export interface MonitorSurfaceCopy {
   /** `warning` (amber) once overdue, `info` (blue) while still on schedule. */
   tone: "info" | "warning";
   workspaceWait?: boolean;
+  scheduledRetry?: boolean;
 }
 
 function capitalize(value: string): string {
@@ -118,6 +119,7 @@ export function buildMonitorSurfaceCopy(
   return {
     bannerTitle,
     stripTitle,
+    scheduledRetry: isScheduledRetryOnly,
     bannerMeta,
     stripMeta,
     tone: derived.state === "overdue" ? "warning" : "info",
@@ -136,9 +138,11 @@ function useMonitorSurfaceCopy(issue: Issue): MonitorSurfaceCopy | null {
 function CheckNowButton({
   onCheckNow,
   checkingNow,
+  retry = false,
 }: {
   onCheckNow: () => void;
   checkingNow: boolean;
+  retry?: boolean;
 }) {
   return (
     <Button
@@ -149,7 +153,7 @@ function CheckNowButton({
       onClick={onCheckNow}
       disabled={checkingNow}
     >
-      {checkingNow ? "Checking…" : "Check now"}
+      {checkingNow ? (retry ? "Retrying…" : "Checking…") : (retry ? "Retry now" : "Check now")}
     </Button>
   );
 }
@@ -158,6 +162,8 @@ export interface IssueMonitorSurfaceProps {
   issue: Issue;
   onCheckNow?: (() => void) | null;
   checkingNow?: boolean;
+  onRetryNow?: (() => void) | null;
+  retryingNow?: boolean;
 }
 
 /**
@@ -169,9 +175,13 @@ export function IssueMonitorBanner({
   issue,
   onCheckNow = null,
   checkingNow = false,
+  onRetryNow = null,
+  retryingNow = false,
 }: IssueMonitorSurfaceProps) {
   const copy = useMonitorSurfaceCopy(issue);
   if (!copy) return null;
+  const action = copy.scheduledRetry ? onRetryNow : onCheckNow;
+  const pending = copy.scheduledRetry ? retryingNow : checkingNow;
 
   return (
     <InlineBanner
@@ -179,7 +189,7 @@ export function IssueMonitorBanner({
       icon={Clock}
       title={copy.bannerTitle}
       className="my-3"
-      actions={onCheckNow && !copy.workspaceWait ? <CheckNowButton onCheckNow={onCheckNow} checkingNow={checkingNow} /> : null}
+      actions={action && !copy.workspaceWait ? <CheckNowButton onCheckNow={action} checkingNow={pending} retry={copy.scheduledRetry} /> : null}
     >
       <span>{copy.bannerMeta.join("  ·  ")}</span>
     </InlineBanner>
@@ -195,10 +205,14 @@ export function IssueMonitorComposerStrip({
   issue,
   onCheckNow = null,
   checkingNow = false,
+  onRetryNow = null,
+  retryingNow = false,
   className,
 }: IssueMonitorSurfaceProps & { className?: string }) {
   const copy = useMonitorSurfaceCopy(issue);
   if (!copy) return null;
+  const action = copy.scheduledRetry ? onRetryNow : onCheckNow;
+  const pending = copy.scheduledRetry ? retryingNow : checkingNow;
 
   return (
     <div
@@ -214,7 +228,7 @@ export function IssueMonitorComposerStrip({
             <div className="text-xs text-muted-foreground">{copy.stripMeta.join(" · ")}</div>
           </div>
         </div>
-        {onCheckNow && !copy.workspaceWait ? <CheckNowButton onCheckNow={onCheckNow} checkingNow={checkingNow} /> : null}
+        {action && !copy.workspaceWait ? <CheckNowButton onCheckNow={action} checkingNow={pending} retry={copy.scheduledRetry} /> : null}
       </div>
       <p className="mt-1.5 text-xs text-muted-foreground">
         {copy.workspaceWait

@@ -184,6 +184,48 @@ describe("IssueMonitorBanner / IssueMonitorComposerStrip rendering", () => {
     flushSync(() => root.unmount());
   });
 
+  it.each([IssueMonitorBanner, IssueMonitorComposerStrip])("routes retry-only actions to retry-now", (Surface) => {
+    const onCheckNow = vi.fn();
+    const onRetryNow = vi.fn();
+    const issue = {
+      status: "in_progress",
+      scheduledRetry: {
+        status: "scheduled_retry", scheduledRetryReason: "subscription_window_wait",
+        scheduledRetryAt: new Date(NOW.getTime() + 18 * 60 * 60_000).toISOString(),
+      },
+    } as Issue;
+    const root = createRoot(container);
+    const render = (retryingNow = false) => flushSync(() => root.render(
+      <Surface issue={issue} onCheckNow={onCheckNow} onRetryNow={onRetryNow} retryingNow={retryingNow} />,
+    ));
+    render();
+    const button = container.querySelector("button")!;
+    expect(button.textContent).toBe("Retry now");
+    flushSync(() => button.click());
+    expect(onRetryNow).toHaveBeenCalledTimes(1);
+    expect(onCheckNow).not.toHaveBeenCalled();
+    render(true);
+    expect(container.querySelector("button")?.disabled).toBe(true);
+    expect(container.querySelector("button")?.textContent).toBe("Retrying…");
+    flushSync(() => root.unmount());
+  });
+
+  it("keeps a real monitor action when a retry is also present", () => {
+    const onCheckNow = vi.fn();
+    const onRetryNow = vi.fn();
+    const issue = issueWithMonitor(new Date(NOW.getTime() + 60_000).toISOString());
+    issue.scheduledRetry = {
+      status: "scheduled_retry", scheduledRetryAt: NOW.toISOString(),
+    } as Issue["scheduledRetry"];
+    const root = createRoot(container);
+    flushSync(() => root.render(<IssueMonitorBanner issue={issue} onCheckNow={onCheckNow} onRetryNow={onRetryNow} />));
+    expect(container.querySelector("button")?.textContent).toBe("Check now");
+    flushSync(() => container.querySelector("button")!.click());
+    expect(onCheckNow).toHaveBeenCalledTimes(1);
+    expect(onRetryNow).not.toHaveBeenCalled();
+    flushSync(() => root.unmount());
+  });
+
   it("hides the banner and strip when there is no monitor", () => {
     expect(hasVisibleMonitorSurface(issueWithMonitor(null))).toBe(false);
     const root = createRoot(container);
