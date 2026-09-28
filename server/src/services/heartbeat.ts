@@ -16107,7 +16107,10 @@ export function heartbeatService(
           eq(heartbeatRuns.companyId, companyId),
           inArray(heartbeatRuns.status, statuses),
           sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${issueId}`,
-          sql`${heartbeatRuns.retryOfRunId} is not null`,
+          or(
+            sql`${heartbeatRuns.retryOfRunId} is not null`,
+            sql`${heartbeatRuns.scheduledRetryReason} is not null`,
+          ),
         ),
       )
       .orderBy(

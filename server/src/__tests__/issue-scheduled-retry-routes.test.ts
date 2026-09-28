@@ -41,7 +41,7 @@ describeEmbeddedPostgres("issue scheduled retry routes", () => {
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-issue-scheduled-retry-routes-");
     db = createDb(tempDb.connectionString);
-  }, 20_000);
+  }, 90_000);
 
   afterEach(async () => {
     await db.delete(issueComments);
@@ -270,8 +270,15 @@ describeEmbeddedPostgres("issue scheduled retry routes", () => {
     });
   });
 
-  it("promotes the existing scheduled retry and treats duplicate clicks as idempotent", async () => {
-    const { companyId, issueId, retryRunId } = await seedIssueWithRetry();
+  it.each([false, true])("promotes the existing retry idempotently (in-place subscription wait: %s)", async (subscriptionWait) => {
+    const { companyId, issueId, sourceRunId, retryRunId } = await seedIssueWithRetry();
+    if (subscriptionWait) {
+      await db.update(heartbeatRuns).set({
+        retryOfRunId: null,
+        scheduledRetryReason: "subscription_window_wait",
+        scheduledRetryAt: new Date(Date.now() + 18 * 60 * 60_000),
+      }).where(eq(heartbeatRuns.id, retryRunId));
+    }
     const app = createApp(boardActor(companyId));
 
     const first = await request(app).post(`/api/issues/${issueId}/scheduled-retry/retry-now`).send({});
@@ -299,9 +306,9 @@ describeEmbeddedPostgres("issue scheduled retry routes", () => {
     const retryRuns = await db
       .select({ id: heartbeatRuns.id, status: heartbeatRuns.status })
       .from(heartbeatRuns)
-      .where(and(eq(heartbeatRuns.retryOfRunId, first.body.scheduledRetry.retryOfRunId), eq(heartbeatRuns.companyId, companyId)));
-    expect(retryRuns).toHaveLength(1);
-    expect(retryRuns[0]).toMatchObject({ id: retryRunId, status: "queued" });
+      .where(eq(heartbeatRuns.companyId, companyId));
+    expect(retryRuns.map((run) => run.id).sort()).toEqual([sourceRunId, retryRunId].sort());
+    expect(retryRuns.find((run) => run.id === retryRunId)?.status).toBe("queued");
   });
 
   it("returns a clear no-op response when there is no scheduled retry", async () => {
@@ -351,8 +358,14 @@ describeEmbeddedPostgres("issue scheduled retry routes", () => {
     });
   });
 
-  it("uses normal promotion gates and records gate-suppressed retries", async () => {
+  it.each([false, true])("retains promotion gates (in-place subscription wait: %s)", async (subscriptionWait) => {
     const { companyId, issueId, retryRunId } = await seedIssueWithRetry({ agentStatus: "paused" });
+    if (subscriptionWait) {
+      await db.update(heartbeatRuns).set({
+        retryOfRunId: null,
+        scheduledRetryReason: "subscription_window_wait",
+      }).where(eq(heartbeatRuns.id, retryRunId));
+    }
 
     const res = await request(createApp(boardActor(companyId)))
       .post(`/api/issues/${issueId}/scheduled-retry/retry-now`)
