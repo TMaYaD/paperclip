@@ -159,6 +159,12 @@ Git-ref installs resolve the requested ref to an exact commit before building.
 Review and trust the repository and ref: installing a git ref executes that
 revision's package installation and release build scripts on your machine.
 
+Bundled packages are built in the source workspace before their compiled files
+are staged for packing. Staged manifests omit `prepack`, `prepare`, and `postpack`
+hooks so packing cannot rebuild outside that workspace. Runtime installation
+hooks are preserved. The staging helper also supports older installed CLIs that
+call `npm pack` without `--ignore-scripts`.
+
 ## Onboarding And The Service
 
 Run onboarding after a non-interactive installation:

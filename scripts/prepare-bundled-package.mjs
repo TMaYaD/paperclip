@@ -31,6 +31,17 @@ export function materializePublishManifest(pkg, workspaceVersions = new Map()) {
   const publishConfig = pkg.publishConfig ?? {};
   const publishManifest = { ...pkg };
 
+  // The caller already built the workspace before copying its publishable files.
+  // Staged packages have neither the source tree nor workspace build dependencies.
+  // Strip pack hooks here too: older installed CLIs pack this directory without
+  // --ignore-scripts, but invoke this helper from the downloaded source revision.
+  if (pkg.scripts) {
+    publishManifest.scripts = { ...pkg.scripts };
+    for (const hook of ["prepack", "prepare", "postpack"]) {
+      delete publishManifest.scripts[hook];
+    }
+  }
+
   for (const key of ["main", "types", "exports", "bin"]) {
     if (publishConfig[key] !== undefined) publishManifest[key] = publishConfig[key];
   }
