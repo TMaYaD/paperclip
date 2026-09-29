@@ -36,8 +36,18 @@ fn config(mode: &str) -> AcpxProviderSessionConfig {
             request_timeout: Duration::from_secs(1),
             shutdown_grace: Duration::from_millis(100),
         },
-        agent: "codex".to_owned(),
-        model: "gpt-5.6-sol".to_owned(),
+        agent: if mode.starts_with("controls") {
+            "pi"
+        } else {
+            "codex"
+        }
+        .to_owned(),
+        model: if mode.starts_with("controls") {
+            "openrouter/deepseek/deepseek-v4-flash-0731"
+        } else {
+            "gpt-5.6-sol"
+        }
+        .to_owned(),
         run_id: "run-1".to_owned(),
         catalog_revision: 1,
         runtime_directory: std::env::temp_dir(),
@@ -45,7 +55,17 @@ fn config(mode: &str) -> AcpxProviderSessionConfig {
         working_directory: std::env::temp_dir(),
         permission_mode: AcpxPermissionMode::ApproveReads,
         permission_mode_pinned: true,
+        provider_policy: if mode.starts_with("controls") {
+            Some(
+                paperclip_runner_core::acpx_provider_session::AcpxProviderRuntimePolicy {
+                    read_only: false,
+                },
+            )
+        } else {
+            None
+        },
         system_instructions: "Complete the supplied task.".to_owned(),
+        runtime_context: serde_json::Value::Null,
         tool_set: tool_set(),
         expected_identity: None,
     }
@@ -276,11 +296,11 @@ fn rotates_settled_tool_receipts_between_reusable_turns() {
         reserved_session
             .start_turn(turn_id, "Please continue", &std::env::temp_dir())
             .unwrap();
-        assert!(reserved_session
-            .poll_event(Duration::from_secs(1))
-            .unwrap()
-            .unwrap()
-            .is_empty());
+        assert!(matches!(
+            &reserved_session.poll_event(Duration::from_secs(1)).unwrap().unwrap()[0],
+            AcpxProviderStateEvent::ToolCall { operation_id, .. }
+                if operation_id == "paperclip_finish"
+        ));
         let result = reserved_session
             .poll_event(Duration::from_secs(1))
             .unwrap()
@@ -465,7 +485,11 @@ fn reserved_terminal_results_require_an_authorized_correlated_invocation() {
             .unwrap();
 
         let invocation = session.poll_event(Duration::from_secs(1)).unwrap().unwrap();
-        assert!(invocation.is_empty());
+        assert!(matches!(
+            &invocation[0],
+            AcpxProviderStateEvent::ToolCall { operation_id, .. }
+                if operation_id == "paperclip_finish" || operation_id == "paperclip_block"
+        ));
         assert_eq!(
             session
                 .state()
@@ -496,6 +520,64 @@ fn reserved_terminal_results_require_an_authorized_correlated_invocation() {
 }
 
 #[test]
+fn reserved_completion_waits_for_feedback_and_allows_correction_in_same_turn() {
+    let mut session =
+        AcpxProviderSession::start(&config("turns-reserved-feedback-roundtrip")).unwrap();
+    session
+        .start_turn("turn-1", "Please complete", &std::env::temp_dir())
+        .unwrap();
+
+    let first = session.poll_event(Duration::from_secs(1)).unwrap().unwrap();
+    assert!(matches!(
+        &first[0],
+        AcpxProviderStateEvent::ToolCall { call_id, operation_id, input }
+            if call_id == "call-finish" && operation_id == "paperclip_finish"
+                && input["reportedWorkDisposition"] == "needs_review"
+    ));
+    session
+        .deliver_tool_result(&paperclip_runner_core::provider_bridge::ToolResult {
+            call_id: "call-finish".to_owned(),
+            operation_id: "paperclip_finish".to_owned(),
+            result: json!({
+                "success":false,
+                "contentItems":[
+                    {"type":"inputText","text":"Name the reviewer and decision."}
+                ]
+            }),
+            is_error: true,
+        })
+        .unwrap();
+
+    let corrected = session.poll_event(Duration::from_secs(1)).unwrap().unwrap();
+    assert!(matches!(
+        &corrected[0],
+        AcpxProviderStateEvent::ToolCall { call_id, operation_id, input }
+            if call_id == "call-finish-2" && operation_id == "paperclip_finish"
+                && input["reportedWorkDisposition"] == "done"
+    ));
+    session
+        .deliver_tool_result(&paperclip_runner_core::provider_bridge::ToolResult {
+            call_id: "call-finish-2".to_owned(),
+            operation_id: "paperclip_finish".to_owned(),
+            result: json!({
+                "schema":"paperclip.run_result.v1",
+                "reportedWorkDisposition":"done",
+                "summary":"Corrected completion.",
+                "completionClaim":{"contractRevision":"acpx-provider-turns-v1","objectiveSatisfied":true,"criteria":[],"remainingWork":[]},
+                "evidence":[],"verification":[],"attentionRequests":[],"artifacts":[],
+            }),
+            is_error: false,
+        })
+        .unwrap();
+    let terminal = session.poll_event(Duration::from_secs(1)).unwrap().unwrap();
+    assert!(matches!(
+        terminal.last().unwrap(),
+        AcpxProviderStateEvent::TurnTerminal { turn_id, .. } if turn_id == "turn-1"
+    ));
+    session.shutdown("feedback roundtrip complete").unwrap();
+}
+
+#[test]
 fn correlates_reserved_results_by_raw_digest_without_exposing_sensitive_values() {
     let mut session =
         AcpxProviderSession::start(&config("turns-sensitive-reserved-result-terminal")).unwrap();
@@ -503,11 +585,11 @@ fn correlates_reserved_results_by_raw_digest_without_exposing_sensitive_values()
         .start_turn("turn-1", "Please help", &std::env::temp_dir())
         .unwrap();
 
-    assert!(session
-        .poll_event(Duration::from_secs(1))
-        .unwrap()
-        .unwrap()
-        .is_empty());
+    assert!(matches!(
+        &session.poll_event(Duration::from_secs(1)).unwrap().unwrap()[0],
+        AcpxProviderStateEvent::ToolCall { operation_id, .. }
+            if operation_id == "paperclip_finish"
+    ));
     let result_events = session.poll_event(Duration::from_secs(1)).unwrap().unwrap();
     assert!(matches!(
         &result_events[0],
@@ -535,11 +617,11 @@ fn rejects_sensitive_reserved_results_that_only_match_after_redaction() {
     session
         .start_turn("turn-1", "Please help", &std::env::temp_dir())
         .unwrap();
-    assert!(session
-        .poll_event(Duration::from_secs(1))
-        .unwrap()
-        .unwrap()
-        .is_empty());
+    assert!(matches!(
+        &session.poll_event(Duration::from_secs(1)).unwrap().unwrap()[0],
+        AcpxProviderStateEvent::ToolCall { operation_id, .. }
+            if operation_id == "paperclip_finish"
+    ));
 
     let error = session
         .poll_event(Duration::from_secs(1))
@@ -580,11 +662,11 @@ fn fails_closed_before_returning_a_mismatched_reserved_result() {
     session
         .start_turn("turn-1", "Please help", &std::env::temp_dir())
         .unwrap();
-    assert!(session
-        .poll_event(Duration::from_secs(1))
-        .unwrap()
-        .unwrap()
-        .is_empty());
+    assert!(matches!(
+        &session.poll_event(Duration::from_secs(1)).unwrap().unwrap()[0],
+        AcpxProviderStateEvent::ToolCall { operation_id, .. }
+            if operation_id == "paperclip_finish"
+    ));
 
     let error = session
         .poll_event(Duration::from_secs(1))
@@ -629,4 +711,70 @@ fn fails_closed_before_returning_an_unauthorized_tool_call() {
     assert!(error.contains("unauthorized tool issues.delete"), "{error}");
     assert!(session.state().pending_tool("call-1").is_none());
     assert!(session.shutdown("already closed").is_ok());
+}
+
+#[test]
+fn turn_controls_preserve_mode_and_reject_stale_duplicate_and_oversized_delivery() {
+    let mut session = AcpxProviderSession::start(&config("controls")).unwrap();
+    assert!(session
+        .steer_turn("turn-1", "control-1", "steer", "message")
+        .is_err());
+    session
+        .start_turn("turn-1", "Work", &std::env::temp_dir())
+        .unwrap();
+    let first = session
+        .steer_turn("turn-1", "control-1", "steer", "Change focus")
+        .unwrap();
+    assert_eq!(first["mode"], "steer");
+    assert!(session
+        .steer_turn("turn-1", "control-1", "follow_up", "Duplicate")
+        .unwrap_err()
+        .to_string()
+        .contains("already attempted"));
+    let queued = session
+        .steer_turn("turn-1", "control-2", "follow_up", "Then validate")
+        .unwrap();
+    assert_eq!(queued["mode"], "follow_up");
+    assert!(session
+        .steer_turn("turn-2", "control-3", "steer", "Stale")
+        .is_err());
+    assert!(session
+        .steer_turn("turn-1", "control-3", "cancel", "Wrong")
+        .is_err());
+    assert!(session
+        .steer_turn("turn-1", "control-3", "steer", &"a".repeat(65_537))
+        .is_err());
+    session.shutdown("verified controls").unwrap();
+}
+
+#[test]
+fn turn_controls_fail_closed_on_mismatched_acknowledgement() {
+    let mut session = AcpxProviderSession::start(&config("controls-wrong-ack")).unwrap();
+    session
+        .start_turn("turn-1", "Work", &std::env::temp_dir())
+        .unwrap();
+    assert!(session
+        .steer_turn("turn-1", "control-1", "steer", "Change focus")
+        .unwrap_err()
+        .to_string()
+        .contains("exact turn control"));
+    assert!(session
+        .steer_turn("turn-1", "control-2", "follow_up", "Do not replay")
+        .is_err());
+}
+
+#[test]
+fn lazy_warm_handshake_updates_live_turn_control_discovery() {
+    let mut session = AcpxProviderSession::start(&config("controls-lazy")).unwrap();
+    assert!(!session.turn_control_capabilities().steering);
+    assert!(!session.turn_control_capabilities().queued_follow_up);
+    session
+        .start_turn("turn-lazy", "Work", &std::env::temp_dir())
+        .unwrap();
+    assert!(session.turn_control_capabilities().steering);
+    assert!(session.turn_control_capabilities().queued_follow_up);
+    session
+        .steer_turn("turn-lazy", "control-1", "follow_up", "Then validate")
+        .unwrap();
+    session.shutdown("verified live handshake").unwrap();
 }

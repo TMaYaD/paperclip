@@ -1,4 +1,6 @@
+import { isAcpxCanonicalInputMethod } from "../drivers/acpx/profile-extensions.js";
 import { RunnerdTraceFrameIndex } from "./runnerd-trace-frame-index.js";
+import { waitForWarmAttachmentReadiness } from "./warm-attachment-readiness.js";
 import { codexExecutableReadOnlyRoots } from "../drivers/codex/codex-security-config.js";
 import { isCanonicalProviderEventType } from "../provider-events.js";
 import { execFileSync } from "node:child_process";
@@ -37,7 +39,7 @@ import type {
   DurableRecoveryCommittedEvent,
   DurableRecoveryIdentity,
 } from "../contracts/durable-recovery.js";
-import type { NativeRunIdentity } from "../contracts/types.js";
+import type { NativeRunIdentity, NativeTurnControlCapabilities } from "../contracts/types.js";
 import type { PrpEvent } from "../protocol/replay-contract.js";
 import { NativeSessionCloseUnrecoverableError } from "../contracts/native-session-backend.js";
 import type {
@@ -59,7 +61,7 @@ import {
   resolveQualifiedAcpxProfile,
   type QualifiedAcpxAgent,
 } from "../drivers/acpx/qualified-profiles.js";
-import { createSanitizedAcpxSpawnInput } from "../drivers/acpx/environment.js";
+import { ACPX_CREDENTIAL_BINDING_ENV, createAcpxCredentialBinding, createSanitizedAcpxSpawnInput } from "../drivers/acpx/environment.js";
 import {
   createSanitizedAwsAgentCoreEnvironment,
   createSanitizedClaudeManagedEnvironment,
@@ -677,7 +679,7 @@ async function releaseRunnerProcessOwnership(input: {
   runnerSettled: boolean;
   checkpoint:
     ((settlement: "settled" | "unsettled") => Promise<void> | void) | null;
-  forceKill: () => void;
+  forceKill: () => Promise<void> | void;
   release: (() => Promise<void> | void) | null;
 }): Promise<void> {
   let releaseFailure: unknown;
@@ -700,7 +702,7 @@ async function releaseRunnerProcessOwnership(input: {
   } catch (error) {
     checkpointFailure = error;
   } finally {
-    input.forceKill();
+    await input.forceKill();
   }
   if (checkpointFailure !== undefined) throw checkpointFailure;
   if (releaseFailure !== undefined) throw releaseFailure;
@@ -863,7 +865,7 @@ async function awaitAdoptedRunnerAuthentication(input: {
   }
 }
 
-function bridgedCodexQuestionParams(
+export function bridgedCodexQuestionParams(
   request: Record<string, unknown>,
   method: string,
   threadId: string,
@@ -884,6 +886,12 @@ function bridgedCodexQuestionParams(
         ? request.itemId
         : String(request.requestId ?? "runtime-input"),
   };
+  // ACPX has already normalized and bound these IDs in Rust. Reconstructing a
+  // Codex form here would change option IDs and break the answer's return path.
+  if (isAcpxCanonicalInputMethod(method)) {
+    return { ...common, questionSet, origin: request.origin,
+      message: questionSet.description ?? questionSet.title ?? "A tool needs your input" };
+  }
   if (method === "mcpServer/elicitation/request") {
     const required: string[] = [];
     const properties = Object.fromEntries(
@@ -1071,6 +1079,8 @@ export interface CapabilityRunnerdCodexTransportOptions {
   provider?: "codex" | "opencode" | "claude_managed" | "aws_agentcore" | "acpx";
   opencodePermissionMode?: NativeOpenCodePermissionMode;
   acpxAgent?: QualifiedAcpxAgent;
+  /** Explicit evaluation-only candidate selection, never derived from persisted session input. */
+  acpxCandidateProfile?: "pi" | "cursor" | "copilot";
   acpxPermissionMode?: NativeAcpxPermissionMode;
   acpxPermissionModePinned?: boolean;
   acpxSidecarPath?: string;
@@ -1315,10 +1325,21 @@ export function unseenRunnerdCommittedEvents<
 export function expandRunnerdCanonicalNotifications(
   method: string,
   input: unknown,
+  eventType?: string,
 ): Array<{ method: string; params: Record<string, unknown> }> {
   const payload = record(input);
-  if (!Array.isArray(payload.events)) return [{ method, params: payload }];
-  return payload.events.map((event) => ({ method, params: record(event) }));
+  const events = Array.isArray(payload.events) ? payload.events : [payload];
+  return events.map((event) => {
+    const params = record(event);
+    // A coalesced envelope can contain different event kinds. Classify each
+    // payload after expansion, never using the envelope's kind.
+    return {
+      method: eventType
+        ? runnerdCanonicalNotificationMethod(eventType, params) ?? method
+        : method,
+      params,
+    };
+  });
 }
 
 export function runnerdCanonicalNotificationMethod(
@@ -1330,6 +1351,14 @@ export function runnerdCanonicalNotificationMethod(
   // ahead of the first real turn notification.
   if (eventType === "session.goal.snapshot" && payload.goal === null) {
     return undefined;
+  }
+  // ACPX thoughts retain their reasoning kind through the notification facade.
+  // Treating them as assistant deltas exposes them in the task transcript and
+  // bypasses the existing reasoning redaction and progress handling.
+  if (eventType === "item.delta" && payload.kind === "reasoning") {
+    return payload.channel === "detail"
+      ? "item/reasoning/textDelta"
+      : "item/reasoning/summaryTextDelta";
   }
   return (
     {
@@ -2850,6 +2879,15 @@ function acpxProviderPackageAuthority(
   manifest: string;
 } {
   const cliDirectory = dirname(sidecarScript);
+  // Public server packages vendor runner dist directly, without a nested dist
+  // directory or a separately published runner package.
+  if (basename(sidecarScript) === "acpx-runtime-sidecar.cjs" &&
+      basename(cliDirectory) === "cli" && basename(dirname(cliDirectory)) === "paperclip-runner" &&
+      basename(resolve(cliDirectory, "../..")) === "vendor" &&
+      basename(resolve(cliDirectory, "../../..")) === "dist") {
+    const serverRoot = resolve(cliDirectory, "../../../..");
+    return { root: serverRoot, manifest: resolve(serverRoot, "package.json") };
+  }
   if (
     basename(sidecarScript) !== "acpx-runtime-sidecar.cjs" ||
     basename(cliDirectory) !== "cli" ||
@@ -3027,22 +3065,26 @@ function authorizedToolSet(
   };
 }
 
-const ACPX_RESERVED_TERMINAL_TOOLS = new Set([
-  "paperclip_finish",
-  "paperclip_block",
-]);
-
 export function authorizedToolSetForProvider(
-  provider: CapabilityRunnerdCodexTransportOptions["provider"],
+  _provider: CapabilityRunnerdCodexTransportOptions["provider"],
   tools: readonly Readonly<Record<string, unknown>>[],
 ): Record<string, unknown> {
-  return authorizedToolSet(
-    provider === "acpx"
-      ? tools.filter(
-          (tool) => !ACPX_RESERVED_TERMINAL_TOOLS.has(String(tool.name ?? "")),
-        )
-      : tools,
-  );
+  // ACPX terminal calls are resolved through the authenticated semantic
+  // bridge before the provider receives a result. Keep them in the provider
+  // authority catalog so the sidecar can project the call and await
+  // server-side completion feedback.
+  return authorizedToolSet(tools);
+}
+
+/** Include the completion tools that the Codex driver adds at session startup. */
+export function runnerCodexDynamicToolsFit(
+  tools: readonly Readonly<Record<string, unknown>>[],
+): boolean {
+  const supplied = [...tools, ...codexSemanticToolSpecs()];
+  // Keep these bounds aligned with runner-core/provider_bridge.rs. Project
+  // large optional catalogs before run.prepare; never raise the protocol caps.
+  return supplied.length <= 256 &&
+    Buffer.byteLength(JSON.stringify(authorizedToolSet(supplied)), "utf8") <= 768 * 1024;
 }
 
 /**
@@ -3085,7 +3127,7 @@ export function createCapabilityRunnerdProviderEnvironment(input: {
     return {
       ...createSanitizedOpenCodeRunnerEnvironment(input.options.environment),
       PAPERCLIP_OPENCODE_PERMISSION_MODE:
-        input.options.opencodePermissionMode ?? "ask",
+        input.options.opencodePermissionMode ?? "allow",
       PAPERCLIP_OPENCODE_RUNTIME_DIR:
         input.options.opencodeRuntimeDirectory ??
         resolve(input.options.stateDirectory ?? tmpdir(), "opencode"),
@@ -3098,15 +3140,28 @@ export function createCapabilityRunnerdProviderEnvironment(input: {
       input.options.acpxSidecarPath ??
       resolve(packageRoot, "dist", "cli", "acpx-runtime-sidecar.cjs");
     const providerPackageAuthority = acpxProviderPackageAuthority(sidecarPath);
+    // This is the trusted runner/sidecar boundary. The provider sandbox still
+    // uses createSanitizedAcpxSpawnInput and does not inherit gateway tokens.
+    const assignedGateway = nativeMcpLaunchBinding(input.options.environment ?? {});
+    const credentialBinding = createAcpxCredentialBinding(
+      input.options.environment, input.options.acpxAgent ?? "codex", input.identity.normalizedSessionId,
+    );
     return {
+      ...(assignedGateway ? {
+        PAPERCLIP_NATIVE_MCP_TOKEN: assignedGateway.token,
+      } : {}),
       ...createSanitizedAcpxSpawnInput(
         input.options.environment,
         input.options.acpxAgent ?? "codex",
       ).env,
+      ...(credentialBinding === undefined ? {} : { [ACPX_CREDENTIAL_BINDING_ENV]: credentialBinding }),
+      ...(input.options.acpxAgent === "grok" && input.options.environment?.PAPERCLIP_ACPX_GROK_AUTH_JSON_SECRET
+        ? { PAPERCLIP_ACPX_GROK_AUTH_JSON_SECRET: input.options.environment.PAPERCLIP_ACPX_GROK_AUTH_JSON_SECRET } : {}),
       ...commonIdentity,
       // The verified sidecar bundle cannot use import.meta.url while Node
       // executes it through /proc/self/fd. Anchor its closed provider package
       // lookups at the package that owns the already-authenticated bundle.
+      PAPERCLIP_ACPX_BUILTIN_ROOT: resolve(dirname(sidecarPath), "../providers"),
       PAPERCLIP_ACPX_PROVIDER_PACKAGE_ROOT: providerPackageAuthority.root,
       PAPERCLIP_ACPX_PROVIDER_PACKAGE_MANIFEST:
         providerPackageAuthority.manifest,
@@ -3149,7 +3204,7 @@ export function createCapabilityRunnerdProviderEnvironment(input: {
 export function resolveRunnerdAcpxPermissionMode(
   configured: CapabilityRunnerdCodexTransportOptions["acpxPermissionMode"],
 ): NonNullable<CapabilityRunnerdCodexTransportOptions["acpxPermissionMode"]> {
-  return configured ?? "approve-reads";
+  return configured ?? "approve-all";
 }
 
 const OPEN_CODE_RUNNER_ENVIRONMENT_KEYS = new Set([
@@ -3230,6 +3285,7 @@ export function createRunnerdCodexAppServerArgs(input: {
   codexHome: string;
   codexCommand?: string;
   readOnlyRoots?: string[];
+  instructionWorkingCopyRoot?: string;
 }): string[] {
   // The filesystem policy denies HOME and CODEX_HOME to keep credentials and
   // runner state outside provider reach. Always bind those names to the actual
@@ -3242,10 +3298,11 @@ export function createRunnerdCodexAppServerArgs(input: {
       CODEX_HOME: input.codexHome,
     },
     [...(input.readOnlyRoots ?? []), ...codexExecutableReadOnlyRoots(input.environment ?? {}, input.codexCommand)],
+    input.instructionWorkingCopyRoot,
   );
 }
 
-function unwrapToolResponse(response: Record<string, unknown>): {
+export function unwrapToolResponse(response: Record<string, unknown>, preserveEnvelope = false): {
   readonly __paperclipSemanticToolOutcome: true;
   readonly result: unknown;
   readonly isError: boolean;
@@ -3256,7 +3313,7 @@ function unwrapToolResponse(response: Record<string, unknown>): {
   const value = record(items[0]).text;
   let result: unknown = response;
   try {
-    if (typeof value === "string") result = JSON.parse(value);
+    if (!preserveEnvelope && typeof value === "string") result = JSON.parse(value);
   } catch {
     result = response;
   }
@@ -3265,6 +3322,27 @@ function unwrapToolResponse(response: Record<string, unknown>): {
     result,
     isError: response.success === false,
   };
+}
+
+/** Only a live, admitted Pi ACP session can enable native turn controls. */
+export function parseAcpxTurnControlCapabilities(
+  value: unknown,
+  agent: unknown,
+): NativeTurnControlCapabilities {
+  const unsupported = { steering: false, queuedFollowUp: false };
+  if (value === undefined) return unsupported;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("ACPX turn control capabilities are malformed");
+  }
+  const controls = value as Record<string, unknown>;
+  if (Object.keys(controls).some(key => key !== "steering" && key !== "queuedFollowUp")
+    || typeof controls.steering !== "boolean" || typeof controls.queuedFollowUp !== "boolean") {
+    throw new Error("ACPX turn control capabilities are malformed");
+  }
+  if (agent !== "pi" && (controls.steering || controls.queuedFollowUp)) {
+    throw new Error("ACPX profile cannot advertise these turn controls");
+  }
+  return { steering: controls.steering, queuedFollowUp: controls.queuedFollowUp };
 }
 
 class DurablePrpCodexTransport implements CodexAppServerTransport {
@@ -3299,6 +3377,13 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
   #threadId = "";
   #sessionId: string | null = null;
   #providerIdentity: Record<string, unknown> | null = null;
+  #turnControls: NativeTurnControlCapabilities = { steering: false, queuedFollowUp: false };
+
+  turnControlCapabilities(): NativeTurnControlCapabilities | null {
+    if (this.options.provider !== "acpx") return null;
+    if (this.#closed || this.#failure) return { steering: false, queuedFollowUp: false };
+    return { ...this.#turnControls };
+  }
   #providerIdentityEventType:
     "harness.ready" | "session.started" | "session.resumed" | null = null;
   #checkpointProviderIdentityExpectation: {
@@ -3338,14 +3423,16 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
   readonly #traceFrameIndex = new RunnerdTraceFrameIndex();
   #pendingTraceRehydrations: PendingTraceRehydration[] = [];
   #pendingDriverTraceInterpretations: PendingDriverTraceInterpretation[] = [];
-  readonly #bridgedRuntimeInputs = new Map<string, { durableTurnId: string }>();
+  readonly #bridgedRuntimeInputs = new Map<string, { durableTurnId: string; permission?: boolean }>();
 
   constructor(readonly options: CapabilityRunnerdCodexTransportOptions) {
     if (options.adoptExistingRunner && !options.stateDirectory?.trim()) {
       throw new Error("native_adopted_runner_state_directory_required");
     }
-    if (options.provider === "acpx" && options.acpxAgent === "pi") {
-      throw new Error("The Pi ACPX profile is not available");
+    if (options.provider === "acpx" && options.acpxAgent !== undefined
+      && ["pi", "cursor", "copilot"].includes(options.acpxAgent)
+      && options.acpxCandidateProfile !== options.acpxAgent) {
+      throw new Error("The candidate ACPX profile requires explicit evaluation opt-in");
     }
     this.#failureSignal = new Promise<never>((_resolve, reject) => {
       this.#rejectFailureSignal = reject;
@@ -3459,6 +3546,7 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
           ? params.expectedTurnId
           : this.#turnId;
       if (!text.trim()) throw new Error("turn/steer requires a message");
+      if (params.mode !== undefined && params.mode !== "steer" && params.mode !== "follow_up") throw new Error("turn/steer mode is invalid");
       if (expectedTurnId !== this.#turnId)
         throw new Error("turn/steer named a stale turn");
       const correlationId =
@@ -3471,6 +3559,7 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
           text,
           turnId: this.#durableTurnId,
           providerTurnId: expectedTurnId,
+          ...(params.mode === "follow_up" ? { mode: "follow_up" } : {}),
           ...(correlationId ? { correlationId } : {}),
         },
         correlationId,
@@ -3664,34 +3753,18 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
     // same budget here so a transient tunnel reconnect cannot trip the shorter
     // generic command timeout and replace an otherwise healthy warm runner.
     const reconnectGraceMs = this.options.runnerReconnectGraceMs ?? 5_000;
-    const deadline = Date.now() + reconnectGraceMs;
-    let consecutiveReadyProbes = 0;
-    let lastBlockers: unknown = null;
-    while (Date.now() < deadline) {
-      await this.#awaitWarmRunnerConnection(deadline);
-      const snapshot = await this.#commandResult(
+    await waitForWarmAttachmentReadiness({
+      graceMs: reconnectGraceMs,
+      waitForConnection: (deadline) => this.#awaitWarmRunnerConnection(deadline),
+      snapshot: (deadline) => this.#commandResult(
         "session.snapshot",
         {
           quiesceForWarmAttach: true,
         },
         deadline,
-      );
-      lastBlockers = snapshot.warmAttachBlockers;
-      if (snapshot.warmAttachReady === true) {
-        consecutiveReadyProbes += 1;
-        // A second barrier prevents a provider frame emitted immediately after
-        // its terminal notification from racing the authority rotation. Each
-        // snapshot wakes runnerd, polls the provider, and drains the preceding
-        // durable event prefix before the next probe.
-        if (consecutiveReadyProbes >= 2) return;
-      } else {
-        consecutiveReadyProbes = 0;
-      }
-      await new Promise<void>((resolveWait) => setTimeout(resolveWait, 25));
-    }
-    throw new Error(
-      `native_runner_warm_attachment_not_quiescent: ${JSON.stringify(lastBlockers)}`,
-    );
+      ),
+      onBlocked: (blockers) => this.#diagnostic(`warm attachment awaiting quiescence: ${JSON.stringify(blockers)}`),
+    });
   }
 
   async #awaitWarmRunnerConnection(deadline: number): Promise<void> {
@@ -3866,7 +3939,7 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
       throw new Error(
         `PRP runtime request ${input.requestId} is no longer pending`,
       );
-    if (!("response" in input.resolution)) {
+    if (!pending.permission && !("response" in input.resolution) && input.resolution.action !== "cancel" && input.resolution.action !== "decline") {
       throw new Error(
         "runnerd-native runtime requests require a canonical question response",
       );
@@ -3880,7 +3953,7 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
       {
         requestId: input.requestId,
         turnId: pending.durableTurnId,
-        response: input.resolution.response,
+        ...("response" in input.resolution ? { response: input.resolution.response } : { resolution: input.resolution }),
       },
       commandId,
     );
@@ -4259,8 +4332,18 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
           adoptedRunner && !this.#adoptedRunnerAuthenticated
             ? null
             : this.#controlPlaneCheckpoint,
-        forceKill: () => {
-          this.#handle?.child.kill("SIGKILL");
+        forceKill: async () => {
+          const handle = this.#handle;
+          if (!handle || this.#evidence.runnerExited) return;
+          handle.child.kill("SIGKILL");
+          // A remote kill dispatches an asynchronous, ownership-fenced RPC.
+          // Do not release the session for reuse until its process monitor has
+          // settled: the successor would otherwise overwrite that ownership
+          // marker while the previous runner still holds the fixed listener.
+          const result = await waitForProcess(handle, 15_000);
+          this.#evidence.runnerExited = true;
+          this.#evidence.runnerExitCode = result.code;
+          this.#evidence.runnerSignal = result.signal as NodeJS.Signals | null;
         },
         release: this.#controlPlaneRelease,
       });
@@ -4517,6 +4600,7 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
               runId: identity.runId,
               cwd: String(params.cwd ?? tmpdir()),
               instructions: baseInstructions,
+              providerPolicy: { readOnly: params.permissions === "paperclip-runner-workspace-read-only" },
               permissionMode: resolveRunnerdAcpxPermissionMode(
                 this.options.acpxPermissionMode,
               ),
@@ -4574,7 +4658,7 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
                       ? "opencode_server"
                       : "codex_app_server",
                   providerVersion:
-                    provider === "opencode" ? "1.18.29" : "codex-app-server-v1",
+                    provider === "opencode" ? "1.18.32" : "codex-app-server-v1",
                   command:
                     provider === "opencode"
                       ? providerNodeCommand
@@ -4587,6 +4671,7 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
                           environment: this.options.environment,
                           codexHome,
                           codexCommand: this.options.codexCommand,
+                          instructionWorkingCopyRoot: runtimeContext?.instructions.workingCopy?.rootPath,
                           readOnlyRoots: [
                             ...trustedRuntimeReadOnlyRoots(
                               this.options.environment,
@@ -4624,10 +4709,14 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
                     "paperclip-runner-workspace-read-only"
                       ? "plan"
                       : "default",
+                  ...(params.conversationMode === "prepared"
+                    ? { conversationMode: "prepared" }
+                    : {}),
                   includeCollaborationModeInstructions:
                     includeCodexCollaborationInstructions,
-                  includeSkillInstructions:
-                    provider === "codex" && runtimeContext !== null,
+                  ...(provider === "codex"
+                    ? { includeSkillInstructions: runtimeContext !== null }
+                    : {}),
                   runtimeContext,
                 },
     };
@@ -4721,20 +4810,7 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
           ? {}
           : { providerIdentity: structuredClone(this.#providerIdentity) }),
         model: params.model,
-        modelProvider:
-          provider === "opencode" && typeof params.model === "string"
-            ? params.model.split("/", 1)[0]
-            : provider === "claude_managed"
-              ? "anthropic"
-              : provider === "aws_agentcore"
-                ? "aws"
-                : provider === "acpx"
-                  ? acpxAgent === "pi"
-                    ? "openrouter"
-                    : acpxAgent === "claude"
-                      ? "anthropic"
-                      : "openai"
-                  : "openai",
+        modelProvider: openedThreadModelProvider(provider, acpxAgent, params.model),
       },
     };
   }
@@ -5074,6 +5150,7 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
             environment: this.options.environment,
             codexHome,
             codexCommand: this.options.codexCommand,
+            instructionWorkingCopyRoot: runtimeContext?.instructions.workingCopy?.rootPath,
             readOnlyRoots: [
               ...trustedRuntimeReadOnlyRoots(this.options.environment),
               ...(runtimeContext
@@ -5447,7 +5524,7 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
         "PRP semantic tool call no longer belongs to an admitted turn",
       );
     }
-    return unwrapToolResponse(
+    const outcome = unwrapToolResponse(
       await this.#handler({
         id: call.callId,
         method: "item/tool/call",
@@ -5467,7 +5544,32 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
             }
           : {}),
       }),
+      this.options.provider === "acpx" &&
+        (call.operationId === "paperclip_finish" || call.operationId === "paperclip_block"),
     );
+    if (call.operationId === "call_api") {
+      const result = record(outcome.result);
+      if (
+        result.operationId !== call.operationId ||
+        result.callId !== call.callId
+      ) {
+        // HTTP receipts also contain `ok` and `operationId` (the HTTP route).
+        // Bind that application value inside a real semantic envelope so the
+        // runner cannot mistake the route for the provider tool's identity.
+        return {
+          ...outcome,
+          result: {
+            ok: !outcome.isError,
+            operationId: call.operationId,
+            callId: call.callId,
+            ...(outcome.isError
+              ? { error: outcome.result }
+              : { result: outcome.result }),
+          },
+        };
+      }
+    }
+    return outcome;
   }
 
   async #startTurn(
@@ -5480,8 +5582,17 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
     const commandDeadline = Date.now() + turnStartTimeoutMs;
     const input = Array.isArray(params.input) ? params.input.map(record) : [];
     const message = input
+      .filter((item) => item.type !== "skill")
       .map((item) => (typeof item.text === "string" ? item.text : ""))
       .join("\n");
+    const skills = resolveRunnerdCodexSkillInputs(
+      input.filter((item) => item.type === "skill"),
+      this.options.runtimeContext ?? null,
+      resolve(this.options.runnerFilesystemRoot ?? this.#root, "codex-home"),
+    );
+    if (skills.length && (this.options.provider ?? "codex") !== "codex") {
+      throw new Error("Explicit skill inputs are supported only by Codex");
+    }
     const pendingTurnId = `turn_lab_${randomUUID().replaceAll("-", "")}`;
     this.#turnId = pendingTurnId;
     const responseEpoch = ++this.#turnStartResponseEpoch;
@@ -5507,6 +5618,7 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
         "turn.start",
         {
           text: message,
+          ...(skills.length ? { skills } : {}),
           turnId: pendingTurnId,
         },
         commandDeadline,
@@ -5844,6 +5956,12 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
         this.#applyProviderIdentityEvent(event);
         continue;
       }
+      if (event.eventType === "session.capabilities.updated" && this.options.provider === "acpx") {
+        const capabilities = record(record(event.envelope.payload).payload);
+        if (capabilities.turnControls !== undefined) {
+          this.#turnControls = parseAcpxTurnControlCapabilities(capabilities.turnControls, this.#evidence.acpxAgent);
+        }
+      }
       if (event.eventType === "harness.diagnostic") {
         const diagnostic = record(record(event.envelope.payload).payload);
         if (
@@ -5867,7 +5985,13 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
             : "";
         const origin = record(normalizedRequest.origin);
         const method = typeof origin.method === "string" ? origin.method : "";
-        const params = bridgedCodexQuestionParams(
+        const permission = normalizedRequest.type === "permission" && normalizedRequest.requestKind === "permission_approval"
+          && method === "session/request_permission";
+        const params = permission ? {
+          threadId: this.#threadId, turnId: this.#turnId,
+          itemId: normalizedRequest.itemId, reason: normalizedRequest.prompt,
+          choices: normalizedRequest.choices, origin,
+        } : bridgedCodexQuestionParams(
           normalizedRequest,
           method,
           this.#threadId,
@@ -5878,10 +6002,12 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
           params &&
           (method === "item/tool/requestUserInput" ||
             method === "tool/requestUserInput" ||
-            method === "mcpServer/elicitation/request") &&
+            method === "mcpServer/elicitation/request" ||
+            isAcpxCanonicalInputMethod(method) || permission) &&
           !this.#bridgedRuntimeInputs.has(requestId)
         ) {
           this.#bridgedRuntimeInputs.set(requestId, {
+            permission,
             durableTurnId:
               typeof event.envelope.turnId === "string"
                 ? event.envelope.turnId
@@ -5931,7 +6057,7 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
           : event.eventType === "provider.event"
           ? unwrapRunnerdProviderNotifications(eventPayload)
           : canonicalMethod
-            ? expandRunnerdCanonicalNotifications(canonicalMethod, eventPayload)
+            ? expandRunnerdCanonicalNotifications(canonicalMethod, eventPayload, event.eventType)
             : [];
       for (const payload of notifications) {
         const method = payload.method;
@@ -6116,6 +6242,12 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
     } = resolveRunnerdSessionIdentity(started);
     const providerIdentity = record(started.providerIdentity);
     this.#confirmCheckpointProviderIdentity(started, event.eventType);
+    if (this.options.provider === "acpx") {
+      if (descriptor.turnControls !== undefined && descriptor.agent !== (this.options.acpxAgent ?? "codex")) {
+        throw new Error("ACPX capability identity differs from the admitted profile");
+      }
+      this.#turnControls = parseAcpxTurnControlCapabilities(descriptor.turnControls, descriptor.agent);
+    }
     if (pid !== null) {
       this.#evidence.providerPid = pid;
       this.#evidence.providerProcessStartedAt = readLocalProcessStartedAt(pid);
@@ -6136,7 +6268,9 @@ class DurablePrpCodexTransport implements CodexAppServerTransport {
     if (
       descriptor.agent === "pi" ||
       descriptor.agent === "claude" ||
-      descriptor.agent === "codex"
+      descriptor.agent === "codex" ||
+      descriptor.agent === "cursor" ||
+      descriptor.agent === "copilot"
     )
       this.#evidence.acpxAgent = descriptor.agent;
     if (typeof descriptor.agentServerVersion === "string")
@@ -6576,7 +6710,27 @@ export function createCapabilityRunnerdCodexTransport(
 export const createRunnerdCodexTransport =
   createCapabilityRunnerdCodexTransport;
 
+/** The transport provider identifies the biller, independently of model family. */
+function openedThreadModelProvider(
+  provider: CapabilityRunnerdCodexTransportOptions["provider"],
+  acpxAgent: QualifiedAcpxAgent,
+  model: unknown,
+): string {
+  if (provider === "opencode" && typeof model === "string") return model.split("/", 1)[0]!;
+  if (provider === "claude_managed") return "anthropic";
+  if (provider === "aws_agentcore") return "aws";
+  if (provider === "acpx") {
+    if (acpxAgent === "pi") return "openrouter";
+    if (acpxAgent === "grok") return "xai";
+    if (acpxAgent === "claude") return "anthropic";
+    if (acpxAgent === "cursor") return "cursor";
+    if (acpxAgent === "copilot") return "github";
+  }
+  return "openai";
+}
+
 export const runnerdLaunchProfileInternals = Object.freeze({
+  openedThreadModelProvider,
   acpxProviderPackageAuthority,
   acpxRunnerLaunchProfile,
   resolveBuildOwnedCliArtifact,
@@ -6601,3 +6755,30 @@ export const runnerdRecoveryInternals = Object.freeze({
   turnStartNotificationDisposition,
   turnStartResponseReady,
 });
+
+
+/** Map controller asset paths to the assigned copy on the provider filesystem. */
+export function resolveRunnerdCodexSkillInputs(
+  inputs: Record<string, unknown>[],
+  context: NativeRuntimeContextSnapshot | null,
+  codexHome: string,
+): Array<{ type: "skill"; name: string; path: string }> {
+  if (inputs.length > 64) throw new Error("Too many explicit skill inputs");
+  const seen = new Set<string>();
+  return inputs.map((input) => {
+    const assigned = context?.skills.find((skill) => skill.runtimeName === input.name);
+    if (
+      !assigned || !/^[a-zA-Z0-9_-]+$/.test(assigned.runtimeName)
+      || input.path !== resolve(assigned.bundle.rootPath, "SKILL.md")
+      || seen.has(assigned.runtimeName)
+    ) {
+      throw new Error("Explicit skill input must reference a unique assigned runtime skill");
+    }
+    seen.add(assigned.runtimeName);
+    return {
+      type: "skill",
+      name: assigned.runtimeName,
+      path: resolve(codexHome, "skills", assigned.runtimeName, "SKILL.md"),
+    };
+  });
+}

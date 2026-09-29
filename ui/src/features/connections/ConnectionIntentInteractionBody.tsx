@@ -11,6 +11,7 @@ import {
 import type { ConnectionIntentInteraction } from "@paperclipai/shared";
 import { connectionIntentsApi } from "@/api/connection-intents";
 import { AiConnectionCredentialStep } from "@/components/ai-connections/AiConnectionCredentialStep";
+import { AI_PROVIDERS } from "@/components/ai-connections/model";
 import { AppLogo } from "@/pages/apps/AppLogo";
 import { Button } from "@/components/ui/button";
 import {
@@ -162,6 +163,7 @@ export function ConnectionIntentInteractionBody({
 
   const setupProps: ConnectionSetupFlowProps | null = setupQuery.data ? {
     host: "dialog",
+    upstreamServiceName: interaction.payload.upstreamService?.name,
     serviceSlug: interaction.payload.serviceSlug.startsWith("connection:") ? undefined : interaction.payload.serviceSlug,
     configuredConnection: interaction.payload.serviceSlug.startsWith("connection:") ? setupQuery.data.existingConnections[0] : undefined,
     requestedAgentId: setupQuery.data.requestedAgentId,
@@ -180,8 +182,8 @@ export function ConnectionIntentInteractionBody({
     interaction.status === "accepted"
       ? {
           icon: CheckCircle2,
-          title: `${interaction.payload.serviceName} connected`,
-          body: isAi ? "The connection was restored for this request." : `${interaction.payload.requestingAgentName} can use this connection on the continuation run.`,
+          title: interaction.payload.upstreamService ? "External provider connected" : `${interaction.payload.serviceName} connected`,
+          body: interaction.payload.upstreamService ? `${interaction.payload.requestingAgentName} can now verify and authorize ${interaction.payload.upstreamService.name} through this provider. The app is not yet verified.` : isAi ? "This agent can now use the connection." : `${interaction.payload.requestingAgentName} can use this connection on the continuation run.`,
         }
       : interaction.status === "rejected"
         ? {
@@ -309,7 +311,16 @@ export function ConnectionIntentInteractionBody({
       </p>
     : setupQuery.data?.aiConnection && setupQuery.data.aiConnection.mode !== "responsible_user"
       ? <p role="status" className="text-sm text-muted-foreground">The selected account is no longer available to you. Ask its owner to restore access, or choose an available AI connection in the agent’s settings.</p>
-      : setupContent;
+      : setupQuery.data?.aiConnection ? <AiConnectionCredentialStep
+          companyId={interaction.companyId}
+          provider={setupQuery.data.aiConnection.provider}
+          name={`My ${AI_PROVIDERS[setupQuery.data.aiConnection.provider].name} account`}
+          ownership="personal"
+          agentIds={[interaction.payload.requestingAgentId]}
+          allAgents={false}
+          onComplete={(result) => { void finishNewConnection(result); }}
+          onCancel={() => { closeSetup(); returnFocusToCard(); }}
+        /> : setupContent;
 
   return (
     <div
@@ -332,7 +343,7 @@ export function ConnectionIntentInteractionBody({
             </p>
             <p className="mt-1 text-sm text-muted-foreground">
               {interaction.payload.purpose === "ai"
-                ? "Restore the agent’s selected AI account, then continue this task."
+                ? "This task can’t run until the agent has a valid AI connection. Connect here and the task will resume automatically."
                 : "Connect your identity or reuse an eligible connection. Access is added only for this agent."}
             </p>
           </div>
@@ -373,7 +384,8 @@ export function ConnectionIntentInteractionBody({
               </Button>
             </DialogTrigger>
             <DialogContent
-              className="!max-w-(--pct-90) max-h-(--sz-85vh) w-full overflow-y-auto sm:max-w-5xl"
+              className="max-h-(--sz-85vh) overflow-y-auto sm:max-w-3xl"
+              showCloseButton={false}
               onCloseAutoFocus={(event) => {
                 event.preventDefault();
                 focusTargetRef.current?.focus();

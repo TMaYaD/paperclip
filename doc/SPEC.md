@@ -282,6 +282,7 @@ Experimental Agent Chat presents one persistent task per person and agent as a s
 ### Implications
 
 - An agent's "inbox" is: tasks assigned to them + comments on tasks they're involved in
+- A human's Mine inbox and its badge include failed runs attributed to that human, not another user's runs. All retains company-wide failure visibility. Historical unattributed runs remain in the local single-user board's Mine view; see `SPEC-implementation.md` for the routing contract.
 - The CEO delegates by creating tasks assigned to the CTO
 - The CTO breaks those down into sub-tasks assigned to engineers
 - Discussion happens in task comments, not a side channel
@@ -414,6 +415,11 @@ Tasks use **single assignment** (one agent per task) with **atomic checkout**:
 
 No optimistic locking or CRDTs needed. The single-assignment model + atomic checkout prevents conflicts at the design level.
 
+Releasing a terminal task clears execution locks while preserving its assigned
+owner and final status. Assignment remains part of the work history after Done
+or Cancelled. Releasing unfinished work still relinquishes the agent assignment;
+only an active `in_progress` task returns to `todo`.
+
 ### Human in the Loop
 
 Agents can create tasks assigned to humans. The board member (or any human with access) can complete these tasks through the UI.
@@ -431,6 +437,8 @@ No separate "agent API" vs. "board API." Same endpoints, different authorization
 ### Work Artifacts
 
 Paperclip manages task-linked work artifacts: issue documents (rich-text plans, specs, notes attached to issues) and file attachments. Agents read and write these through the API as part of normal task execution. Full delivery infrastructure (code repos, deployments, production runtime) remains the agent's domain — Paperclip orchestrates the work, not the build pipeline.
+
+Task work mode is explicit persisted state. Requesting a plan in a title or description does not switch the task into planning mode. Standard execution may produce a plan as its requested deliverable; explicit planning mode separately governs plan-only execution and its approval transition.
 
 ### Open Questions
 
@@ -551,6 +559,12 @@ Things Paperclip explicitly does **not** do:
 8. **Progressive deployment.** Trivial to start local, straightforward to scale to hosted.
 9. **Extensible core.** Clean boundaries so plugins can add capabilities (Adapters, knowledge base, revenue tracking) without modifying core.
 
+## Agent visual identity
+
+Agent appearances are stable, versioned ClipLab end-cap personas, separate from
+behavioral instructions. Compact surfaces use on-demand cached PNG URLs; larger
+placements may use a lazy live character. See [agent-personas.md](agent-personas.md)
+for persistence, migration, rendering, and integration contracts.
 ### Agent chat project handoff (2026-09-11)
 
 Chat supports research and full plan drafting/revision in its existing plan document. On handoff, each ordinary assigned task receives the relevant plan in its own `plan` document, committed with task creation before execution is scheduled. The source plan remains in the conversation. Plan acceptance hands off execution; it never switches the conversation into implementation.
@@ -599,3 +613,43 @@ matching contract and reproducible quality tests.
 Subscription budgets support independent provider session and weekly windows.
 Operators combine a progressive pace rule with a fixed usage cap; every matching
 rule must permit a new run. See `SPEC-implementation.md` for the contract.
+
+### Personal keyboard shortcut preference
+
+Keyboard shortcuts are off by default and are enabled in Settings → Profile.
+The preference is stored on the signed-in user, applies across companies and
+devices, and does not require instance administrator access. The local trusted
+board user has the same preference. `GET /api/auth/preferences` returns only the
+current board user's preference. `PATCH /api/auth/preferences` updates only that
+user and requires an accessible `companyId` for the activity log, including viewer
+memberships. The preference and audit record commit in one transaction. Both
+requests require `expectedUserId` (GET query parameter or PATCH body) matching
+the authenticated actor, so a cookie change cannot mix accounts in the cache.
+Agents cannot
+read or change these preferences. The legacy instance general setting is retained
+for API compatibility but no longer controls shortcut behavior in the app;
+users opt in individually after the upgrade.
+
+Managed agents own a persistent file directory across tasks and sessions. The
+Instructions Editor and stopped agent execution synchronize the same current
+files, including AGENTS.md and its supporting files. Task working directories and
+provider home directories remain separate concepts. Concurrent runs synchronize only
+the files they change, with the last sync winning for the same file. Temporary
+copies are cleaned up; this storage does not add a revision-history system. See
+[agent-files.md](agent-files.md) for lifecycle and upgrade compatibility.
+
+Full agent storage produces a run warning without stopping current or future
+work. Storage limits constrain saved file changes, not the agent's ability to run
+and remove files to recover space.
+
+### Unsafe native workspace exports
+
+An unsafe workspace link does not fail an accepted native task result. Retry
+export automatically with confined entries only and keep archive confinement in
+place. If the export remains unsafe, omit it and finish the saved result under
+normal completion rules. Record diagnostics only in run logs; do not add a task
+warning or manual repair action. This also applies to historical unsafe failures:
+omit the already-rejected export, clear stale repair notices, and finalize the
+accepted result without another provider turn, even when its old sandbox is
+unavailable. Preserve current ownership and newer-work fences. See
+`native-workspace-finalization-recovery.md`.

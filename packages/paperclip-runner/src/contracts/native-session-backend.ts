@@ -146,12 +146,15 @@ export interface NativeSession {
   events(input?: { afterCursor?: string | null }): AsyncIterable<PrpEvent>;
   startTurn(input: {
     message: NativeUserMessage;
+    /** Set by orchestration only after successful provider-session recovery. */
+    continuation?: true;
     requestedCollaborationMode?: "default" | "plan";
   }): Promise<{
     turnId: string;
     effectiveCollaborationMode?: "default" | "plan";
   }>;
   steer?(input: {
+    mode?: "steer" | "follow_up";
     turnId: string;
     message: NativeUserMessage;
     correlationId?: string;
@@ -202,6 +205,8 @@ export interface NativeSession {
 
 /** Normalized control-plane boundary shared by runner and hosted backends. */
 export interface NativeSessionBackend {
+  /** Existing task rules at user-message priority, for prepared native envelopes. */
+  readonly preparedTaskConstraints?: readonly string[];
   descriptor(): Promise<NativeSessionBackendDescriptor>;
   openSession(input: OpenNativeSessionInput): Promise<NativeSession>;
   /** Open a fresh provider session after an explicitly governed continuity break. */

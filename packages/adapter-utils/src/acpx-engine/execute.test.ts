@@ -38,6 +38,7 @@ import {
 } from "./execute.js";
 import { ACPX_HANDSHAKE_TIMEOUT_MS } from "./constants.js";
 import { runChildProcess } from "../server-utils.js";
+import { createPromptContextFixture } from "../test-fixtures/prompt-context.js";
 import { setExpensiveWorkspaceGitExecutor } from "../git-workspace-sync.js";
 import { resolveReferencedSourceIgnore } from "../sandbox-managed-runtime.js";
 import {
@@ -133,6 +134,7 @@ function createLocalSandboxRunner(
 function buildRuntime(
   onSetConfigOption?: (input: { key: string; value: string }) => void,
   onEnsureSession?: (input: Record<string, unknown>) => void,
+  onStartTurn?: (input: Record<string, unknown>) => void,
 ) {
   return {
     ensureSession: async (input: Record<string, unknown>) => {
@@ -143,13 +145,16 @@ function buildRuntime(
       runtimeSessionName: "runtime-session",
       });
     },
-    startTurn: () => ({
-      events: (async function* () {
-        yield { type: "done", stopReason: "end_turn" };
-      })(),
-      result: Promise.resolve({ status: "completed", stopReason: "end_turn" }),
-      cancel: async () => {},
-    }),
+    startTurn: (input: Record<string, unknown>) => {
+      onStartTurn?.(input);
+      return {
+        events: (async function* () {
+          yield { type: "done", stopReason: "end_turn" };
+        })(),
+        result: Promise.resolve({ status: "completed", stopReason: "end_turn" }),
+        cancel: async () => {},
+      };
+    },
     setConfigOption: async (input: { key: string; value: string }) => {
       onSetConfigOption?.(input);
     },
@@ -173,6 +178,7 @@ async function runExecutor(
   const runtimeOptions: Record<string, unknown>[] = [];
   const configOptions: Array<{ key: string; value: string }> = [];
   const sessionInputs: Record<string, unknown>[] = [];
+  const turnInputs: Record<string, unknown>[] = [];
   const meta: Record<string, unknown>[] = [];
   const logs: Array<{ stream: string; text: string }> = [];
   const events: Array<{ eventType: string; payload?: Record<string, unknown> }> = [];
@@ -185,6 +191,7 @@ async function runExecutor(
       return buildRuntime(
         ({ key, value }) => configOptions.push({ key, value }),
         (input) => sessionInputs.push(input),
+        (input) => turnInputs.push(input),
       ) as never;
     },
   });
@@ -215,7 +222,7 @@ async function runExecutor(
   } as never);
 
   expect(result.exitCode).toBe(0);
-  return { logs, meta, events, runtimeOptions, configOptions, sessionInputs, result };
+  return { logs, meta, events, runtimeOptions, configOptions, sessionInputs, turnInputs, result };
 }
 
 // Under `vi.useFakeTimers()`, setup before `ensureSession` still performs real
@@ -369,6 +376,29 @@ const ALLOWED_TURN_SPAN_ATTRIBUTE_KEYS = new Set<string>([
 ]);
 
 describe("shared ACPX engine runtime behavior", () => {
+  it.each(["claude", "codex", "gemini", "kimi", "custom"])("defaults the legacy %s engine to full auto on fresh and resumed runs", async (agent) => {
+    const root = await makeTempRoot();
+    const config = {
+      agent, cwd: root, stateDir: path.join(root, "state"),
+      ...(agent === "custom" ? { agentCommand: "node ./fake-acp.js" } : {}),
+    };
+    const first = await runExecutor(config);
+    const resumed = await runExecutor(config, { runtime: { sessionParams: first.result.sessionParams } });
+    for (const run of [first, resumed]) {
+      expect(run.runtimeOptions[0]?.permissionMode).toBe("approve-all");
+      expect(run.result.resultJson?.permissionMode).toBe("approve-all");
+    }
+  });
+
+  it.each([
+    ["default", "approve-all"], ["", "approve-all"],
+    ["approve-reads", "approve-reads"], ["deny-all", "deny-all"],
+  ])("resolves the legacy %j permission setting to %s", async (permissionMode, expected) => {
+    const root = await makeTempRoot();
+    const run = await runExecutor({ agent: "custom", agentCommand: "node ./fake-acp.js", cwd: root, stateDir: path.join(root, "state"), permissionMode });
+    expect(run.runtimeOptions[0]?.permissionMode).toBe(expected);
+  });
+
   it("persists ACP agent process identity before prompting on each run (host lane re-creates, no warm reuse)", async () => {
     const root = await makeTempRoot();
     const startedAt = "2026-07-30T07:00:00.000Z";
@@ -559,6 +589,32 @@ describe("shared ACPX engine runtime behavior", () => {
     expect(configOptions).toEqual([]);
   });
 
+  it.each(["claude", "codex", "gemini", "kimi", "custom"])("delivers the shared owned sections at the %s ACP turn boundary", async (agent) => {
+    const root = await makeTempRoot();
+    const context = createPromptContextFixture();
+    const config = { agent, agentCommand: "node ./fixture-acp.js", cwd: root, stateDir: path.join(root, "state"), mode: "persistent" };
+    const fresh = await runExecutor(config, { context });
+    expect(fresh.turnInputs).toHaveLength(1);
+    const prompt = String(fresh.turnInputs[0]?.text ?? "");
+    expect(prompt).toContain(context.paperclipTaskMarkdownAssignment);
+    expect(prompt).toContain(context.paperclipTaskCommunicationGuidance);
+    expect(prompt).not.toContain('"objective":');
+    expect(prompt).not.toContain("### Issue description");
+    expect(prompt).toContain('"id":"comment-first"');
+    expect(prompt).toContain('"id":"comment-second"');
+    expect(prompt).toContain('"id":"comment-scope"');
+    expect(prompt.indexOf('"id":"comment-first"')).toBeLessThan(prompt.indexOf('"id":"comment-second"'));
+    expect(prompt).toContain("Untrusted continuation evidence");
+    expect(prompt).toContain("receipt-1");
+    const resumed = await runExecutor(config, { context, runtime: { sessionParams: fresh.result.sessionParams } });
+    expect(resumed.sessionInputs[0]?.resumeSessionId).toBe(fresh.result.sessionId);
+    const resumedPrompt = String(resumed.turnInputs[0]?.text ?? "");
+    expect(resumedPrompt).toContain(context.paperclipTaskMarkdownAssignmentCompact);
+    expect(resumedPrompt).not.toContain(context.paperclipTaskCommunicationGuidance);
+    expect(resumedPrompt).not.toContain('"id":"comment-first"');
+    expect(resumedPrompt).toContain('"id":"comment-second"');
+  });
+
   it("includes Paperclip env and API access notes in the ACPX prompt without leaking the token", async () => {
     const { meta } = await runExecutor(
       { agent: "custom", agentCommand: "node ./fake-acp.js" },
@@ -580,7 +636,9 @@ describe("shared ACPX engine runtime behavior", () => {
     expect(prompt).toContain("Paperclip runtime note:");
     expect(prompt).toContain("PAPERCLIP_AGENT_ID");
     expect(prompt).toContain("PAPERCLIP_API_KEY");
-    expect(prompt).toContain("PAPERCLIP_WAKE_PAYLOAD_JSON");
+    expect(prompt).not.toContain("PAPERCLIP_WAKE_PAYLOAD_JSON");
+    expect(prompt).toContain("## Paperclip Wake Payload");
+    expect(prompt).toContain("TEST-1");
     expect(prompt).toContain("Paperclip API access note:");
     expect(prompt).toContain('PAPERCLIP_API_BASE="${PAPERCLIP_API_URL%/}"; PAPERCLIP_API_BASE="${PAPERCLIP_API_BASE%/api}"');
     expect(prompt).toContain("$PAPERCLIP_API_BASE/api/agents/me");
@@ -591,6 +649,57 @@ describe("shared ACPX engine runtime behavior", () => {
     expect(prompt).not.toContain("-d '{...}'");
     expect(prompt).not.toContain("runtime-secret-token");
     expect(promptMetrics?.runtimeNoteChars).toBeGreaterThan(0);
+  });
+
+  it("keeps large continuation history in ACP turns and preserves resume deltas", async () => {
+    const root = await makeTempRoot();
+    const config = {
+      agent: "claude", cwd: root, stateDir: path.join(root, "state"), mode: "persistent",
+      env: { PAPERCLIP_WAKE_PAYLOAD_JSON: "stale configured wake" },
+    };
+    const messages = Array.from({ length: 50 }, (_, index) => ({
+      id: `message-${index}`, authorType: "user", authorId: "user-1",
+      body: `Message ${index}: ${"context ".repeat(500)} End ${index}.`,
+      createdAt: "2020-01-01T00:00:00.000Z", updatedAt: "2020-01-01T00:00:00.000Z",
+      deleted: false, sourceTrust: { kind: "authenticated_user" },
+    }));
+    const completedActions = Array.from({ length: 50 }, (_, index) => ({
+      runId: "prior-run", receiptId: `receipt-${index}`, operationId: `operation-${index}`,
+      result: { text: `Completed action ${index}` },
+    }));
+    const continuation = {
+      version: 1, companyId: "company-1", issueId: "issue-1",
+      trigger: { reason: "issue_commented", interactionId: null, sourceRunId: null },
+      originCommentIds: [messages[49]!.id], objective: "Preserve all context", messages,
+      interactionOutcomes: [], unresolvedInteractionIds: [], completedWork: null,
+      completedActions, coverage: { kind: "full_task_history", throughCommentId: messages[49]!.id, summaryThroughCommentId: null },
+    };
+    expect(Buffer.byteLength(JSON.stringify(continuation))).toBeGreaterThan(128 * 1024);
+    const context = { taskId: "issue-1", paperclipWake: {
+      reason: "issue_commented", issue: { id: "issue-1" }, executionContinuation: continuation,
+    } };
+    const fresh = await runExecutor(config, { context });
+    const changedMessage = { ...messages[49]!, body: "Updated direction: preserve approval gates." };
+    const resumed = await runExecutor(config, {
+      runtime: { sessionParams: fresh.result.sessionParams },
+      context: { ...context, paperclipWake: { ...context.paperclipWake, executionContinuation: {
+        ...continuation, resumeDelta: { baseRunId: "run-1", messages: [changedMessage] },
+      } } },
+    });
+    expect(resumed.sessionInputs[0]?.resumeSessionId).toBe(fresh.result.sessionId);
+    for (const run of [fresh, resumed]) {
+      const sessionOptions = run.sessionInputs[0]?.sessionOptions as Record<string, unknown>;
+      expect(sessionOptions.env).not.toHaveProperty("PAPERCLIP_WAKE_PAYLOAD_JSON");
+      const prompt = String(run.turnInputs[0]?.text);
+      expect(prompt).not.toContain("stale configured wake");
+      for (const action of completedActions) expect(prompt).toContain(JSON.stringify(action));
+    }
+    const freshPrompt = String(fresh.turnInputs[0]?.text);
+    for (const message of messages) expect(freshPrompt).toContain(JSON.stringify(message));
+    const resumedPrompt = String(resumed.turnInputs[0]?.text);
+    expect(resumedPrompt).toContain(JSON.stringify(changedMessage));
+    expect(resumedPrompt).not.toContain(messages[0]!.body);
+    expect(resumedPrompt).toContain('"kind":"task_history_delta"');
   });
 
   it.each([
@@ -606,6 +715,7 @@ describe("shared ACPX engine runtime behavior", () => {
       taskId: "chat-1",
       paperclipTaskMarkdown: chatDirective,
       paperclipTaskMarkdownCompact: chatDirective,
+      paperclipTaskCommunicationGuidance: "Frozen Slack communication preference.",
       paperclipWake: {
         reason: "issue_commented",
         issue: { id: "chat-1", workMode: "planning", status: "in_progress" },
@@ -624,6 +734,10 @@ describe("shared ACPX engine runtime behavior", () => {
     expect(resumed.sessionInputs[0]?.resumeSessionId).toBe(fresh.result.sessionId);
     const reset = await runExecutor(config, { context });
     expect(reset.sessionInputs[0]?.resumeSessionId).toBeUndefined();
+    for (const run of [fresh, reset]) {
+      expect(String(run.meta[0]?.prompt).match(/Frozen Slack communication preference\./g)).toHaveLength(1);
+    }
+    expect(String(resumed.meta[0]?.prompt)).not.toContain("Frozen Slack communication preference.");
     for (const { meta } of [fresh, resumed, reset]) {
       const prompt = String(meta[0]?.prompt ?? "");
       expect(prompt).toContain(chatDirective);
@@ -1539,6 +1653,55 @@ describe("shared ACPX engine runtime behavior", () => {
     expect(path.resolve(path.dirname(managedAuth), await fs.readlink(managedAuth))).toBe(sourceAuth);
   });
 
+  it.each(["OPENAI_API_KEY", "CODEX_API_KEY"] as const)(
+    "uses isolated API-key auth instead of the host ChatGPT login for %s",
+    async (keyName) => {
+      const root = await makeTempRoot();
+      const sourceCodexHome = path.join(root, "source-codex-home");
+      const paperclipHome = path.join(root, "paperclip-home");
+      await fs.mkdir(sourceCodexHome, { recursive: true });
+      const sourceAuth = path.join(sourceCodexHome, "auth.json");
+      await fs.writeFile(sourceAuth, JSON.stringify({ tokens: "host-login" }), "utf8");
+      const managedHome = path.join(
+        paperclipHome, "instances", "test-instance", "companies", "company-1",
+        "acp-engine", "agents", "agent-1", "codex-home",
+      );
+      await fs.mkdir(managedHome, { recursive: true });
+      const managedAuth = path.join(managedHome, "auth.json");
+      if (process.platform === "win32") {
+        await fs.writeFile(managedAuth, JSON.stringify({ tokens: "stale-login" }), "utf8");
+      } else {
+        await fs.symlink(sourceAuth, managedAuth);
+      }
+
+      vi.stubEnv("CODEX_HOME", sourceCodexHome);
+      vi.stubEnv("PAPERCLIP_HOME", paperclipHome);
+      vi.stubEnv("PAPERCLIP_INSTANCE_ID", "test-instance");
+      vi.stubEnv("OPENAI_API_KEY", "");
+      vi.stubEnv("CODEX_API_KEY", "");
+      try {
+        const { sessionInputs } = await runExecutor({
+          agent: "codex",
+          stateDir: path.join(root, "state"),
+          env: { [keyName]: "sk-acp-test-key" },
+          paperclipRuntimeSkills: [],
+          paperclipSkillSync: { desiredSkills: [] },
+        });
+        const sessionEnv = (sessionInputs[0]!.sessionOptions as { env: Record<string, string> }).env;
+        expect(sessionEnv.CODEX_HOME).toBe(managedHome);
+        expect(sessionEnv.DEFAULT_AUTH_REQUEST).toBe(JSON.stringify({ methodId: "api-key" }));
+        expect((await fs.lstat(managedAuth)).isSymbolicLink()).toBe(false);
+        expect(JSON.parse(await fs.readFile(managedAuth, "utf8"))).toEqual({ OPENAI_API_KEY: "sk-acp-test-key" });
+        expect(await fs.readFile(sourceAuth, "utf8")).toBe(JSON.stringify({ tokens: "host-login" }));
+        if (process.platform !== "win32") {
+          expect((await fs.stat(managedAuth)).mode & 0o777).toBe(0o600);
+        }
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    },
+  );
+
   it("sets GROK_HOME for a Grok run from the company Grok home, and leaves CODEX_HOME unchanged for a Codex run", async () => {
     const root = await makeTempRoot();
     const paperclipHome = path.join(root, "paperclip-home");
@@ -1668,6 +1831,35 @@ describe("shared ACPX engine runtime behavior", () => {
       const env = (sessionInputs[0]!.sessionOptions as { env: Record<string, string> }).env;
       expect(env[apiKeyName]).toBe("sk-acp-test-key");
       expect(env.DEFAULT_AUTH_REQUEST).toBe(JSON.stringify({ methodId: "api-key" }));
+    },
+  );
+
+  it.each(["OPENAI_API_KEY", "CODEX_API_KEY"] as const)(
+    "selects Codex ACP API-key authentication when only the host process provides %s",
+    async (apiKeyName) => {
+      const root = await makeTempRoot();
+      const codexHome = path.join(root, "codex-home");
+      await fs.mkdir(codexHome, { recursive: true });
+
+      // Simulate a local launch that inherits a provider key from the host
+      // process environment. No adapter config sets the key directly, so the
+      // launched env only receives it through host projection.
+      vi.stubEnv(apiKeyName, "sk-host-inherited-key");
+      try {
+        const { sessionInputs } = await runExecutor({
+          agent: "codex",
+          stateDir: path.join(root, "state"),
+          env: { CODEX_HOME: codexHome },
+          paperclipRuntimeSkills: [],
+          paperclipSkillSync: { desiredSkills: [] },
+        });
+
+        const env = (sessionInputs[0]!.sessionOptions as { env: Record<string, string> }).env;
+        expect(env[apiKeyName]).toBe("sk-host-inherited-key");
+        expect(env.DEFAULT_AUTH_REQUEST).toBe(JSON.stringify({ methodId: "api-key" }));
+      } finally {
+        vi.unstubAllEnvs();
+      }
     },
   );
 
@@ -6291,10 +6483,30 @@ describe("ACPX engine run lifecycle corrections (F3: one teardown error policy)"
     };
   }
 
+  it("collects instructions after confirmed close on a thrown provider turn, before workspace restore", async () => {
+    const { stateDir, localCwd, executionTarget } = await setupRemoteSandbox();
+    const { paperclipStops, anyStopped } = stubBridges();
+    const order: string[] = [];
+    const execute = createAcpxEngineExecutor({
+      stagingLocks: new Map(), warmHandles: new Map(), stagedRuntimes: new Map(),
+      createRuntime: () => ({ ensureSession: async () => okHandle, startTurn: () => throwingTurn(),
+        close: async () => { order.push("close"); } }) as never,
+    });
+    const result = await execute({ runId: "instruction-stop-failure",
+      ...remoteArgs(stateDir, localCwd, executionTarget, { onProviderStopped: async () => {
+        expect(anyStopped(paperclipStops)).toBe(true);
+        order.push("collect");
+      } }),
+    } as never);
+    expect(result.exitCode).toBe(1);
+    expect(order).toEqual(["close", "collect"]);
+  });
+
   it("test_teardown_continues_after_one_teardown_step_fails", async () => {
     const { stateDir, localCwd, executionTarget } = await setupRemoteSandbox();
     const { paperclipStops, processStops, anyStopped } = stubBridges();
     const stagingLocks = new Map<string, Promise<unknown>>();
+    const collectInstructions = vi.fn(async () => {});
     const logs: Array<{ stream: string; text: string }> = [];
     const execute = createAcpxEngineExecutor({
       stagingLocks,
@@ -6314,6 +6526,7 @@ describe("ACPX engine run lifecycle corrections (F3: one teardown error policy)"
     const result = await execute({
       runId: "td-continue",
       ...remoteArgs(stateDir, localCwd, executionTarget, {
+        onProviderStopped: collectInstructions,
         onLog: async (stream: "stdout" | "stderr", text: string) => {
           logs.push({ stream, text });
         },
@@ -6321,6 +6534,7 @@ describe("ACPX engine run lifecycle corrections (F3: one teardown error policy)"
     } as never);
 
     expect(result.exitCode).toBe(1);
+    expect(collectInstructions).not.toHaveBeenCalled();
     // The close failure did not stop the bridge stops or the lease release.
     expect(anyStopped(paperclipStops)).toBe(true);
     expect(anyStopped(processStops)).toBe(true);
@@ -6329,6 +6543,36 @@ describe("ACPX engine run lifecycle corrections (F3: one teardown error policy)"
     expect(
       logs.some((entry) => entry.stream === "stderr" && entry.text.includes('teardown step "runtime-close" failed')),
     ).toBe(true);
+  });
+
+  it("restores managed home and releases the lease when instruction collection rejects", async () => {
+    const { stateDir, localCwd, executionTarget } = await setupRemoteSandbox();
+    const { paperclipStops, processStops, anyStopped } = stubBridges();
+    const stagingLocks = new Map<string, Promise<unknown>>();
+    const order: string[] = [];
+    const logs: string[] = [];
+    const execute = createAcpxEngineExecutor({
+      stagingLocks, warmHandles: new Map(), stagedRuntimes: new Map(),
+      prepareRemoteManagedHome: async (input) => ({
+        stagedRuntime: await input.stage([]),
+        teardown: async () => { order.push("restore"); return { ok: true }; },
+      }),
+      createRuntime: () => ({ ensureSession: async () => okHandle, startTurn: () => throwingTurn(),
+        close: async () => { order.push("close"); } }) as never,
+    });
+    const result = await execute({ runId: "instruction-collection-reject",
+      ...remoteArgs(stateDir, localCwd, executionTarget, {
+        onProviderStopped: async () => { order.push("collect"); throw new Error("collector failed reading /private/test-instructions/AGENTS.md"); },
+        onLog: async (_stream: string, text: string) => { logs.push(text); },
+      }),
+    } as never);
+    expect(result.exitCode).toBe(1);
+    expect(order).toEqual(["close", "collect", "restore"]);
+    expect(anyStopped(paperclipStops)).toBe(true);
+    expect(anyStopped(processStops)).toBe(true);
+    expect(stagingLocks.size).toBe(0);
+    expect(logs.some(text => text.includes('teardown step "instruction-collection" failed: Instruction collection failed'))).toBe(true);
+    expect(logs.some(text => text.includes("/private/test-instructions"))).toBe(false);
   });
 
   it("test_staging_lease_releases_in_finally_on_every_exit_path", async () => {

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  EMBEDDED_POSTGRES_TEST_TIMEOUT_MS,
   agents,
   approvals,
   budgetIncidents,
@@ -337,7 +338,7 @@ describeEmbeddedPostgres("budgetService release gate enforcement", () => {
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-budgets-service-");
     db = createDb(tempDb.connectionString);
-  }, 20_000);
+  }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
 
   afterEach(async () => {
     await db.delete(budgetIncidents);

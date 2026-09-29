@@ -144,6 +144,36 @@ DATABASE_URL=postgres://postgres.[PROJECT-REF]:[PASSWORD]@...5432/postgres \
 
 See [Supabase pricing](https://supabase.com/pricing) for current details.
 
+## Connection loss during a transaction
+
+When a database connection closes, its transaction fails. Paperclip does not
+replay that transaction. New requests can use a fresh connection from the pool.
+Queries from the failed transaction must keep failing, even after the pool
+reconnects.
+
+Source builds carry `patches/postgres@3.4.9.patch` for this behavior. It rejects
+queued and later queries from a disconnected transaction or reserved connection,
+and prevents a released, closed connection from returning to the open pool.
+The patch covers both ESM and CommonJS. The regression suite terminates real
+PostgreSQL backends and checks rejection, pool recovery, and transaction isolation.
+Remove the patch when an upstream release passes these tests. Installs of the
+unmodified `postgres` package outside this workspace do not include the patch.
+
+Trusted-header actor synchronization retries transient connection failures,
+including `CONNECT_TIMEOUT`, at most twice. This retry applies only to the
+idempotent actor synchronization operations, not arbitrary transactions. A
+persistent outage still fails the request after the bounded retries; each
+connection attempt remains subject to the configured database connect timeout.
+
+## Execution identity row locks
+
+Identity initialization, credential acquisition, and steering reconciliation lock
+the task before its run. These operations use `FOR NO KEY UPDATE`: they change
+identity state, not parent keys. The lock still serializes identity writers and
+blocks concurrent task or run updates. It allows audit inserts to retain their
+foreign-key `KEY SHARE` locks without waiting on identity acquisition. The audit
+foreign keys and their deletion behavior remain enforced.
+
 ## Switching between modes
 
 The database mode is controlled by `DATABASE_URL`:
@@ -175,6 +205,7 @@ When authoring migrations or one-time backfills:
 
 - Create every migration with `pnpm --filter @paperclipai/db generate`. Do not hand-write a snapshot.
 - Do not hand-edit a snapshot to resolve a merge conflict. Renumber your migration and run `generate` again, as `packages/db/.gitattributes` describes.
+- The repo keeps only the newest 5 snapshots. `generate` runs `prune:snapshots` afterwards to delete older ones. Drizzle only reads the newest snapshot, and each snapshot is a full copy of the schema (over 1 MB each). Older snapshots are still in git history.
 - `packages/db/src/migration-snapshot-drift.test.ts` is the enforcement backstop. It repeats the diff that `generate` performs and fails when the newest snapshot no longer matches `packages/db/src/schema/`.
 
 ## Cloud runtime identity singleton
@@ -270,6 +301,15 @@ successor can take the lease immediately only when coordinated handoff or PID
 and process-start evidence proves the prior controller is gone, or when the
 lease expires. Recovery generation changes do not increment the independent
 provider-attempt counter.
+
+## Chat communication snapshots
+
+Chat communication guidance uses two additive columns: endpoint
+`communication_instructions` defaults to empty, and conversation
+`communication_guidance` holds the immutable initial task snapshot. Existing
+conversations retain a null snapshot; there is no backfill that changes an
+ongoing conversation. New Slack tasks receive built-in guidance even when the
+endpoint has no additional instructions.
 
 ## Telegram private draft identities
 
@@ -404,16 +444,52 @@ null ownership fields and follow the previous recovery path.
 
 ## Provider-specific subscription budget rules
 
+The upstream merge renumbers the fork's former migrations 0278–0280 to
+0289–0291. Their SQL bytes and hashes are unchanged, so existing installations
+recognize them as applied through the hash-based migration history. New installs
+apply them after upstream migration 0288.
+
 `budget_policies.provider` identifies the subscription provider (`openai` or
 `anthropic`); billed-cents policies retain the empty string. The unique key is
-company, scope type/id, metric, window kind, provider and progressive kind. Migration 0279 converts
+company, scope type/id, metric, window kind, provider and progressive kind. Migration 0290 converts
 each legacy subscription rule to an OpenAI rule and copies its settings to an
 Anthropic rule, retaining inactive rules and leaving billed-cents policies alone.
 
-Migration 0280 adds `pace_percent`: percent per day for a weekly window, or per
+Migration 0291 adds `pace_percent`: percent per day for a weekly window, or per
 hour for a session. Pace rules use `amount = 100` as the provider ceiling. Fixed
 caps retain their amount and have no pace. Existing progressive rules retain
 IDs and release rates (`amount / 7` daily or `amount / 5` hourly). A progressive
 ceiling below 100 also creates a fixed cap, preserving the old combined behavior.
 Inactive states and zero settings are retained. Both kinds may coexist for the
 same provider/window; duplicate rules of the same kind are rejected.
+
+## Agent file persistence and legacy revisions
+
+Managed agent files are current filesystem contents, using the same persistent
+instance storage as other workspaces. `agent_instruction_revisions` and
+`agent_instruction_heads` are retained as read-only upgrade input. Their heads
+are adopted once into the managed directory; new saves never append revisions.
+`agent_instruction_working_copies` holds per-run baseline hashes, state, and
+capture receipts. New receipts identify `paperclip.agent-files.v1`; historical
+rows retain the instruction-only format. Completed directory runs discard their
+baseline and private copies. See [Persistent agent files](agent-files.md).
+
+## Large API response snapshots
+
+`assets.byte_size` uses PostgreSQL `bigint` so saved responses and byte ranges can
+exceed 2 GiB. The API and Drizzle mapping continue to expose a JavaScript number;
+response readers validate safe integer offsets. The type-widening migration
+rewrites the asset metadata table and needs an exclusive table lock. File bytes
+remain in local or object storage.
+
+### Runner API response reservations
+
+`runner_api_response_reservations` holds company-scoped API snapshot reservations.
+Before a capture spills, the server locks company admission and counts stored
+`runner-api` assets plus unattached reservations against a 20 GiB default quota.
+A committed asset replaces its reservation in that total. The asset foreign key
+cascades on deletion, while deleting a run sets `run_id` to null so an orphan
+reservation cannot silently disappear. Failed cleanup or an ambiguous storage
+write requires operator reconciliation before an unattached reservation is
+removed. The table stores no response bodies. See `doc/runner-api-tools.md` for
+limits and the operator override.

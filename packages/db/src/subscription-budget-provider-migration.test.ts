@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import postgres from "postgres";
 import { describe, expect, it } from "vitest";
-import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./test-embedded-postgres.js";
+import { EMBEDDED_POSTGRES_TEST_TIMEOUT_MS, getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./test-embedded-postgres.js";
 const support = await getEmbeddedPostgresTestSupport();
 const suite = support.supported ? describe : describe.skip;
 suite("subscription provider migration", () => {
@@ -20,7 +20,7 @@ suite("subscription provider migration", () => {
         ('11111111-1111-4111-8111-111111111111', '22222222-2222-4222-8222-222222222222', 'company', '22222222-2222-4222-8222-222222222222', 'subscription_percent', 'provider_week', 100, true, true),
         ('33333333-3333-4333-8333-333333333333', '22222222-2222-4222-8222-222222222222', 'company', '22222222-2222-4222-8222-222222222222', 'subscription_percent', 'provider_session', 0, false, false),
         ('44444444-4444-4444-8444-444444444444', '22222222-2222-4222-8222-222222222222', 'company', '22222222-2222-4222-8222-222222222222', 'billed_cents', 'calendar_month_utc', 5000, false, true)`;
-      const migration = await readFile(new URL("./migrations/0279_spicy_warlock.sql", import.meta.url), "utf8");
+      const migration = await readFile(new URL("./migrations/0290_flippant_cable.sql", import.meta.url), "utf8");
       await sql.begin(async (tx) => {
         for (const statement of migration.split("--> statement-breakpoint")) await tx.unsafe(statement);
       });
@@ -31,5 +31,5 @@ suite("subscription provider migration", () => {
       expect(rows.filter((r) => r.window_kind === "provider_session").every((r) => r.amount === 0 && !r.is_active)).toBe(true);
       expect(rows.find((r) => r.metric === "billed_cents")).toMatchObject({ id: "44444444-4444-4444-8444-444444444444", provider: "", amount: 5000 });
     } finally { await sql.end(); await database.cleanup(); }
-  }, 30000);
+  }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
 });

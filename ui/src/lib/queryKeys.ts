@@ -50,8 +50,6 @@ export const queryKeys = {
       ["tools", "connection", connectionId, "installs"] as const,
     connectionGrants: (connectionId: string) =>
       ["tools", "connection", connectionId, "grants"] as const,
-    composioServices: (connectionId: string) =>
-      ["tools", "connection", connectionId, "composio-services"] as const,
     catalog: (connectionId: string) => ["tools", "connection", connectionId, "catalog"] as const,
     connectionActivity: (connectionId: string) =>
       ["tools", "connection", connectionId, "activity"] as const,
@@ -217,6 +215,8 @@ export const queryKeys = {
     skills: (id: string) => ["agents", "skills", id] as const,
     instructionsBundle: (id: string) =>
       ["agents", "instructions-bundle", id] as const,
+    instructionCandidates: (id: string) =>
+      ["agents", "instruction-candidates", id] as const,
     instructionsFile: (id: string, relativePath: string) =>
       ["agents", "instructions-bundle", id, "file", relativePath] as const,
     keys: (agentId: string) => ["agents", "keys", agentId] as const,
@@ -594,6 +594,7 @@ export const queryKeys = {
     currentBoardAccess: ["access", "current-board-access"] as const,
   },
   auth: {
+    preferences: (userId: string | null) => ["auth", "preferences", userId] as const,
     session: ["auth", "session"] as const,
   },
   inboxAgentPolicy: {
@@ -616,6 +617,7 @@ export const queryKeys = {
     experimentalSettings: ["instance", "experimental-settings"] as const,
   },
   health: ["health"] as const,
+  stagingCommit: ["staging-commit"] as const,
   cloud: {
     stacks: ["cloud", "stacks"] as const,
   },

@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import postgres from "postgres";
 import { describe, expect, it } from "vitest";
-import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./test-embedded-postgres.js";
+import { EMBEDDED_POSTGRES_TEST_TIMEOUT_MS, getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./test-embedded-postgres.js";
 const support = await getEmbeddedPostgresTestSupport();
 const suite = support.supported ? describe : describe.skip;
 suite("subscription pace migration", () => {
@@ -25,7 +25,7 @@ suite("subscription pace migration", () => {
         await sql`INSERT INTO pace_budget_test.budget_policies (company_id, scope_type, scope_id, metric, provider, window_kind, amount, progressive, is_active) VALUES (${company}, 'company', ${company}, ${metric}, ${provider}, ${window}, ${amount}, ${progressive}, ${active})`;
       }
       const before = await sql`SELECT * FROM pace_budget_test.budget_policies`;
-      const migration = await readFile(new URL("./migrations/0280_daffy_talisman.sql", import.meta.url), "utf8");
+      const migration = await readFile(new URL("./migrations/0291_dapper_lockheed.sql", import.meta.url), "utf8");
       await sql.begin(async (tx) => { for (const statement of migration.split("--> statement-breakpoint")) await tx.unsafe(statement); });
       const rows = await sql`SELECT * FROM pace_budget_test.budget_policies`;
       expect(rows).toHaveLength(7);
@@ -46,5 +46,5 @@ suite("subscription pace migration", () => {
       }
       await expect(sql`INSERT INTO pace_budget_test.budget_policies (company_id, scope_type, scope_id, metric, provider, window_kind, amount, progressive) VALUES (${company}, 'company', ${company}, 'subscription_percent', 'openai', 'provider_week', 80, false)`).rejects.toMatchObject({ code: "23505" });
     } finally { await sql.end(); await database.cleanup(); }
-  }, 30000);
+  }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
 });
