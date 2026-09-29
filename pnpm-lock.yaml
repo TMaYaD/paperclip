@@ -1033,6 +1033,9 @@ importers:
       '@paperclipai/paperclip-runner':
         specifier: workspace:*
         version: link:../packages/paperclip-runner
+      '@paperclipai/ui':
+        specifier: workspace:*
+        version: link:../ui
       '@types/express':
         specifier: ^5.0.0
         version: 5.0.6
