@@ -123,8 +123,15 @@ the window key, utilization to a percent, `resetsAt` to ISO) and folds it into
 the shared snapshot as a fresh row for that provider. Each event describes one
 window, the representative claim, so the probe keeps its cadence to fill in the
 rest; the harvest just makes the snapshot current between probes and gives a
-throttled probe a recent read to fall back on. The first window seen per
-process is logged with its raw payload so an operator can confirm the scale.
+throttled probe a recent read to fall back on. The snapshot is shared by
+every agent on the provider, so the harvest trusts one source only: the
+engine forwards rate-limit info only from the built-in Claude ACP agent with
+no custom `agentCommand`, the server accepts it only for `claude_local`
+agents, and a harvested reading can never lower usage within the same window
+(usage only drops when the window resets, so a lower reading is accepted only
+once the current reset has passed or the new reading resets clearly later).
+The first window seen per process is logged with allowlisted fields so an
+operator can confirm the scale.
 Only the direct ACP engine path is wired; the runner sidecar passes the field
 through but the native runtime does not consume it yet.
 

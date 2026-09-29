@@ -101,9 +101,18 @@ export type QuotaSnapshotReader = ((input?: { now?: Date }) => Promise<QuotaSnap
    * Folds an observation into the snapshot immediately: the provider's last
    * good row gains or replaces that window, is stamped with the observation
    * time, and stands as a fresh (not stale) result until the next probe.
+   * Returns false when the observation was dropped because it would lower
+   * usage within the same window.
    */
-  observe?: (observation: QuotaWindowObservation) => void;
+  observe?: (observation: QuotaWindowObservation) => boolean;
 };
+
+/**
+ * Two readings of one window can report reset times a moment apart (header
+ * seconds versus endpoint microseconds); only a clearly later reset means a
+ * new window.
+ */
+const WINDOW_ROLLOVER_TOLERANCE_MS = 60_000;
 
 function parseObservedAt(result: ProviderQuotaResult): number | null {
   if (!result.observedAt) return null;
@@ -203,7 +212,27 @@ export function createQuotaSnapshotReader(options: {
     });
   }
 
-  function observe(observation: QuotaWindowObservation) {
+  /**
+   * Within one provider window usage only rises; it drops when the window
+   * resets. A harvested reading below the current one is therefore accepted
+   * only when the window has rolled over: the current reading's reset time
+   * has passed, or the new reading resets clearly later. Anything else is
+   * dropped, so a misreporting stream cannot open a saturated window.
+   */
+  function acceptsObservation(observation: QuotaWindowObservation): boolean {
+    const next = observation.window;
+    if (next.usedPercent == null) return false;
+    const current = lastGood.get(observation.provider)?.windows.find((window) => window.key === next.key);
+    if (!current || current.usedPercent == null || next.usedPercent >= current.usedPercent) return true;
+    const currentReset = current.resetsAt ? Date.parse(current.resetsAt) : Number.NaN;
+    if (Number.isNaN(currentReset)) return false;
+    if (currentReset <= observation.observedAt.getTime()) return true;
+    const nextReset = next.resetsAt ? Date.parse(next.resetsAt) : Number.NaN;
+    return !Number.isNaN(nextReset) && nextReset > currentReset + WINDOW_ROLLOVER_TOLERANCE_MS;
+  }
+
+  function observe(observation: QuotaWindowObservation): boolean {
+    if (!acceptsObservation(observation)) return false;
     const observedAt = observation.observedAt.toISOString();
     const key = observation.window.key ?? "";
     const perProvider = harvested.get(observation.provider) ?? new Map();
@@ -225,6 +254,7 @@ export function createQuotaSnapshotReader(options: {
     const results = (cached?.results ?? []).filter((row) => row.provider !== observation.provider);
     results.push(fresh);
     cached = { results, fetchedAt: cached?.fetchedAt ?? observation.observedAt };
+    return true;
   }
 
   const read: QuotaSnapshotReader = async (input = {}) => {
@@ -278,9 +308,9 @@ export function readQuotaSnapshot(input?: { now?: Date }): Promise<QuotaSnapshot
 }
 
 /** Folds an observation into the process-wide snapshot (see QuotaSnapshotReader.observe). */
-export function observeQuotaWindow(observation: QuotaWindowObservation): void {
+export function observeQuotaWindow(observation: QuotaWindowObservation): boolean {
   sharedQuotaSnapshotReader ??= createQuotaSnapshotReader();
-  sharedQuotaSnapshotReader.observe?.(observation);
+  return sharedQuotaSnapshotReader.observe?.(observation) ?? false;
 }
 
 /** Claude Code `rate_limit_event` window types that map onto known quota windows. */
@@ -347,7 +377,7 @@ export function observeClaudeRateLimitInfo(
 ): { window: QuotaWindow; first: boolean } | null {
   const window = claudeRateLimitInfoToWindow(info);
   if (!window || window.usedPercent == null) return null;
-  observeQuotaWindow({ provider, window, observedAt, source: CLAUDE_RUN_STREAM_SOURCE });
+  if (!observeQuotaWindow({ provider, window, observedAt, source: CLAUDE_RUN_STREAM_SOURCE })) return null;
   const seenKey = `${provider}:${window.key}`;
   const first = !harvestedProviderWindows.has(seenKey);
   harvestedProviderWindows.add(seenKey);

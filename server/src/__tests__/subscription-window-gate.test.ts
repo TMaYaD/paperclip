@@ -675,6 +675,46 @@ describe("createQuotaSnapshotReader", () => {
     expect(rows.find((row) => row.provider === "openai")).toMatchObject({ ok: true, source: "codex-run-stream" });
   });
 
+  it("never lets a harvested reading lower usage within the same window", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const reset = "2026-09-13T14:00:00.000Z";
+    const fetch = vi.fn(async (): Promise<ProviderQuotaResult[]> => [
+      { provider: "anthropic", ok: true, windows: [window({ key: "five_hour", usedPercent: 80, resetsAt: reset })] },
+    ]);
+    const read = createQuotaSnapshotReader({ fetch, ttlMs: 120_000 });
+    await read({ now: NOW });
+    const usedFor = async () => (await read({ now: NOW })).results[0]?.windows.find((w) => w.key === "five_hour")?.usedPercent;
+    const at = new Date(NOW.getTime() + 30_000);
+
+    // Lower within the same window (same reset, or a reset a moment apart):
+    // dropped, so a misreporting stream cannot open a saturated window.
+    expect(read.observe?.({ provider: "anthropic", window: window({ key: "five_hour", usedPercent: 10, resetsAt: reset }), observedAt: at })).toBe(false);
+    expect(read.observe?.({ provider: "anthropic", window: window({ key: "five_hour", usedPercent: 10, resetsAt: "2026-09-13T14:00:00.700Z" }), observedAt: at })).toBe(false);
+    expect(read.observe?.({ provider: "anthropic", window: window({ key: "five_hour", usedPercent: 10, resetsAt: null }), observedAt: at })).toBe(false);
+    expect(await usedFor()).toBe(80);
+
+    // Higher is always accepted.
+    expect(read.observe?.({ provider: "anthropic", window: window({ key: "five_hour", usedPercent: 85, resetsAt: reset }), observedAt: at })).toBe(true);
+    expect(await usedFor()).toBe(85);
+
+    // A clearly later reset is a new window, so a lower reading is accepted.
+    expect(read.observe?.({ provider: "anthropic", window: window({ key: "five_hour", usedPercent: 3, resetsAt: "2026-09-13T19:00:00.000Z" }), observedAt: at })).toBe(true);
+    expect(await usedFor()).toBe(3);
+  });
+
+  it("accepts a lower harvested reading once the current window's reset has passed", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const fetch = vi.fn(async (): Promise<ProviderQuotaResult[]> => [
+      { provider: "anthropic", ok: true, windows: [window({ key: "five_hour", usedPercent: 90, resetsAt: "2026-09-13T12:05:00.000Z" })] },
+    ]);
+    const read = createQuotaSnapshotReader({ fetch, ttlMs: 120_000 });
+    await read({ now: NOW });
+    const afterReset = new Date(NOW.getTime() + 6 * 60_000);
+    expect(read.observe?.({ provider: "anthropic", window: window({ key: "five_hour", usedPercent: 2, resetsAt: null }), observedAt: afterReset })).toBe(true);
+  });
+
   it("keeps a window observed while a probe was in flight over the probe's older copy", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(NOW);

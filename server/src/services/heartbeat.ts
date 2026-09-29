@@ -23389,7 +23389,11 @@ export function heartbeatService(
         // endpoint. The first window seen per process is logged with its raw
         // payload so an operator can confirm the provider's scale.
         const onProviderQuotaObserved: AdapterExecutionContext["onProviderQuotaObserved"] = async (observation) => {
+          // Claude rate-limit info only describes the Anthropic subscription;
+          // accept it from Claude adapter agents alone so another adapter's
+          // stream can never write into any provider's quota row.
           if (observation.kind !== "claude_rate_limit_info") return;
+          if (agent.adapterType !== "claude_local") return;
           const provider = providerSlugForAdapterType(agent.adapterType);
           const observed = observeClaudeRateLimitInfo(
             provider,
