@@ -18,10 +18,11 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
+import { parseProviderPackArguments, materializeCandidateProviderPack } from "./candidate-provider-pack.mjs";
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const workspaceRoot = resolve(packageRoot, "../..");
-const outputArgument = process.argv.slice(2).find((value) => value !== "--");
+const { output: outputArgument, candidates } = parseProviderPackArguments(process.argv.slice(2));
 const outputRoot = resolve(
   process.cwd(),
   outputArgument ?? join(packageRoot, "provider-pack"),
@@ -34,7 +35,7 @@ if (
   throw new Error(`Refusing unsafe provider-pack output path: ${outputRoot}`);
 }
 
-const temporaryParent = mkdtempSync(join(tmpdir(), "paperclip-provider-pack-"));
+const temporaryParent = realpathSync(mkdtempSync(join(tmpdir(), "paperclip-provider-pack-")));
 const temporaryRoot = join(temporaryParent, "pack");
 
 function canonicalJson(value) {
@@ -163,6 +164,24 @@ try {
   mkdirSync(dirname(stableNodeCommand), { recursive: true, mode: 0o755 });
   copyFileSync(process.execPath, stableNodeCommand);
   chmodSync(stableNodeCommand, 0o755);
+  const relocatedNode = spawnSync(stableNodeCommand, ["--version"], {
+    cwd: temporaryRoot, env: { PATH: "/usr/bin:/bin" }, encoding: "utf8", timeout: 10_000,
+  });
+  if (relocatedNode.status !== 0 || relocatedNode.stdout.trim() !== `v${process.versions.node}`) {
+    throw new Error("Provider pack Node is not portable after relocation; build with a standalone Node distribution");
+  }
+
+  const candidateProviders = {};
+  for (const provider of candidates) {
+    const assetPath = `provider-assets/${provider}/${process.platform}-${process.arch}`;
+    const metadata = await materializeCandidateProviderPack({ provider, outputRoot: join(temporaryRoot, assetPath) });
+    if (typeof metadata?.version !== "string" || !metadata.version || metadata.version.length > 120
+      || !/^sha256:[a-f0-9]{64}$/.test(metadata.profileDigest)
+      || !/^sha256:[a-f0-9]{64}$/.test(metadata.closureDigest)) throw new Error("Candidate builder omitted its pinned identity");
+    candidateProviders[provider] = { version: metadata.version, profileDigest: metadata.profileDigest,
+      closureDigest: metadata.closureDigest, qualification: "pending", path: assetPath,
+      sha256: sha256Tree(join(temporaryRoot, assetPath)) };
+  }
 
   // pnpm's generated .bin shims embed the temporary deployment directory in
   // NODE_PATH. That makes an otherwise identical provider pack hash differ on
@@ -188,12 +207,6 @@ try {
   );
   writePortableExecutableShim("node", "node/bin/node");
   writePortableExecutableShim("opencode", "opencode-ai/bin/opencode.exe");
-  const grokPackage = dirname(packRequire.resolve("@paperclipai/grok-acp/package.json"));
-  const grokInstall = spawnSync(process.execPath, [join(grokPackage, "install.mjs")], { stdio: "inherit" });
-  if (grokInstall.status !== 0) throw new Error("Pinned Grok installation failed");
-  // Native ACP launches the verified absolute package path. Do not expose a
-  // generic grok shim: the legacy adapter owns that command and its version.
-  writePortableNodeShim("paperclip-grok-acp", "@paperclipai/grok-acp/launcher.cjs");
   writePortableNodeShim("acpx", "acpx/dist/cli.js");
   writePortableNodeShim(
     "claude-agent-acp",
@@ -320,10 +333,11 @@ try {
       codex:
         "sha256:c4538599d1ab767db5dff50934f13bb5ba313a59d9c4a83e993fac4617ea63d3",
     },
+    ...(candidates.length ? { candidateProviders } : {}),
     artifacts: {
-      grokExecutable: {
-        path: "node_modules/@paperclipai/grok-acp/bin/grok",
-        sha256: sha256File(join(grokPackage, "bin/grok")),
+      grokLauncher: {
+        path: "dist/providers/grok/launcher.cjs",
+        sha256: sha256File(join(temporaryRoot, "dist/providers/grok/launcher.cjs")),
       },
       nodeCommand: {
         path: nodeCommand,
