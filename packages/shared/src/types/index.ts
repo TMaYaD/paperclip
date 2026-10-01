@@ -36,6 +36,7 @@ export type {
   WriteSummarySlotResponse,
 } from "./summary-slot.js";
 export type {
+  AttentionActionability,
   AttentionDecisionVerb,
   AttentionDetailImage,
   AttentionFeed,
@@ -54,7 +55,7 @@ export type {
   AttentionTriageAttribution,
   AttentionWorkspaceRef,
 } from "./attention.js";
-export { ATTENTION_SOURCE_KINDS } from "./attention.js";
+export { ATTENTION_SOURCE_KINDS, attentionActionability } from "./attention.js";
 export type {
   DecisionQueue,
   DecisionQueueItem,

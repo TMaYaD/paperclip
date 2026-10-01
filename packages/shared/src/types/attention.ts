@@ -3,6 +3,7 @@ import type {
   IssueThreadInteractionEffectiveResolverPolicySource,
   IssueThreadInteractionResolverPolicyProvenance,
 } from "../constants.js";
+import type { IssueUnblockDescriptor } from "./issue.js";
 import type { InboxDismissalKind } from "./inbox-dismissal.js";
 
 export const ATTENTION_SOURCE_KINDS = [
@@ -165,6 +166,10 @@ export type AttentionItemDetail =
         title: string | null;
       } | null;
       blockedTaskCount?: number;
+      unblockDescriptor?: IssueUnblockDescriptor | null;
+      ownerName?: string | null;
+      repairAgentId?: string | null;
+      failureReasonExcerpt?: string | null;
       images: AttentionDetailImage[];
     }
   | {
@@ -218,7 +223,26 @@ export interface AttentionResolverAudience {
   createdByAgentName: string | null;
 }
 
+export type AttentionActionability = "decision" | "repair" | "waiting";
+
+/** Presentation only. This classification never grants permission or changes execution. */
+export function attentionActionability(item: AttentionItem): AttentionActionability {
+  if (item.actionability) return item.actionability;
+  switch (item.sourceKind) {
+    case "blocker_attention":
+    case "failed_run":
+    case "agent_error_alert":
+    case "recovery_action":
+    case "budget_alert":
+      return "repair";
+    default:
+      return "decision";
+  }
+}
+
 export interface AttentionItem {
+  /** Optional for compatibility with older feed snapshots. */
+  actionability?: AttentionActionability;
   id: string;
   companyId: string;
   sourceKind: AttentionSourceKind;

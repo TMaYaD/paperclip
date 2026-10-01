@@ -134,6 +134,22 @@ function buildItem(overrides: Partial<AttentionItem> = {}): AttentionItem {
 const noop = () => {};
 
 describe("AttentionQueueRow", () => {
+  it("explains the recorded waiting action and uses the displayed blocker identity", () => {
+    const el = render(<AttentionQueueRow item={buildItem({ sourceKind: "blocker_attention", actionability: "waiting", inlineResolvable: false,
+      subject: { kind: "issue", id: "blocker", companyId: "c1", title: "Review", identifier: "T-1", status: "blocked", href: "/issues/blocker" },
+      relatedIssue: { kind: "issue", id: "dependent", companyId: "c1", title: "Ship", identifier: "T-2", status: "blocked", href: "/issues/dependent" },
+      whyNow: "Waiting for a successor review.",
+      detail: { kind: "blocker", blockingIssue: null, blockedTaskCount: 2, images: [], ownerName: "Coordinator",
+        unblockDescriptor: { owner: { agentId: "coordinator" }, action: "Follow the successor; do not retry the original." } },
+    })} companyId="c1" expanded onToggleExpand={noop} onDismiss={noop} />);
+    expect(el.textContent).toContain("Waiting on Coordinator");
+    expect(el.textContent).toContain("Follow the successor; do not retry the original.");
+    expect(el.textContent).toContain("Affects 2 downstream tasks.");
+    expect(el.querySelector('a[href="/issues/blocker"]')?.textContent).toContain("T-1");
+    expect(el.textContent).not.toContain("T-2");
+    expect(el.textContent).toContain("Inspect task");
+  });
+
   it("renders an inline approval resolver when expanded", () => {
     const el = render(
       <AttentionQueueRow

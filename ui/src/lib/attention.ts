@@ -1,3 +1,4 @@
+import { attentionActionability } from "@paperclipai/shared";
 import type {
   AttentionDetailImage,
   AttentionFeed,
@@ -153,8 +154,8 @@ export function attentionStatus(item: AttentionItem): "blocked" | "in_review" {
  *   • the subject hangs off a task (a thread interaction, an issue-scoped
  *     approval) → the task arrives separately as `relatedIssue`.
  *
- * `relatedIssue` wins when both are present: it is the *other* record, so it
- * is the one the subject alone can't tell you about.
+ * When the subject is itself a task, that task wins. A downstream related task
+ * must not replace the blocker shown in the headline.
  *
  * Returns null for rows genuinely not attached to a task — a hire approval, an
  * agent error — which should show no key rather than a borrowed one.
@@ -165,7 +166,7 @@ export function attentionStatus(item: AttentionItem): "blocked" | "in_review" {
  * populate `relatedIssue` for those.
  */
 export function attentionTaskRef(item: AttentionItem): { identifier: string; href: string | null } | null {
-  const related = item.relatedIssue;
+  const related = item.subject.kind === "issue" ? item.subject : item.relatedIssue;
   if (related?.identifier) {
     return { identifier: related.identifier, href: related.href };
   }
@@ -234,6 +235,10 @@ export function attentionDetailLine(item: AttentionItem): string | null {
       return detail.agentName ?? reason;
     }
     case "blocker": {
+      if (detail.unblockDescriptor) {
+        return `Waiting on ${detail.ownerName ?? "the recorded owner"}: ${detail.unblockDescriptor.action}`;
+      }
+      if (detail.failureReasonExcerpt) return detail.failureReasonExcerpt;
       const b = detail.blockingIssue;
       if (!b) return null;
       const id = b.identifier ? `${b.identifier} ` : "";
@@ -914,4 +919,30 @@ export function groupAttentionItems(
       return a.label.localeCompare(b.label);
     })
     .map(([key, value]) => ({ key, label: value.label, items: value.items }));
+}
+
+/** Keep operational state visible without asking for a verdict that does not exist. */
+export function partitionDecisionDesk(items: AttentionItem[]) {
+  return {
+    decisions: items.filter((item) => attentionActionability(item) === "decision" && !attentionIsAging(item)),
+    aging: items.filter((item) => attentionActionability(item) === "decision" && attentionIsAging(item)),
+    repairs: items.filter((item) => attentionActionability(item) === "repair"),
+    waiting: items.filter((item) => attentionActionability(item) === "waiting"),
+  };
+}
+
+/** Operational comments must address the task shown on the card. */
+export function attentionActionIssueId(item: AttentionItem): string | null {
+  if (item.subject.kind === "issue") return item.subject.id;
+  if (typeof item.subject.metadata?.issueId === "string") return item.subject.metadata.issueId;
+  return item.relatedIssue?.id ?? null;
+}
+
+export function attentionRepairAgentId(item: AttentionItem): string | null {
+  if (item.sourceKind === "agent_error_alert") return item.subject.id;
+  if (item.detail?.kind === "blocker") return item.detail.repairAgentId ?? null;
+  if (item.sourceKind === "failed_run" && typeof item.subject.metadata?.agentId === "string") {
+    return item.subject.metadata.agentId;
+  }
+  return null;
 }
