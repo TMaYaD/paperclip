@@ -1,12 +1,13 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlarmClock, CalendarClock, ChevronDown, Loader2, Plus, UserPlus, X } from "lucide-react";
-import { buildAgentMentionHref, type Agent, type AttentionItem, type AttentionSourceKind } from "@paperclipai/shared";
+import { attentionActionability, buildAgentMentionHref, type Agent, type AttentionItem, type AttentionSourceKind } from "@paperclipai/shared";
 import { decisionQueuesApi } from "../api/decisionQueues";
 import { issuesApi } from "../api/issues";
 import { useToastActions } from "../context/ToastContext";
 import { queryKeys } from "../lib/queryKeys";
 import {
+  attentionActionIssueId,
   attentionTaskRef,
   DECIDE_BY_OPTIONS,
   decideByLabel,
@@ -82,9 +83,7 @@ export function DecisionTriageStrip({ item, companyId, agents }: DecisionTriageS
   const sourceKind = item.sourceKind;
   const sourceId = item.subject.id;
   const taskRef = attentionTaskRef(item);
-  const relatedIssueId = item.relatedIssue?.id
-    ?? (typeof item.subject.metadata?.issueId === "string" ? item.subject.metadata.issueId : null)
-    ?? (item.subject.kind === "issue" ? item.subject.id : null);
+  const relatedIssueId = attentionActionIssueId(item);
 
   const invalidate = () => {
     queryClient.invalidateQueries({ queryKey: queryKeys.attention(companyId) });
@@ -125,9 +124,11 @@ export function DecisionTriageStrip({ item, companyId, agents }: DecisionTriageS
     mutationFn: (agent: Agent) => {
       if (!relatedIssueId) throw new Error("This decision has no linked task to route from.");
       const mention = `[@${agent.name}](${buildAgentMentionHref(agent.id)})`;
+      const context = item.detail?.kind === "blocker" && item.detail.unblockDescriptor
+        ? ` Recorded next action: ${item.detail.unblockDescriptor.action}` : ` Context: ${item.whyNow}`;
       const body =
-        `${mention} — could you look at this decision${taskRef ? ` on ${taskRef.identifier}` : ""}, `
-        + `prepare a recommendation, and re-surface it on the decisions desk? (routed from the desk)`;
+        `${mention} — could you look at this ${attentionActionability(item) === "decision" ? "decision" : "task"}${taskRef ? ` on ${taskRef.identifier}` : ""}, `
+        + `prepare a concrete next action and name who needs to act?${context} (requested from the decisions desk)`;
       return issuesApi.addComment(relatedIssueId, body);
     },
     onSuccess: (_result, agent) => {
@@ -162,42 +163,44 @@ export function DecisionTriageStrip({ item, companyId, agents }: DecisionTriageS
       })()}
 
       {/* When to decide — the importance signal that drives desk ordering. */}
-      <div className="flex flex-wrap items-center gap-2">
-        <span className="text-xs font-medium text-muted-foreground">When to decide</span>
-        <div className="flex flex-wrap items-center gap-1" role="group" aria-label="When to decide">
-          {DECIDE_BY_OPTIONS.map(([value, label]) => (
-            <SegmentButton
-              key={value}
-              active={decideBy === (value satisfies DecideByPreset)}
-              disabled={pending}
-              onClick={() => setDecideBy.mutate(decideBy === value ? null : value)}
-            >
-              {label}
-            </SegmentButton>
-          ))}
-          <Popover>
-            <PopoverTrigger asChild>
-              <SegmentButton active={isDatePreset} disabled={pending}>
-                <CalendarClock className="h-3.5 w-3.5" />
-                {isDatePreset ? decideByLabel(decideBy) : "Pick date"}
+      {attentionActionability(item) === "decision" && (
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-xs font-medium text-muted-foreground">When to decide</span>
+          <div className="flex flex-wrap items-center gap-1" role="group" aria-label="When to decide">
+            {DECIDE_BY_OPTIONS.map(([value, label]) => (
+              <SegmentButton
+                key={value}
+                active={decideBy === (value satisfies DecideByPreset)}
+                disabled={pending}
+                onClick={() => setDecideBy.mutate(decideBy === value ? null : value)}
+              >
+                {label}
               </SegmentButton>
-            </PopoverTrigger>
-            <PopoverContent align="start" className="w-auto p-2">
-              <input
-                type="date"
-                defaultValue={isDatePreset ? decideBy ?? "" : ""}
-                className="rounded-sm border border-border bg-background px-2 py-1 text-xs"
-                onChange={(event) => {
-                  if (event.target.value) setDecideBy.mutate(event.target.value);
-                }}
-              />
-            </PopoverContent>
-          </Popover>
+            ))}
+            <Popover>
+              <PopoverTrigger asChild>
+                <SegmentButton active={isDatePreset} disabled={pending}>
+                  <CalendarClock className="h-3.5 w-3.5" />
+                  {isDatePreset ? decideByLabel(decideBy) : "Pick date"}
+                </SegmentButton>
+              </PopoverTrigger>
+              <PopoverContent align="start" className="w-auto p-2">
+                <input
+                  type="date"
+                  defaultValue={isDatePreset ? decideBy ?? "" : ""}
+                  className="rounded-sm border border-border bg-background px-2 py-1 text-xs"
+                  onChange={(event) => {
+                    if (event.target.value) setDecideBy.mutate(event.target.value);
+                  }}
+                />
+              </PopoverContent>
+            </Popover>
+          </div>
+          {/* Provenance ("· set by …") is rendered once, in the card meta row
+              (AttentionQueueRow), which shows in both collapsed and expanded
+              states — repeating it here duplicated it on the expanded card. */}
         </div>
-        {/* Provenance ("· set by …") is rendered once, in the card meta row
-            (AttentionQueueRow), which shows in both collapsed and expanded
-            states — repeating it here duplicated it on the expanded card. */}
-      </div>
+      )}
 
       {/* Queues — current membership as removable chips + add/create. */}
       <div className="flex flex-wrap items-center gap-2">

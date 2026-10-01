@@ -11,7 +11,7 @@ import {
   RotateCcw,
   X,
 } from "lucide-react";
-import type { Agent, AttentionDetailImage, AttentionItem } from "@paperclipai/shared";
+import { attentionActionability, type Agent, type AttentionDetailImage, type AttentionItem } from "@paperclipai/shared";
 import { Link } from "@/lib/router";
 import { accessApi } from "../api/access";
 import { approvalsApi } from "../api/approvals";
@@ -215,7 +215,7 @@ export const AttentionQueueRow = memo(function AttentionQueueRow({
           {showOpen && (
             <Button asChild variant="default" size="xs" className={ACTION_BTN}>
               <Link to={href!}>
-                Open
+                {item.sourceKind === "blocker_attention" ? "Inspect task" : "Open"}
                 <ExternalLink className="h-3 w-3" />
               </Link>
             </Button>
@@ -257,7 +257,10 @@ export const AttentionQueueRow = memo(function AttentionQueueRow({
         <div className="flex min-w-0 flex-wrap items-center gap-1">
           <span className="inline-flex items-center gap-1 text-xs font-medium text-muted-foreground">
             <StatusGlyph status={status} size="md" />
-            {meta.label}
+            {item.sourceKind === "blocker_attention"
+              ? attentionActionability(item) === "decision" ? "Action requested"
+                : attentionActionability(item) === "waiting" ? "Waiting" : "Stopped task"
+              : meta.label}
           </span>
           {taskRef && (
             <>
@@ -386,6 +389,16 @@ export const AttentionQueueRow = memo(function AttentionQueueRow({
         <CollapsibleContent data-decision-disclosure className="-mt-4">
           <div className="flex flex-col gap-4 pt-4">
             {hasImages && <ExpandedImages images={images} issueHref={issueHref} />}
+            {item.detail?.kind === "blocker" && (
+              <div className="space-y-2 text-xs text-muted-foreground">
+                <p>{item.detail.unblockDescriptor ? `Next action — ${item.detail.ownerName ?? "recorded owner"}` : item.whyNow}</p>
+                {item.detail.unblockDescriptor && <p className="whitespace-pre-wrap">{item.detail.unblockDescriptor.action}</p>}
+                {item.detail.failureReasonExcerpt && <p>{item.detail.failureReasonExcerpt}</p>}
+                {item.detail.blockedTaskCount != null && item.detail.blockedTaskCount > 0 && (
+                  <p>Affects {item.detail.blockedTaskCount} downstream {item.detail.blockedTaskCount === 1 ? "task" : "tasks"}.</p>
+                )}
+              </div>
+            )}
             {triageEnabled && <DecisionTriageStrip item={item} companyId={companyId} agents={agents} />}
             {inline && (
               <InlineResolver

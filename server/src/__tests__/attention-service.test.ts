@@ -170,7 +170,7 @@ describeEmbeddedPostgres("attention service", () => {
     executionState?: Record<string, unknown> | null;
     updatedAt?: Date;
     createdAt?: Date;
-    unblockDescriptor?: { owner: { userId: string } | "board"; action: string } | null;
+    unblockDescriptor?: { owner: { userId: string } | { agentId: string } | "board"; action: string } | null;
     blockedTransitionAt?: Date | null;
     harnessKind?: string | null;
     reviewPolicy?: "anyone" | "not_creator" | "human_only" | null;
@@ -1335,7 +1335,55 @@ describeEmbeddedPostgres("attention service", () => {
     const items = feed.items.filter((item) => item.dedupKey === `blocked-owner:${issueId}:${transitionAt.toISOString()}`);
 
     expect(items).toHaveLength(1);
-    expect(items[0]).toMatchObject({ sourceKind: "blocker_attention", whyNow: "Approve the exception" });
+    expect(items[0]).toMatchObject({ sourceKind: "blocker_attention", actionability: "decision", whyNow: "Approve the exception",
+      detail: { unblockDescriptor: { owner: "board", action: "Approve the exception" } } });
+    expect(feed.items.some((item) => item.dedupKey === `blocker:${issueId}`)).toBe(false);
+  });
+
+  it("preserves an agent-owned waiting action without inventing a board decision", async () => {
+    const { companyId, workerId } = await seedCompany("WAIT");
+    const issueId = await insertIssue({ companyId, identifier: "WAIT-1", title: "Superseded task", status: "blocked",
+      unblockDescriptor: { owner: { agentId: workerId }, action: "Follow the successor; do not retry this original." },
+      blockedTransitionAt: new Date() });
+    const feed = await attentionService(db).list(companyId, { userId: "board-user" });
+    expect(feed.items.find((item) => item.subject.id === issueId)).toMatchObject({
+      actionability: "waiting", detail: { ownerName: "Worker", unblockDescriptor: { owner: { agentId: workerId } } },
+    });
+    expect(feed.deskBadgeCount).toBe(0);
+  });
+
+  it("reports a stopped standalone task as a repair with its agent failure", async () => {
+    const { companyId, errorAgentId } = await seedCompany("REPAIR");
+    const issueId = await insertIssue({ companyId, identifier: "REPAIR-1", title: "Stopped review", status: "blocked", assigneeAgentId: errorAgentId });
+    const feed = await attentionService(db).list(companyId, { userId: "board-user" });
+    const item = feed.items.find((row) => row.subject.id === issueId)!;
+    expect(item).toMatchObject({ actionability: "repair", detail: { blockedTaskCount: 0, repairAgentId: errorAgentId, failureReasonExcerpt: "adapter config missing" } });
+    expect(item.whyNow).not.toContain("Blocks 0");
+    expect(item.whyNow).not.toContain("human attention");
+    expect(feed.deskBadgeCount).toBe(0);
+  });
+
+  it("keeps a parked project dependency in Waiting", async () => {
+    const { companyId, workerId } = await seedCompany("PARK");
+    const projectId = randomUUID();
+    await db.insert(projects).values({ id: projectId, companyId, name: "Parked project", status: "backlog" });
+    const blockerId = await insertIssue({ companyId, identifier: "PARK-1", title: "Parked work", status: "backlog", projectId, assigneeAgentId: workerId });
+    const dependentId = await insertIssue({ companyId, identifier: "PARK-2", title: "Dependent", status: "blocked", projectId });
+    await db.insert(issueRelations).values({ companyId, issueId: blockerId, relatedIssueId: dependentId, type: "blocks" });
+    const feed = await attentionService(db).list(companyId, { userId: "board-user" });
+    expect(feed.items.find((item) => item.subject.id === blockerId)).toMatchObject({ actionability: "waiting" });
+  });
+
+  it("shows the existing question rather than a generic zero-impact blocker", async () => {
+    const { companyId, workerId } = await seedCompany("ASK");
+    const issueId = await insertIssue({ companyId, identifier: "ASK-1", title: "Needs an answer", status: "blocked" });
+    const interactionId = randomUUID();
+    await db.insert(issueThreadInteractions).values({ id: interactionId, companyId, issueId,
+      kind: "ask_user_questions", status: "pending", createdByAgentId: workerId,
+      payload: { questions: [{ id: "owner", header: "Owner", question: "Who runs the rehearsal?", options: [{ label: "Operator", description: "The operator runs it." }] }] } });
+    const feed = await attentionService(db).list(companyId, { userId: "board-user" });
+    expect(feed.items.some((item) => item.subject.id === interactionId)).toBe(true);
+    expect(feed.items.some((item) => item.dedupKey === `blocker:${issueId}`)).toBe(false);
   });
 
   it("keeps legacy blocker attention visible for pre-rollout blocked issues", async () => {
@@ -1474,7 +1522,7 @@ describeEmbeddedPostgres("attention service", () => {
     expect(rows[0]).toMatchObject({
       subject: { id: terminalId, identifier: "ATC-1", title: "Choose migration owner" },
       relatedIssue: { id: blockedId },
-      whyNow: "Blocks 3 tasks and needs human attention.",
+      whyNow: "Blocks 3 tasks; inspect the stopped path and choose a repair owner.",
       detail: { kind: "blocker", blockingIssue: null, blockedTaskCount: 3 },
     });
     expect(rows[0]?.subject.id).not.toBe(blockedId);
@@ -1732,7 +1780,8 @@ describeEmbeddedPostgres("attention service", () => {
       new Date(now).getUTCDate(),
     );
     const expectedBadge = feed.items.filter(
-      (item) => new Date(item.createdAt).getTime() >= startOfUtcDay || item.decideBy === "today",
+      (item) => !["failed_run", "agent_error_alert", "recovery_action", "budget_alert"].includes(item.sourceKind)
+        && (new Date(item.createdAt).getTime() >= startOfUtcDay || item.decideBy === "today"),
     ).length;
     expect(expectedBadge).toBeGreaterThanOrEqual(2);
     expect(feed.deskBadgeCount).toBe(expectedBadge);

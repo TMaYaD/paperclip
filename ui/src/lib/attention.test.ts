@@ -10,6 +10,9 @@ import {
   attentionKind,
   attentionStatus,
   attentionTaskRef,
+  attentionActionIssueId,
+  attentionRepairAgentId,
+  partitionDecisionDesk,
   buildAttentionFilterOptions,
   buildDeskShelves,
   countActiveAttentionFilters,
@@ -308,7 +311,7 @@ describe("attentionTaskRef", () => {
     expect(attentionTaskRef(item)).toEqual({ identifier: "PAP-20", href: "/PAP/issues/PAP-20" });
   });
 
-  it("prefers relatedIssue when both are present — it is the record the subject can't describe", () => {
+  it("prefers the displayed task when the subject is a task", () => {
     const item = buildItem({
       subject: {
         kind: "issue",
@@ -329,7 +332,7 @@ describe("attentionTaskRef", () => {
         href: "/PAP/issues/PAP-2",
       },
     });
-    expect(attentionTaskRef(item)?.identifier).toBe("PAP-2");
+    expect(attentionTaskRef(item)?.identifier).toBe("PAP-1");
   });
 
   it("returns null for rows genuinely not attached to a task", () => {
@@ -657,5 +660,36 @@ describe("planAttentionRenderRows (PAP-13784 incremental rendering)", () => {
     expect(plan.snoozedRows).toHaveLength(2);
     expect(plan.dismissedRows).toHaveLength(0);
     expect(plan.hasMoreRows).toBe(true);
+  });
+});
+
+
+describe("decision actionability", () => {
+  it("keeps repairs and recorded waits out of decisions even with a due date or Keep", () => {
+    const decision = buildItem({ id: "decision", sourceKind: "blocker_attention", actionability: "decision" });
+    const repair = buildItem({ id: "repair", sourceKind: "blocker_attention", keep: true, decideBy: "today" });
+    const waiting = buildItem({ id: "waiting", actionability: "waiting", shelf: true });
+    const failed = buildItem({ id: "failed", sourceKind: "failed_run" });
+    const aging = buildItem({ id: "aging", shelf: true });
+    expect(partitionDecisionDesk([decision, repair, waiting, failed, aging])).toEqual({
+      decisions: [decision], repairs: [repair, failed], waiting: [waiting], aging: [aging],
+    });
+  });
+
+  it("targets the displayed blocker instead of its dependent for recommendations", () => {
+    const item = buildItem({ subject: { kind: "issue", id: "blocker", companyId: "c1", title: "Blocker", identifier: "T-1", status: "blocked", href: "/issues/blocker" },
+      relatedIssue: { kind: "issue", id: "dependent", companyId: "c1", title: "Dependent", identifier: "T-2", status: "blocked", href: "/issues/dependent" } });
+    expect(attentionActionIssueId(item)).toBe("blocker");
+    expect(attentionTaskRef(item)?.identifier).toBe("T-1");
+    expect(attentionActionIssueId(buildItem({ subject: { ...item.subject, kind: "interaction", metadata: { issueId: "source" } }, relatedIssue: item.relatedIssue }))).toBe("source");
+    expect(attentionActionIssueId(buildItem())).toBeNull();
+  });
+
+  it("shows the recorded waiting action and groups only a diagnosed agent failure", () => {
+    const item = buildItem({ sourceKind: "blocker_attention", detail: { kind: "blocker", blockingIssue: null, images: [],
+      unblockDescriptor: { owner: { agentId: "owner" }, action: "Wait for the successor review." }, ownerName: "Coordinator", repairAgentId: null } });
+    expect(attentionDetailLine(item)).toBe("Waiting on Coordinator: Wait for the successor review.");
+    expect(attentionRepairAgentId(item)).toBeNull();
+    expect(attentionRepairAgentId(buildItem({ detail: { kind: "blocker", blockingIssue: null, images: [], repairAgentId: "broken" } }))).toBe("broken");
   });
 });

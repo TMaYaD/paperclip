@@ -14,9 +14,9 @@ import { useInboxDismissals } from "../hooks/useInboxBadge";
 import { queryKeys } from "../lib/queryKeys";
 import {
   ATTENTION_AGING_DAYS,
-  attentionIsAging,
   buildAttentionFilterOptions,
   buildDeskShelves,
+  partitionDecisionDesk,
   defaultAttentionFilterState,
   filterAttentionItems,
   groupAttentionItems,
@@ -38,6 +38,7 @@ import {
 } from "../lib/attention";
 import { cn } from "../lib/utils";
 import { PageSkeleton } from "../components/PageSkeleton";
+import { DecisionOperationalShelf } from "../components/DecisionOperationalShelf";
 import { AttentionQueueRow } from "../components/AttentionQueueRow";
 import { DecisionsToolbar } from "../components/DecisionsToolbar";
 import { Curtain, AgingItemRow } from "../components/DecisionShelf";
@@ -149,10 +150,13 @@ export function DecisionQueuePage() {
 
   // Aging shelf (§4.4): items the server flags as idle past retention leave the
   // live list for their own curtain, mirroring the desk.
-  const agingItems = useMemo(() => activeItems.filter(attentionIsAging), [activeItems]);
-  const listItems = useMemo(() => activeItems.filter((item) => !attentionIsAging(item)), [activeItems]);
+  const desk = useMemo(() => partitionDecisionDesk(activeItems), [activeItems]);
+  const agingItems = desk.aging;
+  const listItems = desk.decisions;
+  const repairs = useMemo(() => filterAttentionItems(desk.repairs, filters), [desk.repairs, filters]);
+  const waiting = useMemo(() => filterAttentionItems(desk.waiting, filters), [desk.waiting, filters]);
 
-  const filterOptions = useMemo(() => buildAttentionFilterOptions(listItems), [listItems]);
+  const filterOptions = useMemo(() => buildAttentionFilterOptions(activeItems), [activeItems]);
 
   // Filter → sort → group, matching the desk. In the default (ungrouped) view the
   // list groups by arrival ("New today" / "Earlier", plus a "Decide now" shelf
@@ -273,8 +277,8 @@ export function DecisionQueuePage() {
         <div className="space-y-4">
           {visibleCount === 0 ? (
             <div className="rounded-xl border border-dashed border-border py-10 text-center">
-              <p className="text-sm font-medium text-foreground">No decisions match your filters.</p>
-              <p className="mt-1 text-xs text-muted-foreground">Adjust or clear the filters to see the rest.</p>
+              <p className="text-sm font-medium text-foreground">No decisions need an answer.</p>
+              <p className="mt-1 text-xs text-muted-foreground">Check Needs repair and Waiting below, or adjust your filters.</p>
             </div>
           ) : (
             groups.map((group) => {
@@ -317,6 +321,14 @@ export function DecisionQueuePage() {
               );
             })
           )}
+
+          {(["repair", "waiting"] as const).map((kind) => (
+            <DecisionOperationalShelf key={`${selectedCompanyId}:${kind}`} kind={kind}
+              items={kind === "repair" ? repairs : waiting} companyId={selectedCompanyId}
+              agentMap={agentMap} agents={agents} currentUserId={currentUserId}
+              expandedId={expandedId} onToggleExpand={handleToggleExpand}
+              onDismiss={(item) => dismiss(item.dismissalKey)} onSnooze={(item, until) => snooze(item.dismissalKey, until)} />
+          ))}
 
           {agingItems.length > 0 && (
             <Curtain

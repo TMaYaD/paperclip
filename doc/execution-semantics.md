@@ -1497,3 +1497,21 @@ use the same activity projection. Board-owned repairs stay actionable until a
 verified native retry actually starts. Once an explicit board retry is running,
 its live activity takes precedence over the prior owner and exhausted budget.
 Resolved and cancelled actions remain resolved.
+
+
+### Decisions and operational attention
+
+The experimental Decisions desk separates explicit questions, approvals, and
+human-owned unblock actions from operational state. Failures, budget stops,
+recovery actions, and blocked tasks without a concrete human action remain
+inspectable under **Needs repair**. Agent-owned waiting actions and dependencies
+in backlog or planned projects appear under **Waiting**. These sections retain
+normal task, recovery, dismissal, and snooze controls; classification does not
+change task ownership, execution, approval gates, or retry budgets.
+
+A blocked task with a pending interaction, linked approval, or open human-owned recovery
+action uses that existing path instead of a second generic blocker alert.
+Recorded unblock actions and owners travel with blocker cards. Recommendation
+requests target the task displayed on the card, rather than a downstream task.
+Related agent failures group together without merging task identities. Only
+items in the decision category contribute to the Decisions sidebar badge.

@@ -26,7 +26,7 @@ import {
   projects,
   projectWorkspaces,
 } from "@paperclipai/db";
-import { deriveProjectUrlKey } from "@paperclipai/shared";
+import { attentionActionability, deriveProjectUrlKey } from "@paperclipai/shared";
 import type {
   AttentionDecisionVerb,
   AttentionFeed,
@@ -1463,9 +1463,9 @@ export function attentionService(db: Db, serviceOptions: AttentionServiceOptions
         blockedTransitionAt?: Date | null;
       };
       const typedBlockedIssues = blockedIssues as BlockedAttentionIssue[];
-      const terminalBlockerIssueIds = typedBlockedIssues
+      const terminalBlockerIssueIds = [...new Set(typedBlockedIssues
         .map((issue) => issue.blockerAttention?.terminalBlockerIssueId)
-        .filter((issueId): issueId is string => Boolean(issueId));
+        .filter((issueId): issueId is string => Boolean(issueId)))];
       const [blockedIssueSummaries, terminalBlockerSummaries, blockerImageMap, blockingIssues] = await Promise.all([
         issueSummaryMap(db, companyId, blockedIssues.map((issue) => issue.id)),
         issueSummaryMap(db, companyId, terminalBlockerIssueIds),
@@ -1476,6 +1476,43 @@ export function attentionService(db: Db, serviceOptions: AttentionServiceOptions
         ),
         blockingIssueMap(db, companyId, blockedIssues.map((issue) => issue.id)),
       ]);
+      // Resolve the terminal task's waiting path, not a downstream parent's prose.
+      const terminalRoutingRows = [];
+      for (const terminalIds of chunkValues(terminalBlockerIssueIds, ATTENTION_GRAPH_QUERY_CHUNK_SIZE)) {
+        const rows = await db
+          .select({
+            id: issues.id,
+            unblockDescriptor: issues.unblockDescriptor,
+            projectStatus: projects.status,
+            assigneeAgentId: issues.assigneeAgentId,
+            agentName: agents.name,
+            agentStatus: agents.status,
+            errorReason: agents.errorReason,
+          })
+          .from(issues)
+          .leftJoin(projects, and(eq(projects.id, issues.projectId), eq(projects.companyId, companyId)))
+          .leftJoin(agents, and(eq(agents.id, issues.assigneeAgentId), eq(agents.companyId, companyId)))
+          .where(and(eq(issues.companyId, companyId), inArray(issues.id, terminalIds)));
+        terminalRoutingRows.push(...rows);
+      }
+      const terminalRouting = new Map(terminalRoutingRows.map((row) => [row.id, row]));
+      // Reuse the already loaded actionable sources. Agent-owned recovery alone
+      // is not evidence of progress and must not hide a stranded task.
+      const coveredTerminalIds = new Set([
+        ...interactionRows.map((row) => row.issueId),
+        ...approvalIssueRows.map((row) => row.issueId),
+        ...recoveryRows.map((row) => row.sourceIssueId),
+      ]);
+
+      const unblockAgentIds = [...new Set([...typedBlockedIssues, ...terminalRoutingRows].flatMap((issue) => {
+        const owner = issue.unblockDescriptor?.owner;
+        return owner && owner !== "board" && "agentId" in owner ? [owner.agentId] : [];
+      }))];
+      const unblockOwnerRows = unblockAgentIds.length === 0 ? [] : await db
+        .select({ id: agents.id, name: agents.name })
+        .from(agents).where(and(eq(agents.companyId, companyId), inArray(agents.id, unblockAgentIds)));
+      const unblockOwnerNames = new Map(unblockOwnerRows.map((row) => [row.id, row.name]));
+      const humanUnblockIds = new Set<string>();
       const terminalCandidates = new Map<string, {
         issue: BlockedAttentionIssue;
         issueSummary: IssueSummaryRow | null;
@@ -1487,10 +1524,12 @@ export function attentionService(db: Db, serviceOptions: AttentionServiceOptions
         const descriptor = issue.unblockDescriptor;
         const humanOwnerMatches = descriptor?.owner === "board"
           || (descriptor?.owner && "userId" in descriptor.owner && descriptor.owner.userId === options.userId);
-        if (descriptor && humanOwnerMatches && isProspectiveBlockedTransition(issue)) {
+        if (descriptor && humanOwnerMatches && isProspectiveBlockedTransition(issue) && !coveredTerminalIds.has(issue.id)) {
           const issueSummary = blockedIssueSummaries.get(issue.id) ?? null;
+          humanUnblockIds.add(issue.id);
           add(createItem({
             companyId,
+            actionability: "decision",
             sourceKind: "blocker_attention",
             subject: issueSubject(prefix, issueSummary ?? issue),
             whyNow: descriptor.action,
@@ -1511,6 +1550,8 @@ export function attentionService(db: Db, serviceOptions: AttentionServiceOptions
             detail: {
               kind: "blocker",
               blockingIssue: resolveBlockingIssue(issue, blockingIssues.get(issue.id)),
+              unblockDescriptor: descriptor,
+              ownerName: descriptor.owner === "board" ? "Board" : "You",
               images: issueImages(blockerImageMap, issue.id),
             },
           }));
@@ -1536,20 +1577,36 @@ export function attentionService(db: Db, serviceOptions: AttentionServiceOptions
 
       const blockedWorkCounts = await blockedWorkCountMap(db, companyId, [...terminalCandidates.keys()]);
       for (const [terminalIssueId, candidate] of terminalCandidates) {
+        // A concrete human-owned action already has a decision card.
+        if (humanUnblockIds.has(terminalIssueId) || coveredTerminalIds.has(terminalIssueId)) continue;
+        const routing = terminalRouting.get(terminalIssueId);
+        const descriptor = routing?.unblockDescriptor ?? null;
+        const owner = descriptor?.owner;
+        const agentOwnedWait = Boolean(owner && owner !== "board" && "agentId" in owner);
+        const parked = routing?.projectStatus === "backlog" || routing?.projectStatus === "planned";
+        const waiting = parked || agentOwnedWait || Boolean(descriptor);
+        const ownerName = owner === "board" ? "Board"
+          : owner && "agentId" in owner ? unblockOwnerNames.get(owner.agentId) ?? "Assigned agent"
+          : owner && "userId" in owner ? "Assigned user" : routing?.agentName ?? null;
         const blockedTaskCount = blockedWorkCounts.get(terminalIssueId) ?? 0;
         const taskLabel = blockedTaskCount === 1 ? "task" : "tasks";
         const dedupKey = `blocker:${terminalIssueId}`;
         add(createItem({
           companyId,
           sourceKind: "blocker_attention",
+          actionability: waiting ? "waiting" : "repair",
           subject: issueSubject(prefix, candidate.terminalSummary),
-          whyNow: candidate.state === "needs_attention"
-            ? `Blocks ${blockedTaskCount} ${taskLabel} and needs human attention.`
-            : `Blocks ${blockedTaskCount} ${taskLabel}; choose the next owner or action.`,
+          whyNow: parked
+            ? "This project's work is parked. Resume it only when the project is ready."
+            : descriptor
+              ? `Waiting on ${ownerName ?? "the recorded owner"}: ${excerpt(descriptor.action, 320)}`
+              : routing?.agentStatus === "error"
+                ? `${routing.agentName} cannot run. Inspect the agent failure before retrying this task.`
+                : blockedTaskCount > 0
+                  ? `Blocks ${blockedTaskCount} ${taskLabel}; inspect the stopped path and choose a repair owner.`
+                  : "This task has no recorded dependency or next action. Inspect its waiting or recovery state.",
           decisionVerbs: decisionVerbs(
-            { id: "unblock", label: "Unblock", description: "Repair or replace the stalled blocker path." },
-            { id: "reassign", label: "Reassign", description: "Assign the stalled blocker to a live owner." },
-            { id: "nudge", label: "Nudge", description: "Wake or prompt the current owner." },
+            { id: "inspect", label: "Inspect task", description: "Inspect the recorded waiting path and recovery state." },
           ),
           inlineResolvable: false,
           entryRule: `terminal blocker has a non-live blockerAttention.state = '${candidate.state}'`,
@@ -1565,6 +1622,10 @@ export function attentionService(db: Db, serviceOptions: AttentionServiceOptions
             kind: "blocker",
             blockingIssue: null,
             blockedTaskCount,
+            unblockDescriptor: descriptor,
+            ownerName,
+            repairAgentId: !waiting && routing?.agentStatus === "error" ? routing.assigneeAgentId : null,
+            failureReasonExcerpt: routing?.agentStatus === "error" ? excerpt(routing.errorReason, 320) : null,
             images: issueImages(blockerImageMap, terminalIssueId),
           },
         }));
@@ -1970,7 +2031,8 @@ export function attentionService(db: Db, serviceOptions: AttentionServiceOptions
         // today OR carry an explicit decide-by deadline due today/past. Counted
         // over the full ranked set (pre-pagination) so the sidebar badge stays
         // company-wide accurate even on a small first page.
-        deskBadgeCount: rankedItems.filter((item) => isNewToday(item, now) || isDecideNow(item, now)).length,
+        deskBadgeCount: rankedItems.filter((item) => attentionActionability(item) === "decision"
+          && (isNewToday(item, now) || isDecideNow(item, now))).length,
         nextCursor,
         countsBySourceKind,
         items,

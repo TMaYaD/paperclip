@@ -180,6 +180,7 @@ export {
   type ResponsibleUserDenialTone,
 } from "./responsible-user-denial.js";
 export type {
+  AttentionActionability,
   AttentionDecisionVerb,
   AttentionDetailImage,
   AttentionFeed,
@@ -198,7 +199,7 @@ export type {
   AttentionTriageAttribution,
   AttentionWorkspaceRef,
 } from "./types/attention.js";
-export { ATTENTION_SOURCE_KINDS } from "./types/attention.js";
+export { ATTENTION_SOURCE_KINDS, attentionActionability } from "./types/attention.js";
 export type {
   DecisionQueue,
   DecisionQueueItem,

@@ -14,7 +14,6 @@ import { useInboxDismissals } from "../hooks/useInboxBadge";
 import { queryKeys } from "../lib/queryKeys";
 import {
   ATTENTION_AGING_DAYS,
-  attentionIsAging,
   buildAttentionFilterOptions,
   defaultAttentionFilterState,
   filterAttentionItems,
@@ -25,6 +24,7 @@ import {
   loadAttentionSortOrder,
   loadCollapsedAttentionGroupKeys,
   buildDeskShelves,
+  partitionDecisionDesk,
   planAttentionRenderRows,
   resolveAttentionDateRange,
   saveAttentionFilters,
@@ -40,6 +40,7 @@ import {
 } from "../lib/attention";
 import { hasBlockingShortcutDialog, resolveAttentionQueueKeyAction } from "../lib/keyboardShortcuts";
 import { PageSkeleton } from "../components/PageSkeleton";
+import { DecisionOperationalShelf } from "../components/DecisionOperationalShelf";
 import { AttentionQueueRow } from "../components/AttentionQueueRow";
 import { DecisionsToolbar } from "../components/DecisionsToolbar";
 import { Curtain, AgingItemRow } from "../components/DecisionShelf";
@@ -226,8 +227,11 @@ export function WhatNeedsMe() {
 
   // Aging shelf (§4.4): items the server flags as idle past retention leave the
   // live desk for their own curtain, so today's desk shows only fresh decisions.
-  const agingItems = useMemo(() => activeItems.filter(attentionIsAging), [activeItems]);
-  const deskItems = useMemo(() => activeItems.filter((item) => !attentionIsAging(item)), [activeItems]);
+  const desk = useMemo(() => partitionDecisionDesk(activeItems), [activeItems]);
+  const agingItems = desk.aging;
+  const deskItems = desk.decisions;
+  const repairs = useMemo(() => filterAttentionItems(desk.repairs, filters), [desk.repairs, filters]);
+  const waiting = useMemo(() => filterAttentionItems(desk.waiting, filters), [desk.waiting, filters]);
   const snoozedItems = useMemo(
     () =>
       allItems.filter(
@@ -245,7 +249,7 @@ export function WhatNeedsMe() {
     [allItems, pendingRestore],
   );
 
-  const filterOptions = useMemo(() => buildAttentionFilterOptions(deskItems), [deskItems]);
+  const filterOptions = useMemo(() => buildAttentionFilterOptions(activeItems), [activeItems]);
 
   // Filter → sort → group, all client-side so switching re-buckets without a
   // refetch. In the default (ungrouped) view the desk groups by arrival —
@@ -630,6 +634,14 @@ export function WhatNeedsMe() {
             </>
           )}
 
+          {(["repair", "waiting"] as const).map((kind) => (
+            <DecisionOperationalShelf key={`${selectedCompanyId}:${kind}`} kind={kind}
+              items={kind === "repair" ? repairs : waiting} companyId={selectedCompanyId}
+              agentMap={agentMap} agents={agents} currentUserId={currentUserId}
+              expandedId={expandedId} onToggleExpand={handleToggleExpand}
+              onDismiss={handleDismiss} onSnooze={handleSnooze} />
+          ))}
+
           {snoozedItems.length > 0 && (
             <Curtain
               label="Snoozed"
@@ -804,11 +816,11 @@ function CaughtUpNote({ filtered }: { filtered: boolean }) {
   return (
     <div className="rounded-xl border border-dashed border-border py-10 text-center">
       <p className="text-sm font-medium text-foreground">
-        {filtered ? "No decisions match your filters." : "You're all caught up."}
+        {filtered ? "No decisions match your filters." : "No decisions need an answer."}
       </p>
-      {filtered && (
-        <p className="mt-1 text-xs text-muted-foreground">Adjust or clear the filters to see the rest.</p>
-      )}
+      <p className="mt-1 text-xs text-muted-foreground">
+        {filtered ? "Adjust or clear the filters to see the rest." : "Check Needs repair and Waiting below for operational work."}
+      </p>
     </div>
   );
 }
