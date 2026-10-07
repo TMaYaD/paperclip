@@ -114,9 +114,73 @@ describe("agent lifecycle commands", () => {
       ["GET", `http://localhost:3100/api/agents/${AGENT_ID}/instructions-bundle`],
       ["PATCH", `http://localhost:3100/api/agents/${AGENT_ID}/instructions-bundle`],
       ["GET", `http://localhost:3100/api/agents/${AGENT_ID}/instructions-bundle/file?path=AGENTS.md`],
+      ["GET", `http://localhost:3100/api/agents/${AGENT_ID}/instructions-bundle/file?path=AGENTS.md`],
       ["PUT", `http://localhost:3100/api/agents/${AGENT_ID}/instructions-bundle/file`],
       ["DELETE", `http://localhost:3100/api/agents/${AGENT_ID}/instructions-bundle/file?path=AGENTS.md`],
     ]);
+  });
+});
+
+describe("agent instructions-file:put base revision", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    delete process.env.PAPERCLIP_API_KEY;
+    delete process.env.PAPERCLIP_API_URL;
+    vi.spyOn(console, "log").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function putBody(fetchMock: ReturnType<typeof vi.fn>) {
+    const put = fetchMock.mock.calls.find((call) => call[1]?.method === "PUT");
+    return JSON.parse(String(put?.[1]?.body));
+  }
+
+  it("sends an explicit base revision without reading the entry", async () => {
+    const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(jsonResponse()));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await run(["agent", "instructions-file:put", AGENT_ID, "--path", "AGENTS.md", "--content", "hello",
+      "--base-revision-id", REVISION_ID]);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(putBody(fetchMock)).toMatchObject({ path: "AGENTS.md", content: "hello", baseRevisionId: REVISION_ID });
+  });
+
+  it("accepts 'null' as the base for a new entry", async () => {
+    const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(jsonResponse()));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await run(["agent", "instructions-file:put", AGENT_ID, "--path", "AGENTS.md", "--content", "hello",
+      "--base-revision-id", "null"]);
+
+    expect(putBody(fetchMock).baseRevisionId).toBeNull();
+  });
+
+  it("defaults the base to the current revision", async () => {
+    const fetchMock = vi.fn().mockImplementation((_url: string, init?: RequestInit) =>
+      Promise.resolve(jsonResponse(init?.method === "PUT" ? { ok: true } : { revision: { id: REVISION_ID } })));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await run(["agent", "instructions-file:put", AGENT_ID, "--path", "AGENTS.md", "--content", "hello"]);
+
+    expect(fetchMock.mock.calls.map((call) => [call[1]?.method ?? "GET", call[0]])).toEqual([
+      ["GET", `http://localhost:3100/api/agents/${AGENT_ID}/instructions-bundle/file?path=AGENTS.md`],
+      ["PUT", `http://localhost:3100/api/agents/${AGENT_ID}/instructions-bundle/file`],
+    ]);
+    expect(putBody(fetchMock).baseRevisionId).toBe(REVISION_ID);
+  });
+
+  it("uses a null base when the entry does not exist yet", async () => {
+    const fetchMock = vi.fn().mockImplementation((_url: string, init?: RequestInit) =>
+      Promise.resolve(init?.method === "PUT" ? jsonResponse() : jsonResponse({ error: "Not found" }, { status: 404 })));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await run(["agent", "instructions-file:put", AGENT_ID, "--path", "AGENTS.md", "--content", "hello"]);
+
+    expect(putBody(fetchMock).baseRevisionId).toBeNull();
   });
 });
 

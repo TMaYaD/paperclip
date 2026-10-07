@@ -564,8 +564,11 @@ npx paperclipai agent instructions-bundle <agent-id>
 npx paperclipai agent instructions-bundle:update <agent-id> --payload-json '{"mode":"managed"}'
 npx paperclipai agent instructions-file:get <agent-id> --path AGENTS.md
 npx paperclipai agent instructions-file:put <agent-id> --path AGENTS.md --content-file ./AGENTS.md
+npx paperclipai agent instructions-file:put <agent-id> --path AGENTS.md --content-file ./AGENTS.md --base-revision-id <revision-id>
 npx paperclipai agent instructions-file:delete <agent-id> --path AGENTS.md
 ```
+
+`instructions-file:put` sends the revision the edit is based on. Pass `--base-revision-id` with the `revision.id` from `instructions-file:get` (or `null` for a new entry) so a concurrent edit is rejected instead of overwritten. Without it, the command reads the current revision just before writing.
 
 Agent config, instructions, skills, project env, environment, secret, and workspace edits affect the next run. Active runs finish with the config they started with. When a saved session, reused workspace, or sandbox lease no longer matches the effective next-run config, Paperclip may start fresh execution and records non-sensitive freshness categories in run result JSON and workspace operation logs.
 
