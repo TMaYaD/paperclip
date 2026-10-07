@@ -82,6 +82,7 @@ interface AgentInstructionsFilePutOptions extends BaseClientOptions {
   path: string;
   content?: string;
   contentFile?: string;
+  baseRevisionId?: string;
   clearLegacyPromptTemplate?: boolean;
 }
 
@@ -693,14 +694,32 @@ export function registerAgentCommands(program: Command): void {
       .requiredOption("--path <path>", "Bundle-relative file path")
       .option("--content <text>", "File content")
       .option("--content-file <path>", "Read file content from disk")
+      .option(
+        "--base-revision-id <id>",
+        "Revision the edit is based on (from instructions-file:get, or 'null' for a new entry); defaults to the current revision",
+      )
       .option("--clear-legacy-prompt-template", "Clear legacy prompt template")
       .action(async (agentId: string, opts: AgentInstructionsFilePutOptions) => {
         try {
           const ctx = resolveCommandContext(opts);
           const content = opts.contentFile ? await fs.readFile(opts.contentFile, "utf8") : opts.content;
+          // The server rejects an entry-file write without the revision it is based on.
+          // Without an explicit base, read the current one, as `instructions-file:get` would.
+          let baseRevisionId: string | null;
+          if (opts.baseRevisionId !== undefined) {
+            baseRevisionId = opts.baseRevisionId === "null" ? null : opts.baseRevisionId;
+          } else {
+            const query = new URLSearchParams({ path: opts.path });
+            const current = await ctx.api.get<{ revision?: { id?: string } | null }>(
+              `${apiPath`/api/agents/${agentId}/instructions-bundle/file`}?${query.toString()}`,
+              { ignoreNotFound: true },
+            );
+            baseRevisionId = current?.revision?.id ?? null;
+          }
           const payload = upsertAgentInstructionsFileSchema.parse({
             path: opts.path,
             content,
+            baseRevisionId,
             clearLegacyPromptTemplate: Boolean(opts.clearLegacyPromptTemplate),
           });
           const result = await ctx.api.put(apiPath`/api/agents/${agentId}/instructions-bundle/file`, payload);
