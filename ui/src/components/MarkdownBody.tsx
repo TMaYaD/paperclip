@@ -1,5 +1,5 @@
 import { isValidElement, memo, useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, Copy, ExternalLink, WrapText } from "lucide-react";
 import Markdown, { defaultUrlTransform, type Components, type Options } from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -10,6 +10,8 @@ import { useTheme } from "../context/ThemeContext";
 import { useOptionalCompany } from "../context/CompanyContext";
 import { mentionChipInlineStyle, parseMentionChipHref } from "../lib/mention-chips";
 import { issuesApi } from "../api/issues";
+import { agentsApi } from "../api/agents";
+import { getCachedIssueDetail } from "../lib/issueDetailCache";
 import { queryKeys } from "../lib/queryKeys";
 import { parseIssueReferenceFromHref, remarkLinkIssueReferences } from "../lib/issue-reference";
 import { remarkLinkCaseReferences } from "../lib/case-reference";
@@ -40,9 +42,36 @@ import {
 import { normalizeExternalObjectHref } from "../lib/external-object-href";
 import { copyTextToClipboard } from "../lib/clipboard";
 import type {
+  Agent,
   ExternalObjectLivenessState,
   ExternalObjectStatusCategory,
 } from "@paperclipai/shared";
+
+function MarkdownAgentMention({ agentId, children, style }: {
+  agentId: string;
+  children: ReactNode;
+  style?: React.CSSProperties;
+}) {
+  const companyId = useOptionalCompany()?.selectedCompanyId;
+  // All mentions share the company list cache; never fetch one agent per chip.
+  const { data: agents } = useQuery<Agent[]>({
+    queryKey: queryKeys.agents.list(companyId ?? "__none__"),
+    queryFn: () => agentsApi.list(companyId!),
+    enabled: Boolean(companyId),
+    staleTime: 60_000,
+  });
+  const appearance = agents?.find((agent) => agent.id === agentId)?.appearance;
+  return (
+    <a
+      href={`/agents/${agentId}`}
+      className="paperclip-mention-chip paperclip-mention-chip--agent"
+      data-mention-kind="agent"
+      style={{ ...mergeWrapStyle(style), ...mentionChipInlineStyle({ kind: "agent", agentId, icon: null, appearance }) }}
+    >
+      {children}
+    </a>
+  );
+}
 
 /**
  * Host-resolved external-object metadata for inline markdown decoration.
@@ -107,13 +136,21 @@ let mermaidLoaderPromise: Promise<typeof import("mermaid").default> | null = nul
 
 function MarkdownIssueLink({
   issuePathId,
+  href,
   children,
 }: {
   issuePathId: string;
+  href: string;
   children: ReactNode;
 }) {
+  const queryClient = useQueryClient();
+  const [engaged, setEngaged] = useState(false);
   const { data } = useQuery({
     queryKey: queryKeys.issues.detail(issuePathId),
+    // A transcript can mention dozens of tasks. Their full detail projections
+    // are hover information, not prerequisites for reading this conversation.
+    enabled: engaged,
+    placeholderData: getCachedIssueDetail(queryClient, issuePathId),
     queryFn: () => issuesApi.get(issuePathId),
     staleTime: 60_000,
   });
@@ -125,8 +162,10 @@ function MarkdownIssueLink({
 
   return (
     <Link
-      to={`/issues/${identifier}`}
+      to={href}
       data-mention-kind="issue"
+      onPointerEnter={() => setEngaged(true)}
+      onFocus={() => setEngaged(true)}
       // Boxless inline mention: the unified status glyph + a regular-weight
       // underlined link, optically centered with the body text.
       className={cn("paperclip-markdown-issue-ref", "font-normal underline")}
@@ -846,7 +885,7 @@ function MarkdownBodyImpl({
       const issueRef = linkIssueReferences ? parseIssueReferenceFromHref(href) : null;
       if (issueRef) {
         return (
-          <MarkdownIssueLink issuePathId={issueRef.issuePathId}>
+          <MarkdownIssueLink issuePathId={issueRef.issuePathId} href={issueRef.href}>
             {linkChildren}
           </MarkdownIssueLink>
         );
@@ -859,6 +898,13 @@ function MarkdownBodyImpl({
 
       const parsed = href ? parseMentionChipHref(href) : null;
       if (parsed) {
+        if (parsed.kind === "agent") {
+          return (
+            <MarkdownAgentMention agentId={parsed.agentId} style={linkStyle as React.CSSProperties | undefined}>
+              {linkChildren}
+            </MarkdownAgentMention>
+          );
+        }
         const targetHref = parsed.kind === "project"
           ? `/projects/${parsed.projectId}`
           : parsed.kind === "issue"
@@ -867,9 +913,7 @@ function MarkdownBodyImpl({
               ? `/skills/${parsed.skillId}`
               : parsed.kind === "routine"
                 ? `/routines/${parsed.routineId}`
-                : parsed.kind === "user"
-                  ? "/company/settings/access"
-                  : `/agents/${parsed.agentId}`;
+                : "/company/settings/access";
         return (
           <a
             href={targetHref}

@@ -78,6 +78,7 @@ export const NativeSessionCleanupQuarantinedError =
   runner.NativeSessionCleanupQuarantinedError;
 export const NativeSessionProtocolIntegrityError =
   runner.NativeSessionProtocolIntegrityError;
+export const SemanticToolOutcomeUnknownError = runner.SemanticToolOutcomeUnknownError;
 export const PaperclipSemanticDispatcher = runner.PaperclipSemanticDispatcher;
 export const CAPABILITY_SEMANTIC_TOOL_CATALOG =
   runner.CAPABILITY_SEMANTIC_TOOL_CATALOG;
@@ -92,6 +93,7 @@ export const acpxRuntimeSessionDirectoryName =
 export const canonicalNativeRuntimeContextDigest =
   runner.canonicalNativeRuntimeContextDigest;
 export const createNativeSessionBackend = runner.createNativeSessionBackend;
+export const describeRunnerdNativeSessionBackend = runner.describeRunnerdNativeSessionBackend;
 export const createPaperclipRunnerAuthorizedToolSet =
   runner.createPaperclipRunnerAuthorizedToolSet;
 export const createRunnerdCodexTransport: (
@@ -126,6 +128,7 @@ export const validatePrpStructuredRunResult =
   runner.validatePrpStructuredRunResult;
 
 export const NativeProviderTerminalFailure = runner.NativeProviderTerminalFailure;
+export const nativeRestartInterruptedTurnId = runner.nativeRestartInterruptedTurnId;
 
 export const completeTerminatedRemoteNativeSessionCleanup = runner.completeTerminatedRemoteNativeSessionCleanup;
 export const completeTerminatedLocalNativeSessionCleanup = runner.completeTerminatedLocalNativeSessionCleanup;

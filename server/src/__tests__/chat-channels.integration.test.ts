@@ -198,7 +198,7 @@ const embeddedPostgresSupport = externalTestDatabaseUrl
   ? { supported: true }
   : await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported
-  ? describe.sequential
+  ? describe
   : describe.skip;
 
 if (!embeddedPostgresSupport.supported) {
@@ -1048,7 +1048,19 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
     try {
       await Promise.all([...fixtureServices].map((service) => service.shutdown()));
     } finally {
-      await retireFixtureState([...fixtureCompanies]);
+      const companyIds = [...fixtureCompanies];
+      await retireFixtureState(companyIds);
+      if (companyIds.length > 0) {
+        // Pausing an endpoint does not remove its rows from global recovery
+        // selectors. After every assertion and worker shutdown, settle leftover
+        // fixture work so later cases cannot claim its leases or retry its I/O.
+        await db.update(chatActions).set({ status: "cancelled" })
+          .where(and(inArray(chatActions.companyId, companyIds), notInArray(chatActions.status, ["processed", "cancelled"])));
+        await db.update(chatDeliveries).set({ state: "failed", nextAttemptAt: null })
+          .where(and(inArray(chatDeliveries.companyId, companyIds), inArray(chatDeliveries.state, ["received", "processing", "retry"])));
+        await db.update(chatPublications).set({ state: "cancelled", nextAttemptAt: null })
+          .where(and(inArray(chatPublications.companyId, companyIds), inArray(chatPublications.state, ["pending", "awaiting_consent", "streaming", "retry"])));
+      }
       fixtureServices.clear();
       fixtureCompanies.clear();
     }
@@ -1076,7 +1088,7 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
     await db.insert(companies).values({
       id: companyId,
       name: `Chat Test ${companyId.slice(0, 8)}`,
-      issuePrefix: `C${companyId.replaceAll("-", "").slice(0, 7).toUpperCase()}`,
+      issuePrefix: `C${companyId.replace(/-/g, "").toUpperCase()}`,
       requireBoardApprovalForNewAgents: false,
     });
     const now = new Date();

@@ -200,6 +200,7 @@ export { pluginWebhookDeliveries } from "./plugin_webhooks.js";
 export { pluginLogs } from "./plugin_logs.js";
 export { runIdentityContexts } from "./run_identity_contexts.js";
 export { connectionIntentDeliveries } from "./connection_intent_deliveries.js";
+export { resourceLifecycleEvents } from "./resource_lifecycle_events.js";
 
 export { toolActionDeliveries } from "./tool_action_deliveries.js";
 export { chatTeamsFileTransfers } from "./chat_teams_file_transfers.js";
@@ -214,3 +215,13 @@ export { announcementDismissals, announcementPublications } from "./announcement
 export { chatTaskHandoffs, chatCompletionDeliveries } from "./chat_completion_deliveries.js";
 
 export { agentInstructionRevisions, agentInstructionHeads, agentInstructionWorkingCopies } from "./agent_instruction_revisions.js";
+export { browserUseSettings, browserUseSessions, browserUseRuns, browserUseBrowsers } from "./browser_use.js";
+
+
+export * from "./company_skill_sources.js";
+export * from "./public_mcp.js";
+
+
+export * from "./ai_connection_routing.js";
+export { toolConnectionAppSnapshots } from "./tool_connection_app_snapshots.js";
+export { toolConnectionAppSyncs } from "./tool_connection_app_syncs.js";

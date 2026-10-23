@@ -25,7 +25,7 @@ suite("subscription pace migration", () => {
         await sql`INSERT INTO pace_budget_test.budget_policies (company_id, scope_type, scope_id, metric, provider, window_kind, amount, progressive, is_active) VALUES (${company}, 'company', ${company}, ${metric}, ${provider}, ${window}, ${amount}, ${progressive}, ${active})`;
       }
       const before = await sql`SELECT * FROM pace_budget_test.budget_policies`;
-      const migration = await readFile(new URL("./migrations/0291_dapper_lockheed.sql", import.meta.url), "utf8");
+      const migration = await readFile(new URL("./migrations/0308_dapper_lockheed.sql", import.meta.url), "utf8");
       await sql.begin(async (tx) => { for (const statement of migration.split("--> statement-breakpoint")) await tx.unsafe(statement); });
       const rows = await sql`SELECT * FROM pace_budget_test.budget_policies`;
       expect(rows).toHaveLength(7);
