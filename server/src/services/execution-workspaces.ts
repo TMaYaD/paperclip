@@ -1377,10 +1377,10 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
       .limit(100);
   }
 
-  async function assessDelivery(
-    workspace: ExecutionWorkspaceRow,
-    git: ExecutionWorkspaceCloseGitReadiness | null,
-  ) {
+  // Database-only half of the delivery assessment. The reaper runs it before any
+  // Git inspection, so a workspace whose issue tree is still open (or still in
+  // its cooldown) never spawns a Git process.
+  async function assessWorkspaceIssueTree(workspace: ExecutionWorkspaceRow) {
     const issueTree = await listWorkspaceIssueTree(workspace);
     const sourceIssue = issueTree.find((issue) => issue.id === workspace.sourceIssueId) ?? null;
     const sourceIssueTerminal = Boolean(sourceIssue && TERMINAL_ISSUE_STATUSES.has(sourceIssue.status));
@@ -1396,6 +1396,16 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
         cooldownAnchor = terminalAt;
       }
     }
+    return { sourceIssueTerminal, subtreeTerminal, cooldownAnchor };
+  }
+
+  async function assessDelivery(
+    workspace: ExecutionWorkspaceRow,
+    git: ExecutionWorkspaceCloseGitReadiness | null,
+    issueTreeAssessment?: Awaited<ReturnType<typeof assessWorkspaceIssueTree>>,
+  ) {
+    const { sourceIssueTerminal, subtreeTerminal, cooldownAnchor } =
+      issueTreeAssessment ?? await assessWorkspaceIssueTree(workspace);
     let mergedPullRequest = false;
     let pullRequestStateUnknown = false;
     const workspaceHeadSha = git?.repoRoot && git.workspacePath
@@ -2614,17 +2624,14 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
       };
 
       for (const workspace of candidates) {
-        const executionWorkspace = toExecutionWorkspace(workspace);
-        const { git, statusInspectionSucceeded } = await inspectGitCloseReadiness(executionWorkspace);
-        if (!statusInspectionSucceeded) {
-          result.skippedUndelivered += 1;
-          continue;
-        }
-        const assessment = await assessDelivery(workspace, git);
+        // Decide from the database first. Most candidates have an open issue
+        // tree or sit inside the cooldown, and the Git inspection below costs
+        // several process spawns per workspace on every 30s tick.
+        const issueTreeAssessment = await assessWorkspaceIssueTree(workspace);
         const reopenPending = metadataHasReopenPendingConsumption(
           workspace.metadata as Record<string, unknown> | null,
         );
-        if (!assessment.sourceIssueTerminal || !assessment.subtreeTerminal) {
+        if (!issueTreeAssessment.sourceIssueTerminal || !issueTreeAssessment.subtreeTerminal) {
           if (reopenPending) {
             // The source issue left the terminal state, so the reopen transition
             // committed. Clear the reopen-pending flag under the lifecycle lock so
@@ -2640,17 +2647,6 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
           result.skippedNonTerminalTree += 1;
           continue;
         }
-        if (assessment.workspaceDirty) {
-          result.skippedUndelivered += 1;
-          continue;
-        }
-        if (
-          assessment.deliveryState !== "merged_via_pr"
-          && assessment.deliveryState !== "merged_by_ancestry"
-        ) {
-          result.skippedUndelivered += 1;
-          continue;
-        }
         // Hold the archive during the cooldown window. The anchor is the most
         // recent terminal timestamp across the issue tree. A person can reopen
         // the work inside this window. A cooldown of 0 disables the check, so the
@@ -2662,10 +2658,28 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
           : null;
         if (
           cooldownCutoff
-          && assessment.cooldownAnchor
-          && assessment.cooldownAnchor.getTime() > cooldownCutoff.getTime()
+          && issueTreeAssessment.cooldownAnchor
+          && issueTreeAssessment.cooldownAnchor.getTime() > cooldownCutoff.getTime()
         ) {
           result.skippedCooldown += 1;
+          continue;
+        }
+        const executionWorkspace = toExecutionWorkspace(workspace);
+        const { git, statusInspectionSucceeded } = await inspectGitCloseReadiness(executionWorkspace);
+        if (!statusInspectionSucceeded) {
+          result.skippedUndelivered += 1;
+          continue;
+        }
+        const assessment = await assessDelivery(workspace, git, issueTreeAssessment);
+        if (assessment.workspaceDirty) {
+          result.skippedUndelivered += 1;
+          continue;
+        }
+        if (
+          assessment.deliveryState !== "merged_via_pr"
+          && assessment.deliveryState !== "merged_by_ancestry"
+        ) {
+          result.skippedUndelivered += 1;
           continue;
         }
         if (reopenPending) {

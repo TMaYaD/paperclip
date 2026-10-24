@@ -934,6 +934,51 @@ describeEmbeddedPostgres("executionWorkspaceService.getCloseReadiness", () => {
       expect(sweep).toMatchObject({ archived: 0, skippedCooldown: 1 });
       expect(await statusOf(seeded.executionWorkspaceId)).toBe("active");
     }, 20_000);
+
+    it("runs no git inspection for an open issue tree or a workspace inside the cooldown", async () => {
+      // The reaper inspects every candidate on each tick. Git inspection costs
+      // several process spawns per workspace, so the database checks must
+      // rule out open and cooling-down trees before any git runs.
+      const openTree = await seedAncestryTerminalWorkspace({ updatedAt: new Date(nowMs - DAY_MS) });
+      await db
+        .update(issues)
+        .set({ status: "in_progress" })
+        .where(eq(issues.id, openTree.sourceIssueId));
+      const coolingDown = await seedAncestryTerminalWorkspace({ updatedAt: new Date(nowMs - DAY_MS) });
+      await db
+        .update(issues)
+        .set({ completedAt: new Date(nowMs - DAY_MS) })
+        .where(eq(issues.id, coolingDown.sourceIssueId));
+      // Control: an eligible workspace must still be inspected and archived,
+      // which proves the spy observes the reaper's git inspection.
+      const eligible = await seedAncestryTerminalWorkspace({ updatedAt: new Date(nowMs - DAY_MS) });
+      await db
+        .update(issues)
+        .set({ completedAt: new Date(nowMs - 10 * DAY_MS) })
+        .where(eq(issues.id, eligible.sourceIssueId));
+
+      const originalRun = workspaceGitOperationScheduler.run.bind(workspaceGitOperationScheduler);
+      const inspectedPaths: string[] = [];
+      const gitSpy = vi.spyOn(workspaceGitOperationScheduler, "run")
+        .mockImplementation(async (input) => {
+          inspectedPaths.push(input.workspacePath);
+          return originalRun(input);
+        });
+
+      try {
+        const sweep = await cooldownService(7).sweepTerminalWorkspaces();
+
+        expect(sweep).toMatchObject({ archived: 1, skippedNonTerminalTree: 1, skippedCooldown: 1 });
+        expect(inspectedPaths).not.toContain(openTree.worktreePath);
+        expect(inspectedPaths).not.toContain(coolingDown.worktreePath);
+        expect(inspectedPaths).toContain(eligible.worktreePath);
+        expect(await statusOf(openTree.executionWorkspaceId)).toBe("active");
+        expect(await statusOf(coolingDown.executionWorkspaceId)).toBe("active");
+        expect(await statusOf(eligible.executionWorkspaceId)).toBe("archived");
+      } finally {
+        gitSpy.mockRestore();
+      }
+    }, 30_000);
   });
 
   it("does not treat an unrelated inbound issue mention as delivery evidence", async () => {
