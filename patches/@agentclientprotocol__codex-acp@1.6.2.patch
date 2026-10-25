@@ -13,7 +13,7 @@ diff --git a/package.json b/package.json
 diff --git a/dist/index.js b/dist/index.js
 --- a/dist/index.js
 +++ b/dist/index.js
-@@ -22128,6 +22128,32 @@ function toTokenCount(usage) {
+@@ -22128,6 +22128,47 @@ function toTokenCount(usage) {
      reasoningOutputTokens: usage.reasoningOutputTokens
    };
  }
@@ -25,10 +25,25 @@ diff --git a/dist/index.js b/dist/index.js
 +  }
 +  return out;
 +}
-+function paperclipAccumulateTurnUsage(sessionState, tokenUsage) {
++function paperclipIsPromptTurn(sessionState, turnId) {
++  if (typeof turnId !== "string" || !turnId) return true;
++  const turnIds = sessionState.paperclipPromptTurnIds;
++  if (!turnIds) return true;
++  if (turnId === sessionState.currentTurnId) turnIds.add(turnId);
++  return turnIds.has(turnId);
++}
++function paperclipAccumulateTurnUsage(sessionState, params) {
++  const tokenUsage = params.tokenUsage;
 +  const total = tokenUsage.total;
 +  const last = tokenUsage.last;
 +  if (!total || !last) return;
++  if (!paperclipIsPromptTurn(sessionState, params.turnId)) {
++    // Usage of another turn, e.g. the thread total replayed on resume. It is
++    // not this prompt's usage, but it is the pre-turn total until the prompt
++    // counts its first request.
++    if (sessionState.paperclipTurnUsageRaw == null) sessionState.paperclipTurnUsageBase = total;
++    return;
++  }
 +  const base = sessionState.paperclipTurnUsageBase;
 +  if (base == null || (total.totalTokens ?? 0) < (base.totalTokens ?? 0)) {
 +    // No pre-turn total (fresh process) or the counter reset: everything up to
@@ -46,7 +61,15 @@ diff --git a/dist/index.js b/dist/index.js
  function toPromptUsage(tokenCount) {
    return {
      totalTokens: tokenCount.totalTokens,
-@@ -23929,9 +23955,20 @@ var CodexEventHandler = class _CodexEventHandler {
+@@ -23891,6 +23932,7 @@ var CodexEventHandler = class _CodexEventHandler {
+         return await this.createErrorEvent(notification.params);
+       case "turn/started":
+         this.sessionState.currentTurnId = notification.params.turn.id;
++        this.sessionState.paperclipPromptTurnIds?.add(notification.params.turn.id);
+         await this.flushPendingErrors();
+         return null;
+       case "turn/completed":
+@@ -23929,9 +23971,20 @@ var CodexEventHandler = class _CodexEventHandler {
        case "item/mcpToolCall/progress":
          this.completeRetryIncidentOnTurnProgress();
          return this.createMcpToolProgressEvent(notification.params);
@@ -69,16 +92,16 @@ diff --git a/dist/index.js b/dist/index.js
        case "configWarning":
          return await this.createConfigWarningEvent(notification.params);
        case "warning":
-@@ -24602,6 +24639,8 @@ ${event.stdin}
+@@ -24602,6 +24655,8 @@ ${event.stdin}
      this.sessionState.lastTokenUsage = toTokenCount(params.tokenUsage.last);
      this.sessionState.totalTokenUsage = toTokenCount(params.tokenUsage.total);
      this.sessionState.modelContextWindow = params.tokenUsage.modelContextWindow;
 +    this.sessionState.paperclipTotalUsageRaw = params.tokenUsage.total;
-+    paperclipAccumulateTurnUsage(this.sessionState, params.tokenUsage);
++    paperclipAccumulateTurnUsage(this.sessionState, params);
    }
    createUsageUpdate(params) {
      this.handleTokenUsageUpdated(params);
-@@ -24610,10 +24649,12 @@ ${event.stdin}
+@@ -24610,10 +24665,12 @@ ${event.stdin}
      if (used == null || size == null || size <= 0) {
        return null;
      }
@@ -92,7 +115,7 @@ diff --git a/dist/index.js b/dist/index.js
      };
    }
    handleRateLimitsUpdated(params) {
-@@ -25341,7 +25382,7 @@ var CodexElicitationHandler = class {
+@@ -25341,7 +25398,7 @@ var CodexElicitationHandler = class {
    async handleElicitation(params) {
      try {
        const context = this.createMcpElicitationContext(params);
@@ -101,7 +124,7 @@ diff --git a/dist/index.js b/dist/index.js
          const response2 = await this.connection.request(
            methods.client.elicitation.create,
            this.buildElicitationRequest(params, context),
-@@ -25563,9 +25604,9 @@ var CodexElicitationHandler = class {
+@@ -25563,9 +25620,9 @@ var CodexElicitationHandler = class {
              toolCall: {
                toolCallId: context.correlatedCallId,
                kind: "execute",
@@ -113,7 +136,7 @@ diff --git a/dist/index.js b/dist/index.js
              },
              _meta: { is_mcp_tool_approval: true },
              options
-@@ -26986,6 +27027,20 @@ var DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1";
+@@ -26986,6 +27043,20 @@ var DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1";
  var SUPPORTED_GATEWAY_PROTOCOLS = {
    openai: "responses"
  };
@@ -134,7 +157,7 @@ diff --git a/dist/index.js b/dist/index.js
  var CodexAcpClient = class {
    codexClient;
    config;
-@@ -27288,6 +27343,7 @@ var CodexAcpClient = class {
+@@ -27288,6 +27359,7 @@ var CodexAcpClient = class {
      const response = await this.codexClient.threadResume({
        config: await this.createSessionConfig(request.cwd, additionalDirectories, request.mcpServers ?? []),
        cwd: request.cwd,
@@ -142,7 +165,7 @@ diff --git a/dist/index.js b/dist/index.js
        modelProvider: await this.getResumeModelProvider(),
        threadId: request.sessionId
      });
-@@ -27310,6 +27366,7 @@ var CodexAcpClient = class {
+@@ -27310,6 +27382,7 @@ var CodexAcpClient = class {
      const response = await this.codexClient.threadResume({
        config: await this.createSessionConfig(request.cwd, additionalDirectories, request.mcpServers ?? []),
        cwd: request.cwd,
@@ -150,7 +173,7 @@ diff --git a/dist/index.js b/dist/index.js
        modelProvider: await this.getResumeModelProvider(),
        threadId: request.sessionId
      });
-@@ -27337,6 +27394,7 @@ var CodexAcpClient = class {
+@@ -27337,6 +27410,7 @@ var CodexAcpClient = class {
      const response = await this.codexClient.threadStart({
        config: await this.createSessionConfig(request.cwd, additionalDirectories, request.mcpServers),
        modelProvider: this.getModelProvider(),
@@ -158,7 +181,7 @@ diff --git a/dist/index.js b/dist/index.js
        cwd: request.cwd
      });
      const codexModels = await this.fetchAvailableModels();
-@@ -27436,6 +27494,13 @@ var CodexAcpClient = class {
+@@ -27436,6 +27510,13 @@ var CodexAcpClient = class {
      });
      const mergedConfig = {
        ...mergeGatewayConfig(this.config, this.gatewayConfig),
@@ -172,7 +195,7 @@ diff --git a/dist/index.js b/dist/index.js
        projects: Object.fromEntries(sessionRoots.map((root) => [root, {
          trust_level: "trusted"
        }]))
-@@ -27449,7 +27514,7 @@ var CodexAcpClient = class {
+@@ -27449,7 +27530,7 @@ var CodexAcpClient = class {
        server: mcp
      }));
      let serversToConfigure = requestedServers;
@@ -181,7 +204,7 @@ diff --git a/dist/index.js b/dist/index.js
        const existingNames = await this.getConfigMcpServerNames(projectPath);
        serversToConfigure = requestedServers.filter((mcp) => !existingNames.has(mcp.name));
      }
-@@ -27484,13 +27549,14 @@ var CodexAcpClient = class {
+@@ -27484,13 +27565,14 @@ var CodexAcpClient = class {
      if (!cwd) {
        return;
      }
@@ -198,7 +221,7 @@ diff --git a/dist/index.js b/dist/index.js
        forceReload: true
      });
    }
-@@ -27599,7 +27665,7 @@ var CodexAcpClient = class {
+@@ -27599,7 +27681,7 @@ var CodexAcpClient = class {
        threadId: request.sessionId,
        input,
        approvalPolicy: agentMode.approvalPolicy,
@@ -207,7 +230,7 @@ diff --git a/dist/index.js b/dist/index.js
        summary: disableSummary ? "none" : "auto",
        effort,
        model: modelId.model,
-@@ -30613,6 +30679,9 @@ var CodexAcpServer = class _CodexAcpServer {
+@@ -30613,6 +30695,9 @@ var CodexAcpServer = class _CodexAcpServer {
                updatedGoal
              );
            }
@@ -217,7 +240,7 @@ diff --git a/dist/index.js b/dist/index.js
          } else if (methodRequest.params.action === "pause") {
            const goal = await this.runWithProcessCheck(() => this.codexAcpClient.setGoalStatus(sessionState.sessionId, "paused"));
            if (this.goalPublishIsCurrent(sessionState, sessionGeneration)) {
-@@ -32148,6 +32217,10 @@ Check ${configPath} and project .codex directories, especially their config.toml
+@@ -32148,6 +32233,11 @@ Check ${configPath} and project .codex directories, especially their config.toml
      let recoverableSessionFailure = sessionState.sessionFailure;
      sessionState.currentTurnId = null;
      sessionState.lastTokenUsage = null;
@@ -225,10 +248,11 @@ diff --git a/dist/index.js b/dist/index.js
 +    sessionState.paperclipTurnUsageCarry = null;
 +    sessionState.paperclipTurnUsageRaw = null;
 +    sessionState.paperclipTurnTokenUsage = null;
++    sessionState.paperclipPromptTurnIds = /* @__PURE__ */ new Set();
      const activePrompt = this.trackActivePrompt(params.sessionId);
      let pendingTurnStart = null;
      const ensurePendingTurnStart = () => {
-@@ -32281,7 +32354,7 @@ Check ${configPath} and project .codex directories, especially their config.toml
+@@ -32281,7 +32371,7 @@ Check ${configPath} and project .codex directories, especially their config.toml
          await clearRecoveredSessionFailure(eventHandler);
          return {
            stopReason: "end_turn",
@@ -237,7 +261,7 @@ diff --git a/dist/index.js b/dist/index.js
            _meta: this.buildQuotaMeta(sessionState)
          };
        }
-@@ -32455,7 +32528,7 @@ Check ${configPath} and project .codex directories, especially their config.toml
+@@ -32455,7 +32545,7 @@ Check ${configPath} and project .codex directories, especially their config.toml
        );
        return {
          stopReason: "end_turn",
@@ -246,7 +270,7 @@ diff --git a/dist/index.js b/dist/index.js
          _meta: this.buildQuotaMeta(sessionState)
        };
      } catch (err) {
-@@ -32560,7 +32633,7 @@ Check ${configPath} and project .codex directories, especially their config.toml
+@@ -32560,7 +32650,7 @@ Check ${configPath} and project .codex directories, especially their config.toml
    cancelledPromptResponse(sessionState) {
      return {
        stopReason: "cancelled",
@@ -255,7 +279,7 @@ diff --git a/dist/index.js b/dist/index.js
        _meta: this.buildQuotaMeta(sessionState)
      };
    }
-@@ -32571,7 +32644,7 @@ Check ${configPath} and project .codex directories, especially their config.toml
+@@ -32571,7 +32661,7 @@ Check ${configPath} and project .codex directories, especially their config.toml
      }
      return {
        stopReason: "end_turn",
@@ -264,16 +288,3 @@ diff --git a/dist/index.js b/dist/index.js
        _meta: {
          ...this.buildQuotaMeta(sessionState),
          ...failureMeta
-diff --git a/package.json b/package.json
-index f1c17b0671f927430cb0c3faded6ed71149270bb..c42ea22ccc05040dd8e4420c263d42d885a5d9ff 100644
---- a/package.json
-+++ b/package.json
-@@ -65,7 +65,7 @@
-   },
-   "dependencies": {
-     "@agentclientprotocol/sdk": "^1.3.0",
--    "@openai/codex": "^0.148.0",
-+    "@openai/codex": "0.160.0",
-     "diff": "^9.0.0",
-     "open": "^11.0.0",
-     "vscode-jsonrpc": "^9.0.1",
