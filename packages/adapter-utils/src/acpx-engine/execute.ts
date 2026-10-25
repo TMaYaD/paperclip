@@ -3244,10 +3244,45 @@ async function readRuntimeStatus(
 }
 
 /**
+ * What an ACP adapter's prompt-response usage covers.
+ *
+ * - "turn": every model request in the turn (claude-agent-acp).
+ * - "last_request": only the turn's final model request, i.e. the context
+ *   occupancy (stock codex-acp). Paperclip's codex-acp patch attaches the
+ *   turn's cumulative usage to each `usage_update` as `_meta.usage`, which
+ *   surfaces here as the event breakdown; without it the turn's usage is
+ *   unknown, and no token counts are reported.
+ */
+export type AcpxPromptUsageScope = "turn" | "last_request";
+
+const ACPX_PROMPT_USAGE_SCOPES: Record<string, AcpxPromptUsageScope> = {
+  codex: "last_request",
+};
+
+export function acpxPromptUsageScope(acpxAgent: string): AcpxPromptUsageScope {
+  return ACPX_PROMPT_USAGE_SCOPES[acpxAgent] ?? "turn";
+}
+
+/**
+ * The model the agent session actually ran on, for runs with no configured
+ * model. Codex reports `model[effort]`; the effort suffix is not part of the
+ * model ID. Placeholder IDs like "default" do not name a model.
+ */
+export function resolveAcpxRuntimeModel(...statuses: Array<AcpRuntimeStatus | null>): string | null {
+  for (const status of statuses) {
+    const raw = status?.models?.currentModelId;
+    if (typeof raw !== "string") continue;
+    const model = raw.trim().replace(/\[[^\]]*\]$/, "").trim();
+    if (model && model.toLowerCase() !== "default") return model;
+  }
+  return null;
+}
+
+/**
  * Fold the ACP runtime's post-turn usage into the adapter execution result
- * shape. The runtime persists the latest turn's token breakdown (adapters like
- * claude-agent-acp report per-turn accumulated usage in the prompt response),
- * so tokens are per-run. Cost is reported by agents as a cumulative session
+ * shape. The runtime persists the latest turn's token breakdown, so tokens are
+ * per-run when the adapter reports per-turn accumulated usage (see
+ * `AcpxPromptUsageScope`). Cost is reported by agents as a cumulative session
  * amount, so the per-run cost is the delta against the pre-turn snapshot; a
  * decrease means the agent process restarted and its counter reset, in which
  * case the post-turn amount alone covers this run.
@@ -3257,9 +3292,12 @@ export function summarizeAcpxTurnUsage(input: {
   postStatus: AcpRuntimeStatus | null;
   eventBreakdown: AcpRuntimeUsageBreakdown | null;
   eventCostUsd: number | null;
+  promptUsageScope?: AcpxPromptUsageScope;
 }): {
   usage: UsageSummary | null;
   usageDetail: Record<string, number> | null;
+  /** True when the turn's usage could not be measured; `usage` is null. */
+  usageUnknown: boolean;
   costUsd: number | null;
   cumulativeCostUsd: number | null;
 } {
@@ -3272,9 +3310,19 @@ export function summarizeAcpxTurnUsage(input: {
     preBreakdown != null &&
     postBreakdown != null &&
     usageBreakdownsEqual(preBreakdown, postBreakdown);
-  const breakdown = postBreakdownIsStale
-    ? input.eventBreakdown
-    : postBreakdown ?? input.eventBreakdown ?? null;
+  // A last-request adapter's prompt-response usage is only the final request,
+  // so its in-turn cumulative breakdown is the one authoritative source.
+  const lastRequestScope = input.promptUsageScope === "last_request";
+  // Without it the final request's usage is all there is, and it can
+  // undercount the turn several-fold, so report nothing rather than a guess.
+  // An unchanged persisted breakdown means the turn reported nothing new.
+  const usageUnknown = lastRequestScope && input.eventBreakdown == null
+    && postBreakdown != null && !postBreakdownIsStale;
+  const breakdown = usageUnknown
+    ? null
+    : postBreakdownIsStale || (lastRequestScope && input.eventBreakdown)
+      ? input.eventBreakdown
+      : postBreakdown ?? input.eventBreakdown ?? null;
   const inputTokens = Math.max(0, Math.floor(asNumber(breakdown?.inputTokens, 0)));
   const outputTokens = Math.max(0, Math.floor(asNumber(breakdown?.outputTokens, 0)));
   const cachedReadTokens = Math.max(0, Math.floor(asNumber(breakdown?.cachedReadTokens, 0)));
@@ -3318,7 +3366,7 @@ export function summarizeAcpxTurnUsage(input: {
         : cumulativeCostUsd;
   }
 
-  return { usage, usageDetail, costUsd, cumulativeCostUsd };
+  return { usage, usageDetail, usageUnknown, costUsd, cumulativeCostUsd };
 }
 
 type AcpxExecutionPhase =
@@ -5007,7 +5055,10 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
           postStatus: postTurnStatus,
           eventBreakdown,
           eventCostUsd,
+          promptUsageScope: acpxPromptUsageScope(prepared.acpxAgent),
         });
+        const resolvedModel = prepared.requestedModel
+          || resolveAcpxRuntimeModel(postTurnStatus, preTurnStatus);
         const failedTurn = terminal.status === "failed" || terminal.status === "cancelled" || timedOut;
         // ACPX can defer session/load until runTurn. Forget an unavailable
         // session so the next bounded turn receives the full task conversation.
@@ -5090,8 +5141,9 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
           sessionDisplayId: sessionHandle.agentSessionId ?? sessionHandle.backendSessionId ?? sessionHandle.runtimeSessionName,
           ...billingFields,
           ...referencedProjectStagingFailuresField,
-          model: prepared.requestedModel || null,
+          model: resolvedModel || null,
           ...(turnUsage.usage ? { usage: turnUsage.usage, usageBasis: "per_run" as const } : {}),
+          ...(turnUsage.usageUnknown ? { usageUnknown: true } : {}),
           costUsd: turnUsage.costUsd,
           resultJson: {
             status: channelLost ? "failed" : terminal.status,
@@ -5113,6 +5165,7 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
             requestedThinkingEffort: prepared.requestedThinkingEffort || null,
             fastMode: prepared.fastMode,
             ...(turnUsage.usageDetail ? { usage: turnUsage.usageDetail } : {}),
+            ...(turnUsage.usageUnknown ? { usageUnknown: true } : {}),
             ...(turnUsage.cumulativeCostUsd != null
               ? { cumulativeCostUsd: turnUsage.cumulativeCostUsd }
               : {}),

@@ -25784,6 +25784,7 @@ export function heartbeatService(
         const cacheAdjustedCostUsd = resolveCacheAdjustedCostUsd(adapterResult);
         const usageJson =
           normalizedUsage ||
+          adapterResult.usageUnknown === true ||
           adapterResult.costUsd != null ||
           cacheAdjustedCostUsd != null
             ? ({
@@ -25800,6 +25801,11 @@ export function heartbeatService(
                   : adapterResult.usageBasis === "per_run"
                     ? { usageSource: "per_run" }
                     : {}),
+                // The run used tokens, but the adapter could not measure
+                // them. Readers must not treat the absent counts as zero.
+                ...(adapterResult.usageUnknown === true
+                  ? { usageStatus: "unknown" }
+                  : {}),
                 ...((nextSessionState.displayId ??
                 nextSessionState.legacySessionId)
                   ? {
