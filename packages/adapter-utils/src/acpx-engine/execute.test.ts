@@ -26,12 +26,14 @@ vi.mock("@paperclipai/adapter-utils/execution-target", async (importActual) => {
   };
 });
 import {
+  acpxPromptUsageScope,
   buildAcpxRunSummary,
   createAcpxEngineExecutor,
   findAncestorBin,
   geminiVersionSupportsNativeAcpFlag,
   parseGeminiVersionParts,
   referencedSourceContentSignature,
+  resolveAcpxRuntimeModel,
   rewriteGeminiAcpFlagForVersion,
   summarizeAcpxTurnUsage,
   type AcpxEngineExecutorOptions,
@@ -1499,6 +1501,116 @@ describe("shared ACPX engine runtime behavior", () => {
     expect(result.costUsd).toBeCloseTo(0.31);
     expect(result.provider).toBe("acpx");
     expect(result.billingType).toBe("unknown");
+  });
+
+  it("records a multi-request Codex turn's cumulative usage and runtime model, not context occupancy", async () => {
+    const root = await makeTempRoot();
+    let statusCalls = 0;
+    // Stock codex-acp persists only the final request's usage (the context
+    // occupancy); the patched usage_update events carry the turn total.
+    const lastRequest = { inputTokens: 1070, outputTokens: 336, cachedReadTokens: 118528, totalTokens: 119934 };
+    const usageUpdates = [
+      { used: 247855, breakdown: { inputTokens: 7855, outputTokens: 400, cachedReadTokens: 240000, totalTokens: 248255 } },
+      // A compaction shrinks the context; the turn total keeps growing.
+      { used: 84279, breakdown: { inputTokens: 12134, outputTokens: 900, cachedReadTokens: 320000, totalTokens: 333034 } },
+      { used: 119934, breakdown: { inputTokens: 13204, outputTokens: 1236, cachedReadTokens: 438528, totalTokens: 452968 } },
+    ];
+    const execute = createAcpxEngineExecutor({
+      createRuntime: () => ({
+        ensureSession: async () => ({
+          backendSessionId: "backend-session",
+          agentSessionId: "agent-session",
+          runtimeSessionName: "runtime-session",
+        }),
+        getStatus: async () => {
+          statusCalls += 1;
+          return {
+            models: { currentModelId: "gpt-5.5[high]", availableModelIds: [] },
+            ...(statusCalls === 1 ? {} : { usage: { cumulative: lastRequest } }),
+          };
+        },
+        startTurn: () => ({
+          events: (async function* () {
+            for (const update of usageUpdates) {
+              yield {
+                type: "status",
+                text: `usage updated: ${update.used}/258400`,
+                tag: "usage_update",
+                used: update.used,
+                size: 258400,
+                breakdown: update.breakdown,
+              };
+            }
+            yield { type: "done", stopReason: "end_turn" };
+          })(),
+          result: Promise.resolve({ status: "completed", stopReason: "end_turn" }),
+          cancel: async () => {},
+        }),
+        close: async () => {},
+      }) as never,
+    });
+
+    const result = await execute({
+      runId: "run-codex-multi-request-usage",
+      agent: { id: "agent-1", companyId: "company-1", adapterType: "codex_local" },
+      runtime: {},
+      config: { agent: "codex", cwd: root, stateDir: path.join(root, "state") },
+      context: {},
+      onLog: async () => {},
+      onMeta: async () => {},
+    } as never);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.usage).toEqual({ inputTokens: 13204, outputTokens: 1236, cachedInputTokens: 438528 });
+    expect(result.usageBasis).toBe("per_run");
+    expect(result.usageEstimated).toBeUndefined();
+    expect(result.model).toBe("gpt-5.5");
+  });
+
+  it("marks Codex usage estimated when only the last request's usage is available", async () => {
+    const root = await makeTempRoot();
+    let statusCalls = 0;
+    const execute = createAcpxEngineExecutor({
+      createRuntime: () => ({
+        ensureSession: async () => ({
+          backendSessionId: "backend-session",
+          agentSessionId: "agent-session",
+          runtimeSessionName: "runtime-session",
+        }),
+        getStatus: async () => {
+          statusCalls += 1;
+          return statusCalls === 1
+            ? {}
+            : { usage: { cumulative: { inputTokens: 1070, outputTokens: 336, cachedReadTokens: 118528 } } };
+        },
+        startTurn: () => ({
+          events: (async function* () {
+            yield { type: "status", text: "usage updated: 119934/258400", tag: "usage_update", used: 119934, size: 258400 };
+            yield { type: "done", stopReason: "end_turn" };
+          })(),
+          result: Promise.resolve({ status: "completed", stopReason: "end_turn" }),
+          cancel: async () => {},
+        }),
+        close: async () => {},
+      }) as never,
+    });
+
+    const result = await execute({
+      runId: "run-codex-last-request-usage",
+      agent: { id: "agent-1", companyId: "company-1", adapterType: "codex_local" },
+      runtime: {},
+      config: { agent: "codex", model: "gpt-5.6-sol", cwd: root, stateDir: path.join(root, "state") },
+      context: {},
+      onLog: async () => {},
+      onMeta: async () => {},
+    } as never);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.usage).toEqual({ inputTokens: 1070, outputTokens: 336, cachedInputTokens: 118528 });
+    expect(result.usageEstimated).toBe(true);
+    expect((result.resultJson as Record<string, unknown>)?.usageEstimated).toBe(true);
+    // A configured model wins over the runtime-reported one.
+    expect(result.model).toBe("gpt-5.6-sol");
   });
 
   it.each([false, true])("relays Codex quota without failing runs when the observer throws (%s)", async (fails) => {
@@ -3345,6 +3457,66 @@ describe("summarizeAcpxTurnUsage no-report turns", () => {
     expect(summary.usageDetail).toBeNull();
     expect(summary.costUsd).toBeCloseTo(0.25);
     expect(summary.cumulativeCostUsd).toBeCloseTo(0.75);
+  });
+});
+
+describe("summarizeAcpxTurnUsage prompt usage scope", () => {
+  const lastRequest = { inputTokens: 1070, outputTokens: 336, cachedReadTokens: 118528 };
+  const turnTotal = { inputTokens: 13204, outputTokens: 1236, cachedReadTokens: 438528 };
+
+  it("prefers the in-turn cumulative breakdown over a last-request prompt response", () => {
+    const summary = summarizeAcpxTurnUsage({
+      preStatus: null,
+      postStatus: { usage: { cumulative: lastRequest } },
+      eventBreakdown: turnTotal,
+      eventCostUsd: null,
+      promptUsageScope: "last_request",
+    });
+    expect(summary.usage).toEqual({ inputTokens: 13204, outputTokens: 1236, cachedInputTokens: 438528 });
+    expect(summary.usageEstimated).toBe(false);
+  });
+
+  it("flags last-request usage as estimated when no cumulative breakdown arrived", () => {
+    const summary = summarizeAcpxTurnUsage({
+      preStatus: null,
+      postStatus: { usage: { cumulative: lastRequest } },
+      eventBreakdown: null,
+      eventCostUsd: null,
+      promptUsageScope: "last_request",
+    });
+    expect(summary.usage).toEqual({ inputTokens: 1070, outputTokens: 336, cachedInputTokens: 118528 });
+    expect(summary.usageEstimated).toBe(true);
+  });
+
+  it("keeps turn-scoped adapters on the persisted prompt-response usage", () => {
+    const summary = summarizeAcpxTurnUsage({
+      preStatus: null,
+      postStatus: { usage: { cumulative: turnTotal } },
+      eventBreakdown: lastRequest,
+      eventCostUsd: null,
+    });
+    expect(summary.usage).toEqual({ inputTokens: 13204, outputTokens: 1236, cachedInputTokens: 438528 });
+    expect(summary.usageEstimated).toBe(false);
+  });
+
+  it("scopes Codex prompt usage to the last request and other agents to the turn", () => {
+    expect(acpxPromptUsageScope("codex")).toBe("last_request");
+    expect(acpxPromptUsageScope("claude")).toBe("turn");
+    expect(acpxPromptUsageScope("custom")).toBe("turn");
+  });
+});
+
+describe("resolveAcpxRuntimeModel", () => {
+  it("strips the Codex effort suffix", () => {
+    expect(resolveAcpxRuntimeModel({ models: { currentModelId: "gpt-5.5[high]", availableModelIds: [] } })).toBe("gpt-5.5");
+  });
+
+  it("falls back to the next status and ignores placeholder IDs", () => {
+    expect(resolveAcpxRuntimeModel(
+      { models: { currentModelId: "default", availableModelIds: [] } },
+      { models: { currentModelId: "claude-opus-5-5", availableModelIds: [] } },
+    )).toBe("claude-opus-5-5");
+    expect(resolveAcpxRuntimeModel(null, {})).toBeNull();
   });
 });
 

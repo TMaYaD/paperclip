@@ -25800,6 +25800,11 @@ export function heartbeatService(
                   : adapterResult.usageBasis === "per_run"
                     ? { usageSource: "per_run" }
                     : {}),
+                // The tokens are a lower bound; readers must not treat them
+                // as an exact per-run total.
+                ...(adapterResult.usageEstimated === true
+                  ? { usageEstimated: true }
+                  : {}),
                 ...((nextSessionState.displayId ??
                 nextSessionState.legacySessionId)
                   ? {
