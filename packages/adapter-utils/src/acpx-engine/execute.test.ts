@@ -1563,11 +1563,11 @@ describe("shared ACPX engine runtime behavior", () => {
     expect(result.exitCode).toBe(0);
     expect(result.usage).toEqual({ inputTokens: 13204, outputTokens: 1236, cachedInputTokens: 438528 });
     expect(result.usageBasis).toBe("per_run");
-    expect(result.usageEstimated).toBeUndefined();
+    expect(result.usageUnknown).toBeUndefined();
     expect(result.model).toBe("gpt-5.5");
   });
 
-  it("marks Codex usage estimated when only the last request's usage is available", async () => {
+  it("reports Codex usage as unknown when only the last request's usage is available", async () => {
     const root = await makeTempRoot();
     let statusCalls = 0;
     const execute = createAcpxEngineExecutor({
@@ -1606,9 +1606,11 @@ describe("shared ACPX engine runtime behavior", () => {
     } as never);
 
     expect(result.exitCode).toBe(0);
-    expect(result.usage).toEqual({ inputTokens: 1070, outputTokens: 336, cachedInputTokens: 118528 });
-    expect(result.usageEstimated).toBe(true);
-    expect((result.resultJson as Record<string, unknown>)?.usageEstimated).toBe(true);
+    expect(result.usage).toBeUndefined();
+    expect(result.usageBasis).toBeUndefined();
+    expect(result.usageUnknown).toBe(true);
+    expect((result.resultJson as Record<string, unknown>)?.usageUnknown).toBe(true);
+    expect((result.resultJson as Record<string, unknown>)?.usage).toBeUndefined();
     // A configured model wins over the runtime-reported one.
     expect(result.model).toBe("gpt-5.6-sol");
   });
@@ -3473,10 +3475,10 @@ describe("summarizeAcpxTurnUsage prompt usage scope", () => {
       promptUsageScope: "last_request",
     });
     expect(summary.usage).toEqual({ inputTokens: 13204, outputTokens: 1236, cachedInputTokens: 438528 });
-    expect(summary.usageEstimated).toBe(false);
+    expect(summary.usageUnknown).toBe(false);
   });
 
-  it("flags last-request usage as estimated when no cumulative breakdown arrived", () => {
+  it("reports last-request usage as unknown when no cumulative breakdown arrived", () => {
     const summary = summarizeAcpxTurnUsage({
       preStatus: null,
       postStatus: { usage: { cumulative: lastRequest } },
@@ -3484,8 +3486,21 @@ describe("summarizeAcpxTurnUsage prompt usage scope", () => {
       eventCostUsd: null,
       promptUsageScope: "last_request",
     });
-    expect(summary.usage).toEqual({ inputTokens: 1070, outputTokens: 336, cachedInputTokens: 118528 });
-    expect(summary.usageEstimated).toBe(true);
+    expect(summary.usage).toBeNull();
+    expect(summary.usageDetail).toBeNull();
+    expect(summary.usageUnknown).toBe(true);
+  });
+
+  it("reports no usage, not unknown usage, for a last-request turn that reported nothing", () => {
+    const summary = summarizeAcpxTurnUsage({
+      preStatus: null,
+      postStatus: null,
+      eventBreakdown: null,
+      eventCostUsd: null,
+      promptUsageScope: "last_request",
+    });
+    expect(summary.usage).toBeNull();
+    expect(summary.usageUnknown).toBe(false);
   });
 
   it("keeps turn-scoped adapters on the persisted prompt-response usage", () => {
@@ -3496,7 +3511,7 @@ describe("summarizeAcpxTurnUsage prompt usage scope", () => {
       eventCostUsd: null,
     });
     expect(summary.usage).toEqual({ inputTokens: 13204, outputTokens: 1236, cachedInputTokens: 438528 });
-    expect(summary.usageEstimated).toBe(false);
+    expect(summary.usageUnknown).toBe(false);
   });
 
   it("scopes Codex prompt usage to the last request and other agents to the turn", () => {

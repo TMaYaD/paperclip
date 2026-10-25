@@ -101,11 +101,11 @@ export interface AdapterExecutionResult {
    */
   usageBasis?: "per_run" | "session_cumulative" | null;
   /**
-   * True when `usage` is known to undercount the run, e.g. an agent that only
-   * reported its final model request. The totals are a lower bound, not an
-   * exact count.
+   * True when the run's token usage could not be measured, e.g. an agent that
+   * only reported its final model request. `usage` is omitted rather than
+   * reported as an inaccurate count.
    */
-  usageEstimated?: boolean;
+  usageUnknown?: boolean;
   /**
    * Legacy single session id output. Prefer `sessionParams` + `sessionDisplayId`.
    */

@@ -3250,8 +3250,8 @@ async function readRuntimeStatus(
  * - "last_request": only the turn's final model request, i.e. the context
  *   occupancy (stock codex-acp). Paperclip's codex-acp patch attaches the
  *   turn's cumulative usage to each `usage_update` as `_meta.usage`, which
- *   surfaces here as the event breakdown; without it the usage is a lower
- *   bound and is reported as estimated.
+ *   surfaces here as the event breakdown; without it the turn's usage is
+ *   unknown, and no token counts are reported.
  */
 export type AcpxPromptUsageScope = "turn" | "last_request";
 
@@ -3296,8 +3296,8 @@ export function summarizeAcpxTurnUsage(input: {
 }): {
   usage: UsageSummary | null;
   usageDetail: Record<string, number> | null;
-  /** True when the tokens are known to undercount the turn. */
-  usageEstimated: boolean;
+  /** True when the turn's usage could not be measured; `usage` is null. */
+  usageUnknown: boolean;
   costUsd: number | null;
   cumulativeCostUsd: number | null;
 } {
@@ -3313,9 +3313,16 @@ export function summarizeAcpxTurnUsage(input: {
   // A last-request adapter's prompt-response usage is only the final request,
   // so its in-turn cumulative breakdown is the one authoritative source.
   const lastRequestScope = input.promptUsageScope === "last_request";
-  const breakdown = postBreakdownIsStale || (lastRequestScope && input.eventBreakdown)
-    ? input.eventBreakdown
-    : postBreakdown ?? input.eventBreakdown ?? null;
+  // Without it the final request's usage is all there is, and it can
+  // undercount the turn several-fold, so report nothing rather than a guess.
+  // An unchanged persisted breakdown means the turn reported nothing new.
+  const usageUnknown = lastRequestScope && input.eventBreakdown == null
+    && postBreakdown != null && !postBreakdownIsStale;
+  const breakdown = usageUnknown
+    ? null
+    : postBreakdownIsStale || (lastRequestScope && input.eventBreakdown)
+      ? input.eventBreakdown
+      : postBreakdown ?? input.eventBreakdown ?? null;
   const inputTokens = Math.max(0, Math.floor(asNumber(breakdown?.inputTokens, 0)));
   const outputTokens = Math.max(0, Math.floor(asNumber(breakdown?.outputTokens, 0)));
   const cachedReadTokens = Math.max(0, Math.floor(asNumber(breakdown?.cachedReadTokens, 0)));
@@ -3359,9 +3366,7 @@ export function summarizeAcpxTurnUsage(input: {
         : cumulativeCostUsd;
   }
 
-  const usageEstimated = lastRequestScope && usage != null && input.eventBreakdown == null;
-
-  return { usage, usageDetail, usageEstimated, costUsd, cumulativeCostUsd };
+  return { usage, usageDetail, usageUnknown, costUsd, cumulativeCostUsd };
 }
 
 type AcpxExecutionPhase =
@@ -5138,7 +5143,7 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
           ...referencedProjectStagingFailuresField,
           model: resolvedModel || null,
           ...(turnUsage.usage ? { usage: turnUsage.usage, usageBasis: "per_run" as const } : {}),
-          ...(turnUsage.usageEstimated ? { usageEstimated: true } : {}),
+          ...(turnUsage.usageUnknown ? { usageUnknown: true } : {}),
           costUsd: turnUsage.costUsd,
           resultJson: {
             status: channelLost ? "failed" : terminal.status,
@@ -5160,7 +5165,7 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
             requestedThinkingEffort: prepared.requestedThinkingEffort || null,
             fastMode: prepared.fastMode,
             ...(turnUsage.usageDetail ? { usage: turnUsage.usageDetail } : {}),
-            ...(turnUsage.usageEstimated ? { usageEstimated: true } : {}),
+            ...(turnUsage.usageUnknown ? { usageUnknown: true } : {}),
             ...(turnUsage.cumulativeCostUsd != null
               ? { cumulativeCostUsd: turnUsage.cumulativeCostUsd }
               : {}),
