@@ -4057,6 +4057,64 @@ describe("realizeExecutionWorkspace", () => {
     });
   }, 10_000);
 
+  it("reports a shared local_fs session as cleaned while preserving the project checkout", async () => {
+    const repoRoot = await createTempRepo();
+    const headBefore = await readGit(repoRoot, ["rev-parse", "HEAD"]);
+
+    const cleanup = await cleanupExecutionWorkspaceArtifacts({
+      workspace: {
+        id: "execution-workspace-shared",
+        cwd: repoRoot,
+        providerType: "local_fs",
+        providerRef: null,
+        branchName: null,
+        repoUrl: null,
+        baseRef: null,
+        projectId: "project-1",
+        projectWorkspaceId: "workspace-1",
+        sourceIssueId: "issue-1",
+        metadata: null,
+      },
+      projectWorkspace: {
+        cwd: repoRoot,
+        cleanupCommand: null,
+      },
+    });
+
+    expect(cleanup.cleaned).toBe(true);
+    expect(cleanup.warnings).toEqual([]);
+    expect(existsSync(path.join(repoRoot, ".git"))).toBe(true);
+    expect(await readGit(repoRoot, ["rev-parse", "HEAD"])).toBe(headBefore);
+  });
+
+  it("still fails cleanup when a runtime-owned local_fs path contains the project workspace", async () => {
+    const repoRoot = await createTempRepo();
+
+    const cleanup = await cleanupExecutionWorkspaceArtifacts({
+      workspace: {
+        id: "execution-workspace-local",
+        cwd: repoRoot,
+        providerType: "local_fs",
+        providerRef: null,
+        branchName: null,
+        repoUrl: null,
+        baseRef: null,
+        projectId: "project-1",
+        projectWorkspaceId: "workspace-1",
+        sourceIssueId: "issue-1",
+        metadata: { createdByRuntime: true },
+      },
+      projectWorkspace: {
+        cwd: repoRoot,
+        cleanupCommand: null,
+      },
+    });
+
+    expect(cleanup.cleaned).toBe(false);
+    expect(cleanup.warnings[0]).toContain("Refusing to remove path");
+    expect(existsSync(path.join(repoRoot, ".git"))).toBe(true);
+  });
+
   it("records teardown and cleanup operations when a recorder is provided", async () => {
     const repoRoot = await createTempRepo();
     const { recorder, operations } = createWorkspaceOperationRecorderDouble();

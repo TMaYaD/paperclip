@@ -4221,8 +4221,13 @@ export async function cleanupExecutionWorkspaceArtifacts(input: {
     }
   }
 
+  // A local directory the runtime did not create (for example the project
+  // checkout behind a shared workspace session) is preserved by design, so
+  // leaving it in place is a successful cleanup rather than a failed one.
+  const preservedByDesign = input.workspace.providerType === "local_fs" && !createdByRuntime;
   const cleaned =
     !workspacePath ||
+    preservedByDesign ||
     !(await directoryExists(workspacePath));
 
   return {
