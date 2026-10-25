@@ -12,6 +12,7 @@ const mockExecutionWorkspaceService = vi.hoisted(() => ({
   getCloseReadiness: vi.fn(),
   archiveWorkspaceUnderLifecycleLock: vi.fn(),
   fenceClosedWorkspaceDestruction: vi.fn(),
+  applyClosedWorkspaceCleanupOutcome: vi.fn(),
   reconcileExecutionWorkspaceBranch: vi.fn(),
   update: vi.fn(),
 }));
@@ -544,5 +545,60 @@ describe("execution workspace routes", () => {
     expect(mockExecutionWorkspaceService.fenceClosedWorkspaceDestruction).toHaveBeenCalledTimes(1);
     // The reopen keeps its reusable leases because the fence skipped the destroy.
     expect(mockEnvironmentRuntimeService.destroyReusableSandboxLeases).not.toHaveBeenCalled();
+  });
+  it("keeps the requested reason and explains a cleanup_failed archive", async () => {
+    // A cleanup that leaves the directory in place with no warnings used to
+    // write a null cleanupReason over the caller's reason.
+    const archivedWorkspace = {
+      id: "workspace-1",
+      companyId: "company-1",
+      sourceIssueId: "issue-1",
+      status: "archived",
+      mode: "isolated_workspace",
+      projectWorkspaceId: null,
+      projectId: null,
+      cwd: "/tmp/worktree",
+    };
+    mockExecutionWorkspaceService.getById.mockResolvedValue({
+      ...archivedWorkspace,
+      status: "active",
+    });
+    mockExecutionWorkspaceService.getCloseReadiness.mockResolvedValue({
+      state: "ready",
+      blockingReasons: [],
+    });
+    mockExecutionWorkspaceService.archiveWorkspaceUnderLifecycleLock.mockResolvedValue({
+      outcome: "archived",
+      workspace: archivedWorkspace,
+      capturedGeneration: 3,
+    });
+    mockWorkspaceRuntimeTeardown.cleanupExecutionWorkspaceArtifacts.mockResolvedValueOnce({
+      cleanedPath: "/tmp/worktree",
+      cleaned: false,
+      warnings: [],
+    } as never);
+    mockExecutionWorkspaceService.fenceClosedWorkspaceDestruction.mockImplementation(
+      async ({ destroy }: { destroy: () => Promise<unknown> }) => ({
+        skippedReopened: false,
+        result: await destroy(),
+      }),
+    );
+    mockExecutionWorkspaceService.applyClosedWorkspaceCleanupOutcome.mockResolvedValue({
+      ...archivedWorkspace,
+      status: "cleanup_failed",
+    });
+
+    const res = await request(createApp())
+      .patch("/api/execution-workspaces/workspace-1")
+      .send({ status: "archived", cleanupReason: "issue_terminal_shared_session" });
+
+    expect(res.status).toBe(200);
+    expect(mockExecutionWorkspaceService.applyClosedWorkspaceCleanupOutcome).toHaveBeenCalledWith(
+      expect.objectContaining({
+        markCleanupFailed: true,
+        cleanupReason:
+          "issue_terminal_shared_session | Workspace directory still exists after cleanup: /tmp/worktree",
+      }),
+    );
   });
 });

@@ -1311,7 +1311,15 @@ export function executionWorkspaceRoutes(db: Db, opts: { pluginWorkerManager?: P
               id,
               closedAt,
               capturedGeneration,
-              cleanupReason: cleanupWarnings.length > 0 ? cleanupWarnings.join(" | ") : null,
+              // Keep the caller's reason and say why cleanup failed, so a
+              // cleanup_failed row never ends up with an empty reason.
+              cleanupReason: [
+                typeof req.body.cleanupReason === "string" ? req.body.cleanupReason : null,
+                ...cleanupWarnings,
+                ...(cleanupResult.cleaned
+                  ? []
+                  : [`Workspace directory still exists after cleanup: ${cleanupResult.cleanedPath}`]),
+              ].filter(Boolean).join(" | ") || null,
               markCleanupFailed: !cleanupResult.cleaned,
             });
             if (applied) {
