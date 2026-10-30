@@ -483,6 +483,42 @@ describe("codex_local ACP lane", () => {
     });
   });
 
+  it("selects the full-access codex-acp mode by default, matching the CLI bypass default", () => {
+    expect(buildCodexAcpConfig({})).toMatchObject({
+      env: { INITIAL_AGENT_MODE: "agent-full-access" },
+    });
+    expect(buildCodexAcpConfig({ dangerouslyBypassApprovalsAndSandbox: true })).toMatchObject({
+      env: { INITIAL_AGENT_MODE: "agent-full-access" },
+    });
+  });
+
+  it.each([
+    { dangerouslyBypassApprovalsAndSandbox: false },
+    { extraArgs: ["--sandbox", "workspace-write"] },
+    { extraArgs: ["-c", "approval_policy=on-request"] },
+  ])("keeps the sandboxed codex-acp mode when the agent opts into a sandbox %j", (config) => {
+    expect(buildCodexAcpConfig(config)).toMatchObject({
+      env: { INITIAL_AGENT_MODE: "agent" },
+    });
+  });
+
+  it.each([
+    { dangerouslyBypassApprovalsAndSandbox: true, env: { PAPERCLIP_RUNNER_NETWORK_ACCESS: "disabled" } },
+    { dangerouslyBypassApprovalsAndSandbox: true, env: { PAPERCLIP_CODEX_ACP_NETWORK_ACCESS: "false" } },
+    { dangerouslyBypassApprovalsAndSandbox: true, extraArgs: ["-c", "sandbox_workspace_write.network_access=false"] },
+    { env: { INITIAL_AGENT_MODE: "agent-full-access", PAPERCLIP_RUNNER_NETWORK_ACCESS: "disabled" } },
+  ])("never grants full access when network is denied %j", (config) => {
+    expect(buildCodexAcpConfig(config)).toMatchObject({
+      env: { INITIAL_AGENT_MODE: "agent" },
+    });
+  });
+
+  it("keeps an explicitly configured codex-acp mode", () => {
+    expect(buildCodexAcpConfig({ env: { INITIAL_AGENT_MODE: "read-only" } })).toMatchObject({
+      env: { INITIAL_AGENT_MODE: "read-only" },
+    });
+  });
+
   it("maps Codex config to the ACPX Codex target", () => {
     expect(buildCodexAcpConfig({
       engine: "acp",

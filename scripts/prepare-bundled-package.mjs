@@ -442,6 +442,16 @@ export function prepareBundledPackage(sourceDir, destinationDir, { sourceRoot = 
     }
   }
 
+  if (bundledDependencies.includes("@agentclientprotocol/codex-acp")) {
+    const codexAcpRuntime = readFileSync(
+      resolve(destinationDir, "node_modules/@agentclientprotocol/codex-acp/dist/index.js"),
+      "utf8",
+    );
+    if (!codexAcpRuntime.includes("paperclipSandboxPolicy")) {
+      throw new Error("staged @agentclientprotocol/codex-acp runtime is missing the repository patch");
+    }
+  }
+
   if (bundledDependencies.includes("embedded-postgres")) {
     const embeddedPostgresSource = readFileSync(
       resolve(destinationDir, "node_modules/embedded-postgres/dist/index.js"),

@@ -32,6 +32,32 @@ function formatFastModeSupportedModels(): string {
   return `${CODEX_LOCAL_FAST_MODE_SUPPORTED_MODELS.join(", ")} or manually configured model IDs`;
 }
 
+/**
+ * Decide whether Codex runs without approvals or a sandbox. Shared by the CLI
+ * and ACP engines so the same agent config gets the same sandbox on both.
+ */
+export function resolveCodexSandboxBypass(
+  config: unknown,
+  options: { networkAccess?: boolean } = {},
+): { bypass: boolean; explicitSandbox: boolean } {
+  const record = asRecord(config);
+  const extraArgs = readExtraArgs(record);
+  // Explicit CLI modes/profiles remain deliberate overrides. An omitted
+  // setting uses the same full-auto default as agent creation and onboarding.
+  const explicitSandbox = extraArgs.some((arg) =>
+    /^(--sandbox(?:=|$)|-s|--profile(?:=|$)|-p|--full-auto$|--yolo$|--dangerously-bypass-approvals-and-sandbox$)/.test(arg)
+    || /^(?:(?:--config=|-c=?)\s*)?(?:sandbox_mode|profile)\s*=/.test(arg),
+  );
+  const explicitPermissionRestriction = extraArgs.some((arg) =>
+    /^(?:(?:--config=|-c=?)\s*)?(?:approval_policy\s*=|sandbox_workspace_write\.network_access\s*=\s*false)/.test(arg),
+  );
+  const bypass = asBoolean(
+    record.dangerouslyBypassApprovalsAndSandbox,
+    asBoolean(record.dangerouslyBypassSandbox, !explicitSandbox && !explicitPermissionRestriction && options.networkAccess !== false && DEFAULT_CODEX_LOCAL_BYPASS_APPROVALS_AND_SANDBOX),
+  );
+  return { bypass, explicitSandbox };
+}
+
 export function buildCodexExecArgs(
   config: unknown,
   options: {
@@ -50,19 +76,7 @@ export function buildCodexExecArgs(
   const fastModeRequested = asBoolean(record.fastMode, false);
   const fastModeApplied = fastModeRequested && isCodexLocalFastModeSupported(model);
   const extraArgs = readExtraArgs(record);
-  // Explicit CLI modes/profiles remain deliberate overrides. An omitted
-  // setting uses the same full-auto default as agent creation and onboarding.
-  const explicitSandbox = extraArgs.some((arg) =>
-    /^(--sandbox(?:=|$)|-s|--profile(?:=|$)|-p|--full-auto$|--yolo$|--dangerously-bypass-approvals-and-sandbox$)/.test(arg)
-    || /^(?:(?:--config=|-c=?)\s*)?(?:sandbox_mode|profile)\s*=/.test(arg),
-  );
-  const explicitPermissionRestriction = extraArgs.some((arg) =>
-    /^(?:(?:--config=|-c=?)\s*)?(?:approval_policy\s*=|sandbox_workspace_write\.network_access\s*=\s*false)/.test(arg),
-  );
-  const bypass = asBoolean(
-    record.dangerouslyBypassApprovalsAndSandbox,
-    asBoolean(record.dangerouslyBypassSandbox, !explicitSandbox && !explicitPermissionRestriction && options.networkAccess !== false && DEFAULT_CODEX_LOCAL_BYPASS_APPROVALS_AND_SANDBOX),
-  );
+  const { bypass, explicitSandbox } = resolveCodexSandboxBypass(record, options);
   const args = ["exec", "--json"];
   if (!bypass && !explicitSandbox) {
     args.push("-c", 'sandbox_mode="workspace-write"');
