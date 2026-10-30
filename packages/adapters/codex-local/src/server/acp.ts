@@ -50,6 +50,11 @@ import {
 } from "./codex-home.js";
 import { ADAPTER_AUTH_MISSING_CHECK_CODE } from "./auth-check.js";
 import { checkCodexCliVersionForModel } from "./cli-version.js";
+import { resolveCodexSandboxBypass } from "./codex-args.js";
+
+// codex-acp mode ids, selected through its INITIAL_AGENT_MODE env var.
+const CODEX_ACP_FULL_ACCESS_MODE = "agent-full-access";
+const CODEX_ACP_SANDBOXED_MODE = "agent";
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const packageRootDir = path.resolve(moduleDir, "../..");
@@ -149,9 +154,26 @@ export function buildCodexAcpConfig(config: Record<string, unknown>): Record<str
     if (match) networkAccess = match[1] === "true";
   }
 
+  // codex-acp sends its mode preset's sandbox policy on every turn, overriding
+  // Codex config. Its sandboxed presets have no network, so the mode is the
+  // only upstream-supported control: full access when the agent bypasses the
+  // sandbox, as the CLI engine does. Network denial always wins.
+  const networkAllowed = networkAccess && env.PAPERCLIP_RUNNER_NETWORK_ACCESS !== "disabled";
+  const { bypass } = resolveCodexSandboxBypass(config, { networkAccess: networkAllowed });
+  let initialAgentMode =
+    firstNonEmptyString(env.INITIAL_AGENT_MODE) ??
+    (bypass ? CODEX_ACP_FULL_ACCESS_MODE : CODEX_ACP_SANDBOXED_MODE);
+  if (!networkAllowed && initialAgentMode === CODEX_ACP_FULL_ACCESS_MODE) {
+    initialAgentMode = CODEX_ACP_SANDBOXED_MODE;
+  }
+
   return {
     ...config,
-    env: { ...env, PAPERCLIP_CODEX_ACP_NETWORK_ACCESS: String(networkAccess) },
+    env: {
+      ...env,
+      PAPERCLIP_CODEX_ACP_NETWORK_ACCESS: String(networkAccess),
+      INITIAL_AGENT_MODE: initialAgentMode,
+    },
     agent: "codex",
     mode,
     permissionMode,
