@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(/Users/paperclipai/gitmon/paperclip/.claude/worktrees/merge-upstream-v2026.1023.0/packages/adapter-utils/scripts/paperclip-issue-update.sh:*)",
+      "Bash(/Users/paperclipai/gitmon/paperclip/.claude/worktrees/merge-upstream-v2026.1023.0/packages/adapter-utils/scripts/paperclip:*)",
+      "Bash(curl:*)",
+      "Bash(env)",
+      "Bash(env:*)"
+    ],
+    "additionalDirectories": [
+      "/Users/paperclipai/.paperclip/instances/default/companies/company-1",
+      "/Users/paperclipai/.paperclip/instances/default/companies/company-1/acp-engine/agents/agent-1",
+      "/var/folders/jp/fjnwkfkd1mg7qpbbbtffc2t00000gp/T/paperclip-acpx-skills-0uNlfr/state",
+      "/var/folders/jp/fjnwkfkd1mg7qpbbbtffc2t00000gp/T/paperclip-acpx-skills-9DwtPN/state",
+      "/var/folders/jp/fjnwkfkd1mg7qpbbbtffc2t00000gp/T/paperclip-acpx-skills-9nc09Q/state",
+      "/var/folders/jp/fjnwkfkd1mg7qpbbbtffc2t00000gp/T/paperclip-acpx-skills-A8WIyU/state",
+      "/var/folders/jp/fjnwkfkd1mg7qpbbbtffc2t00000gp/T/paperclip-acpx-skills-G2VJF7/state",
+      "/var/folders/jp/fjnwkfkd1mg7qpbbbtffc2t00000gp/T/paperclip-acpx-skills-OODIuH/state",
+      "/var/folders/jp/fjnwkfkd1mg7qpbbbtffc2t00000gp/T/paperclip-acpx-skills-S2flRf/state",
+      "/var/folders/jp/fjnwkfkd1mg7qpbbbtffc2t00000gp/T/paperclip-acpx-skills-kAKpvI/state",
+      "/var/folders/jp/fjnwkfkd1mg7qpbbbtffc2t00000gp/T/paperclip-acpx-skills-ofqwm8/state",
+      "/var/folders/jp/fjnwkfkd1mg7qpbbbtffc2t00000gp/T/paperclip-acpx-skills-qQkTxQ/state"
+    ],
+    "defaultMode": "default"
+  }
+}

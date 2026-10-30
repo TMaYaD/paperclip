@@ -25,8 +25,10 @@ export interface BudgetPolicy {
   progressive: boolean;
   /** Progressive pace: percent/day for weekly windows, percent/hour for sessions. */
   pacePercent?: number | null;
+  reservationCents?: string;
   warnPercent: number;
   hardStopEnabled: boolean;
+  unpricedUsagePolicy: "block" | "allow";
   notifyEnabled: boolean;
   isActive: boolean;
   createdByUserId: string | null;
@@ -73,7 +75,11 @@ export interface BudgetPolicySummary {
    * until a reset is reported (`releasedAmount` then equals `amount`).
    */
   releaseWindowUnknown?: boolean;
+  reservationCents?: string;
   observedAmount: number;
+  observedAmountExact?: string;
+  unpricedEventCount: number;
+  pendingRunCount: number;
   remainingAmount: number;
   utilizationPercent: number;
   /**
@@ -101,6 +107,7 @@ export interface BudgetPolicySummary {
   usageHeld?: boolean;
   warnPercent: number;
   hardStopEnabled: boolean;
+  unpricedUsagePolicy: "block" | "allow";
   notifyEnabled: boolean;
   isActive: boolean;
   status: "ok" | "warning" | "hard_stop";
@@ -147,13 +154,15 @@ export interface BudgetPolicyUpsertInput {
   scopeId: string;
   metric?: BudgetMetric;
   windowKind?: BudgetWindowKind;
-  amount: number;
+  amount?: number;
+  reservationCents?: string | number;
   /** Omit to keep the stored value on an existing policy. */
   progressive?: boolean;
   /** Progressive pace: percent/day for weekly windows, percent/hour for sessions. */
   pacePercent?: number | null;
   warnPercent?: number;
   hardStopEnabled?: boolean;
+  unpricedUsagePolicy?: "block" | "allow";
   notifyEnabled?: boolean;
   isActive?: boolean;
 }
