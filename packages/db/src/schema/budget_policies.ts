@@ -1,4 +1,5 @@
-import { boolean, doublePrecision, index, integer, pgTable, text, timestamp, uuid, uniqueIndex } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
+import { check, boolean, doublePrecision, index, integer, pgTable, text, timestamp, uuid, uniqueIndex, numeric } from "drizzle-orm/pg-core";
 import { companies } from "./companies.js";
 
 export const budgetPolicies = pgTable(
@@ -17,16 +18,21 @@ export const budgetPolicies = pgTable(
     progressive: boolean("progressive").notNull().default(false),
     // Percent per day for weekly rules; per hour for session rules.
     pacePercent: doublePrecision("pace_percent"),
+    reservationCents: numeric("reservation_cents", { precision: 24, scale: 7 }).notNull().default("0"),
     warnPercent: integer("warn_percent").notNull().default(80),
     hardStopEnabled: boolean("hard_stop_enabled").notNull().default(true),
+    unpricedUsagePolicy: text("unpriced_usage_policy").notNull().default("block"),
     notifyEnabled: boolean("notify_enabled").notNull().default(true),
     isActive: boolean("is_active").notNull().default(true),
+    enforcementVersion: integer("enforcement_version").notNull().default(0),
+    enforcementDeliveredVersion: integer("enforcement_delivered_version").notNull().default(0),
     createdByUserId: text("created_by_user_id"),
     updatedByUserId: text("updated_by_user_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
+    reservationNonnegative: check("budget_policies_reservation_nonnegative", sql`${table.reservationCents} >= 0`),
     companyScopeActiveIdx: index("budget_policies_company_scope_active_idx").on(
       table.companyId,
       table.scopeType,

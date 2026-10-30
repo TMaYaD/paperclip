@@ -10,6 +10,7 @@ const base: BudgetPolicySummary = {
   provider: "openai", metric: "subscription_percent", windowKind: "provider_week", amount: 100, progressive: true,
   releasedAmount: 0.3, observedAmount: 4, remainingAmount: 0, utilizationPercent: 4,
   releaseAt: "2026-09-27T09:43:20Z", warnPercent: 80, hardStopEnabled: true, notifyEnabled: true,
+  unpricedEventCount: 0, pendingRunCount: 0, unpricedUsagePolicy: "block",
   isActive: true, status: "ok", paused: false, pauseReason: null,
   windowStart: new Date("2026-09-27T03:00:08Z"), windowEnd: new Date("2026-10-04T03:00:08Z"),
 };

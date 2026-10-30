@@ -18,6 +18,7 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
 import { heartbeatService } from "../services/heartbeat.ts";
+import { idleWorkSnapshot } from "../services/task-admission.js";
 import {
   SUBSCRIPTION_WINDOW_SKIPPED_ERROR_CODE,
   SUBSCRIPTION_WINDOW_WAIT_EXHAUSTED_ERROR_CODE,
@@ -86,7 +87,7 @@ async function waitForCondition(fn: () => Promise<boolean>, timeoutMs = 5_000) {
 }
 
 async function cleanupFixture(db: ReturnType<typeof createDb>) {
-  for (let attempt = 0; attempt < 10; attempt += 1) {
+  for (let attempt = 0; attempt < 30; attempt += 1) {
     try {
       await db.execute(sql.raw(`
         TRUNCATE TABLE
@@ -112,7 +113,7 @@ async function cleanupFixture(db: ReturnType<typeof createDb>) {
         error instanceof Error &&
         (error.message.includes("issue_comments_issue_id_issues_id_fk") ||
           error.message.includes("deadlock detected"));
-      if (!isLateWorkRace || attempt === 9) throw error;
+      if (!isLateWorkRace || attempt === 29) throw error;
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
   }
@@ -186,6 +187,11 @@ describeEmbeddedPostgres("heartbeat subscription window wait", () => {
       const runs = await db.select({ status: heartbeatRuns.status }).from(heartbeatRuns);
       return !runs.some((run) => run.status === "queued" || run.status === "running");
     });
+    // Post-run lifecycle and accounting work outlives the run status; drain it
+    // so truncation neither deadlocks nor races the next test's fixture.
+    const runIds = await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).then((runs) => runs.map((run) => run.id));
+    await Promise.all(runIds.map((runId) => heartbeat.waitForRunExecutionDrain(runId)));
+    await waitForCondition(async () => idleWorkSnapshot().active === 0);
     await new Promise((resolve) => setTimeout(resolve, 50));
     await cleanupFixture(db);
     runningProcesses.clear();

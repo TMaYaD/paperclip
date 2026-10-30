@@ -65,7 +65,7 @@ import { TaskChatComposerTakeoverActionsContext } from "./TaskChatComposerTakeov
 import { TaskChatPausedTakeover, type TaskComposerPause } from "./TaskChatPausedTakeover";
 import { ComposerRunSettingsPicker } from "./ComposerRunSettingsPicker";
 import { TaskChatComposerBar } from "./TaskChatComposerBar";
-import { ComposerAddMenu, ComposerModeChip } from "./ComposerAddMenu";
+import { ComposerAddMenu, ComposerModeChip, ComposerPrivacyChip } from "./ComposerAddMenu";
 import type { ComposerRunSettings } from "./composer-run-settings";
 import type { Agent, IssueAssigneeAdapterOverrides } from "@paperclipai/shared";
 
@@ -111,6 +111,7 @@ interface TaskChatComposerProps {
     details?: ReactNode;
     contextBar?: ReactNode;
     submitDisabled?: boolean;
+    privacy?: { private: boolean; inherited?: string; onChange: (value: boolean) => void };
     onSelectFiles: (files: File[]) => void;
     runSettings: ComposerRunSettings | null;
     onRunSettingsChange: (settings: ComposerRunSettings | null) => void;
@@ -1461,6 +1462,7 @@ export function TaskChatComposer({
               <input ref={fileInputRef} type="file" className="hidden" multiple={Boolean(creation)} onChange={handleFileInputChange} />
             ) : null}
             <ComposerAddMenu
+              privacy={creation?.privacy}
               mode={pendingMode}
               onModeChange={!queuedEdit && onWorkModeChange ? changeMode : undefined}
               onAttachFile={canAcceptFiles ? () => fileInputRef.current?.click() : undefined}
@@ -1472,6 +1474,7 @@ export function TaskChatComposer({
               triggerTestId="task-chat-composer-add"
               menuTestId="task-chat-composer-add-menu"
             />
+            {creation?.privacy?.private ? <ComposerPrivacyChip inherited={creation.privacy.inherited} onRemove={() => creation.privacy!.onChange(false)} disabled={disabled} /> : null}
             {queuedEdit ? (
               <span className="px-1 text-xs font-medium text-muted-foreground">
                 {queuedEdit.stale
