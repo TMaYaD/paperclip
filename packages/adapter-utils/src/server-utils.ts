@@ -3205,6 +3205,19 @@ export const AGENT_IDENTITY_ENV_KEYS = [
   "PAPERCLIP_AGENT_KEY_ID", "PAPERCLIP_AGENT_PUBLIC_KEY", "PAPERCLIP_AGENT_PRIVATE_KEY",
 ];
 
+// Run-scoped Paperclip tokens that Codex shells need despite matching its
+// secret-name exclusions: the skill's API token, and the GitHub launcher's
+// broker capability and bridge token. Without them managed Git reports
+// capability_missing and runs without credentials.
+export const CODEX_SHELL_SCOPED_TOKEN_KEYS = [
+  "PAPERCLIP_API_KEY", "PAPERCLIP_GITHUB_BROKER_TOKEN", "PAPERCLIP_GITHUB_BRIDGE_TOKEN",
+];
+
+/** Env keys a Codex shell may inherit: non-secret names plus the scoped Paperclip tokens. */
+export function codexShellEnvironmentKeys(env: Record<string, unknown>): string[] {
+  return Object.keys(env).filter(key => CODEX_SHELL_SCOPED_TOKEN_KEYS.includes(key) || !/key|secret|token/i.test(key));
+}
+
 export function buildAgentIdentityEnv(identity?: AgentRuntimeIdentity): Record<string, string> {
   return identity ? {
     PAPERCLIP_AGENT_KEY_ID: identity.keyId,
