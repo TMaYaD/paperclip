@@ -68,6 +68,7 @@ import {
   ensurePaperclipSkillSymlink,
   isForbiddenConfigEnvKey,
   isPaperclipExternalChatTurn,
+  codexShellEnvironmentKeys,
   isPaperclipRuntimeEnvKey,
   joinPromptSections,
   materializePaperclipSkillCopy,
@@ -2063,8 +2064,9 @@ async function buildRuntime(input: {
         "PATH", "HOME", "LANG", "TMPDIR", "CODEX_HOME",
         "PAPERCLIP_AGENT_KEY_ID", "PAPERCLIP_AGENT_PUBLIC_KEY", "PAPERCLIP_AGENT_PRIVATE_KEY",
         // Preserve Codex's default secret-name exclusions. The short-lived
-        // Paperclip API token is required by the agent skill's Bash/curl calls.
-        ...Object.keys(env).filter(key => key === "PAPERCLIP_API_KEY" || !/key|secret|token/i.test(key)),
+        // Paperclip API token is required by the agent skill's Bash/curl calls,
+        // and the GitHub broker/bridge tokens by the shell's Git launcher.
+        ...codexShellEnvironmentKeys(env),
       ])] } : {}),
       requestedModel,
       requestedThinkingEffort,
