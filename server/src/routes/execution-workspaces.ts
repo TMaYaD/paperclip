@@ -1344,7 +1344,7 @@ export function executionWorkspaceRoutes(db: Db, opts: { pluginWorkerManager?: P
                 ...cleanupWarnings,
                 ...(cleanupResult.cleaned
                   ? []
-                  : [`Workspace directory still exists after cleanup: ${cleanupResult.cleanedPath}`]),
+                  : [`Workspace directory still exists after cleanup${"cleanedPath" in cleanupResult && cleanupResult.cleanedPath ? `: ${cleanupResult.cleanedPath}` : ""}`]),
               ].filter(Boolean).join(" | ") || null,
               markCleanupFailed: !cleanupResult.cleaned,
             });

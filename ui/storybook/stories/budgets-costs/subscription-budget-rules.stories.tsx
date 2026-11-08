@@ -12,9 +12,18 @@ const base: BudgetPolicySummary = {
   windowStart: new Date("2026-09-27T03:00:08Z"), windowEnd: new Date("2026-10-04T03:00:08Z"),
 };
 const meta = {
-  title: "Finance/Subscription budget rules",
+  id: "feature-subscription-budget-rules",
+  title: "Oversight and operation/Costs and budgets/Subscription budget rules",
   component: SubscriptionWindowBudgets,
-  parameters: { layout: "padded" },
+  parameters: { layout: "padded",
+    paperclip: {
+      "capabilities": [
+        "budgets-costs/budgets"
+      ],
+      "implementation": "production",
+      "boundary": "fixtures"
+    },
+  },
   args: { onSave: async () => {}, onDelete: async () => {} },
 } satisfies Meta<typeof SubscriptionWindowBudgets>;
 export default meta;
