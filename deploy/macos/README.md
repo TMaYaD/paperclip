@@ -95,3 +95,6 @@ new directory, so an orphaned compiler cannot write into that attempt. Dirty
 can be removed when all old build processes have stopped. A forced clean build
 replaces a previously successful workspace. Runtime/architecture changes also
 start a fresh workspace. Published npm installs are unaffected.
+
+Keep pnpm store settings stable across builds. If you customize `store-dir`, use
+the operator home's `.npmrc` so nested build commands use the same setting.
