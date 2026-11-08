@@ -76,3 +76,19 @@ links, keeps workspace builds, and applies their published entrypoint metadata.
 It does not resolve package ranges. pnpm 9 deploy still resolves ranges for the
 CLI bundle's additional external imports, so it cannot provide this guarantee. Payload links are checked before
 activation so deleting the source checkout cannot break the installed service.
+
+Git builds keep dependency directories in a private per-repository workspace under
+`$PAPERCLIP_HOME/cli/build/`. Each install removes all source and generated files
+before extracting the requested commit. It retains only `node_modules`
+directories, including pnpm's virtual store. It never reuses `dist`, UI output,
+or TypeScript build state. A per-repository lock also protects direct build
+callers; managed install/update activation keeps its existing store lock.
+
+Set `PAPERCLIP_GIT_INSTALL_CLEAN=1` for a fresh build workspace. This applies only
+to git builds; an already installed SHA still uses its verified cached payload.
+A failed or interrupted build marks its workspace dirty. The next attempt uses a
+new directory, so an orphaned compiler cannot write into that attempt. Dirty
+`work-*` generations remain quarantined under the repository build folder; they
+can be removed when all old build processes have stopped. A forced clean build
+replaces a previously successful workspace. Runtime/architecture changes also
+start a fresh workspace. Published npm installs are unaffected.

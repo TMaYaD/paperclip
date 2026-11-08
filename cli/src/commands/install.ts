@@ -22,6 +22,7 @@ import {
   type InstallRecord,
 } from "../install-store.js";
 
+import { withGitBuildWorkspace } from "../git-build-workspace.js";
 import { materializeGitPayload, assertSelfContainedPayload } from "../git-payload.js";
 
 const execFileAsync = promisify(execFile);
@@ -279,11 +280,10 @@ export async function installGitPayload(repo: string, sha: string, runCommand: C
   fs.chmodSync(paths.installsRoot, 0o700);
   fs.chmodSync(sourceRoot, 0o700);
   const stagingRoot = path.join(sourceRoot, `.${identifier}.tmp-${process.pid}-${Date.now()}`);
-  const checkoutPath = path.join(stagingRoot, "source");
   const archivePath = path.join(stagingRoot, "source.tar.gz");
   const stagedPayload = path.join(stagingRoot, "payload");
   fs.rmSync(stagingRoot, { recursive: true, force: true });
-  fs.mkdirSync(checkoutPath, { recursive: true, mode: 0o700 });
+  fs.mkdirSync(stagingRoot, { recursive: true, mode: 0o700 });
   // Workspace build scripts invoke bare `pnpm`; on a machine where pnpm exists only
   // through corepack, nothing puts it on PATH, so provision a shim into the staging dir.
   const pnpmShimDir = path.join(stagingRoot, "pnpm-bin");
@@ -291,18 +291,20 @@ export async function installGitPayload(repo: string, sha: string, runCommand: C
   const buildEnv = (extra: NodeJS.ProcessEnv = {}) =>
     gitBuildEnv({ PATH: [pnpmShimDir, process.env.PATH].filter(Boolean).join(path.delimiter), ...extra });
   try {
-    await timeGitInstallStage("download source", () => runGitHubCurl(["--fail", "--silent", "--show-error", "--location", "--output", archivePath, `https://codeload.github.com/${repo}/tar.gz/${sha}`], runCommand, { maxBuffer: 4 * 1024 * 1024 }));
-    await timeGitInstallStage("extract source", () => runCommand("tar", ["-xzf", archivePath, "--strip-components=1", "-C", checkoutPath], { maxBuffer: 4 * 1024 * 1024 }));
-    await timeGitInstallStage("prepare pnpm", () => runCommand("corepack", ["enable", "pnpm", "--install-directory", pnpmShimDir], { cwd: checkoutPath, env: buildEnv(), maxBuffer: 4 * 1024 * 1024 }));
-    await timeGitInstallStage("install dependencies", () => runCommand("corepack", ["pnpm", "install", "--frozen-lockfile"], { cwd: checkoutPath, env: buildEnv(), maxBuffer: 32 * 1024 * 1024 }));
-    await timeGitInstallStage("build CLI", () => runCommand("bash", ["scripts/build-npm.sh", "--skip-checks", "--skip-typecheck"], { cwd: checkoutPath, env: buildEnv(), maxBuffer: 32 * 1024 * 1024 }));
-    await timeGitInstallStage("build server", () => runCommand("corepack", ["pnpm", "-r", "--filter", "@paperclipai/server...", "--if-present", "run", "build"], { cwd: checkoutPath, env: buildEnv(), maxBuffer: 32 * 1024 * 1024 }));
-    const metadata = JSON.parse(fs.readFileSync(path.join(checkoutPath, "cli", "package.json"), "utf8")) as { version: string };
-    await timeGitInstallStage("materialize payload", async () => materializeGitPayload(checkoutPath, stagedPayload));
-    await timeGitInstallStage("validate payload links", async () => assertSelfContainedPayload(stagedPayload));
-    await timeGitInstallStage("smoke payload", () => smokePayload(stagedPayload, metadata.version, runCommand));
-    fs.renameSync(stagedPayload, payloadPath);
-    return { payloadPath, reused: false, version: metadata.version };
+    return await withGitBuildWorkspace(repo, paths, async (checkoutPath) => {
+      await timeGitInstallStage("download source", () => runGitHubCurl(["--fail", "--silent", "--show-error", "--location", "--output", archivePath, `https://codeload.github.com/${repo}/tar.gz/${sha}`], runCommand, { maxBuffer: 4 * 1024 * 1024 }));
+      await timeGitInstallStage("extract source", () => runCommand("tar", ["-xzf", archivePath, "--strip-components=1", "-C", checkoutPath], { maxBuffer: 4 * 1024 * 1024 }));
+      await timeGitInstallStage("prepare pnpm", () => runCommand("corepack", ["enable", "pnpm", "--install-directory", pnpmShimDir], { cwd: checkoutPath, env: buildEnv(), maxBuffer: 4 * 1024 * 1024 }));
+      await timeGitInstallStage("install dependencies", () => runCommand("corepack", ["pnpm", "install", "--frozen-lockfile"], { cwd: checkoutPath, env: buildEnv(), maxBuffer: 32 * 1024 * 1024 }));
+      await timeGitInstallStage("build CLI", () => runCommand("bash", ["scripts/build-npm.sh", "--skip-checks", "--skip-typecheck"], { cwd: checkoutPath, env: buildEnv(), maxBuffer: 32 * 1024 * 1024 }));
+      await timeGitInstallStage("build server", () => runCommand("corepack", ["pnpm", "-r", "--filter", "@paperclipai/server...", "--if-present", "run", "build"], { cwd: checkoutPath, env: buildEnv(), maxBuffer: 32 * 1024 * 1024 }));
+      const metadata = JSON.parse(fs.readFileSync(path.join(checkoutPath, "cli", "package.json"), "utf8")) as { version: string };
+      await timeGitInstallStage("materialize payload", async () => materializeGitPayload(checkoutPath, stagedPayload));
+      await timeGitInstallStage("validate payload links", async () => assertSelfContainedPayload(stagedPayload));
+      await timeGitInstallStage("smoke payload", () => smokePayload(stagedPayload, metadata.version, runCommand));
+      fs.renameSync(stagedPayload, payloadPath);
+      return { payloadPath, reused: false, version: metadata.version };
+    });
   } finally {
     await timeGitInstallStage("cleanup staging", async () => fs.rmSync(stagingRoot, { recursive: true, force: true }));
   }
