@@ -78,7 +78,11 @@ describe("server package build script", () => {
     expect(RUNNER_VENDOR_BUILD_COMMAND).toBe(
       "pnpm --filter @paperclipai/paperclip-runner build",
     );
-    expect(packageJson.scripts?.build.startsWith("pnpm run prepare:runner-vendor && ")).toBe(true);
+    // The fork stages ui-dist and skills first; the Runner vendor step must
+    // still run before tsc.
+    expect(packageJson.scripts?.build).toContain(
+      "pnpm run prepare:runner-vendor && node scripts/verify-runner-vendor-dependencies.mjs && tsc && ",
+    );
     expect(packageJson.scripts?.build).toContain(
       "cp -Rf ../packages/paperclip-runner/dist/. dist/vendor/paperclip-runner/",
     );

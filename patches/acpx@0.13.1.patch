@@ -998,7 +998,7 @@ index e8102acb0..377c5d838 100644
      text: string;
      attachments?: AcpRuntimeTurnAttachment[];
 diff --git a/dist/runtime.js b/dist/runtime.js
-index a1f4a70a0..a17fce3b3 100644
+index a1f4a70a0..6db91a835 100644
 --- a/dist/runtime.js
 +++ b/dist/runtime.js
 @@ -153,7 +153,7 @@ function resolveTextChunk(params) {
@@ -1063,7 +1063,25 @@ index a1f4a70a0..a17fce3b3 100644
  function normalizeUsageCost(value) {
  	if (!isRecord(value)) return;
  	const amount = asOptionalFiniteNumber(value.amount);
-@@ -812,7 +840,22 @@ var AcpRuntimeManager = class {
+@@ -466,6 +494,17 @@ function firstFiniteNumber(record, keys) {
+ 	}
+ }
+ function statusUpdateEvent(tag, payload) {
++	if (tag === "session_info_update" && isRecord(payload._meta?.codex?.rateLimits)) {
++		const limits = payload._meta.codex.rateLimits;
++		const window = (value) => isRecord(value) ? {
++			usedPercent: value.usedPercent,
++			windowDurationMins: value.windowDurationMins,
++			resetsAt: value.resetsAt
++		} : null;
++		return { type: "status", tag: "codex_rate_limits", text: "Codex quota updated",
++			rateLimits: { limitId: limits.limitId, primary: window(limits.primary), secondary: window(limits.secondary) }
++		};
++	}
+ 	const text = resolveStatusTextForTag({
+ 		tag,
+ 		payload
+@@ -812,7 +851,22 @@ var AcpRuntimeManager = class {
  		this.deps = deps;
  	}
  	createClient(options) {
@@ -1087,7 +1105,7 @@ index a1f4a70a0..a17fce3b3 100644
  	}
  	createSessionOwner(input) {
  		const owner = {
-@@ -821,12 +864,16 @@ var AcpRuntimeManager = class {
+@@ -821,12 +875,16 @@ var AcpRuntimeManager = class {
  			pendingSessionUpdates: []
  		};
  		input.client.setEventHandlers({
@@ -1104,7 +1122,7 @@ index a1f4a70a0..a17fce3b3 100644
  		const active = owner.activeTurn;
  		if (active) {
  			const { task, turn } = active;
-@@ -863,6 +910,9 @@ var AcpRuntimeManager = class {
+@@ -863,6 +921,9 @@ var AcpRuntimeManager = class {
  		projection.checkpoint.request();
  	}
  	routeOwnedClientOperation(owner, operation) {
@@ -1114,7 +1132,7 @@ index a1f4a70a0..a17fce3b3 100644
  		const active = owner.activeTurn;
  		if (!active) return;
  		const { task, turn } = active;
-@@ -1008,6 +1058,8 @@ var AcpRuntimeManager = class {
+@@ -1008,6 +1069,8 @@ var AcpRuntimeManager = class {
  		record.closedAt = void 0;
  		record.protocolVersion = owner.client.initializeResult?.protocolVersion;
  		record.agentCapabilities = owner.client.initializeResult?.agentCapabilities;
@@ -1123,7 +1141,7 @@ index a1f4a70a0..a17fce3b3 100644
  		applyLifecycleSnapshotToRecord(record, owner.client.getAgentLifecycleSnapshot());
  	}
  	async finishBufferedOwnerControl(owner, record) {
-@@ -1086,6 +1138,11 @@ var AcpRuntimeManager = class {
+@@ -1086,6 +1149,11 @@ var AcpRuntimeManager = class {
  		record.closed = false;
  		record.closedAt = void 0;
  		this.closingActiveRecords.delete(record.acpxRecordId);
@@ -1135,7 +1153,7 @@ index a1f4a70a0..a17fce3b3 100644
  		await this.options.sessionStore.save(record);
  		return record;
  	}
-@@ -1149,6 +1206,8 @@ var AcpRuntimeManager = class {
+@@ -1149,6 +1217,8 @@ var AcpRuntimeManager = class {
  		this.closingActiveRecords.delete(record.acpxRecordId);
  		record.protocolVersion = client.initializeResult?.protocolVersion;
  		record.agentCapabilities = client.initializeResult?.agentCapabilities;
@@ -1144,7 +1162,7 @@ index a1f4a70a0..a17fce3b3 100644
  		applyConfigOptionsToRecord(record, session.sessionResult);
  		const modelApplication = await applyRequestedModelIfAdvertised({
  			client,
-@@ -1301,9 +1360,11 @@ var AcpRuntimeManager = class {
+@@ -1301,9 +1371,11 @@ var AcpRuntimeManager = class {
  				client: turn.client,
  				sessionId,
  				prompt: task.promptInput,
@@ -1156,7 +1174,7 @@ index a1f4a70a0..a17fce3b3 100644
  				onPromptRequestStarted: () => task.promptStarted.resolve(),
  				onElicitation: task.input.onElicitation
  			});
-@@ -1469,6 +1530,10 @@ var AcpRuntimeManager = class {
+@@ -1469,6 +1541,10 @@ var AcpRuntimeManager = class {
  			setSessionConfigOption: async (configId, value) => {
  				return (await task.state.activeController.setResolvedSessionConfigOption(configId, value)).response;
  			},
@@ -1167,7 +1185,7 @@ index a1f4a70a0..a17fce3b3 100644
  			setResolvedSessionConfigOption: async (configId, value) => await this.setRuntimeResolvedSessionConfigOption(task, turn, configId, value)
  		};
  	}
-@@ -1575,6 +1640,8 @@ var AcpRuntimeManager = class {
+@@ -1575,6 +1651,8 @@ var AcpRuntimeManager = class {
  		reconcileAgentSessionId(turn.record, turn.record.agentSessionId);
  		turn.record.protocolVersion = turn.client.initializeResult?.protocolVersion;
  		turn.record.agentCapabilities = turn.client.initializeResult?.agentCapabilities;
@@ -1176,7 +1194,7 @@ index a1f4a70a0..a17fce3b3 100644
  		turn.record.acpx = turn.acpxState;
  		applyConversation(turn.record, turn.conversation);
  		applyLifecycleSnapshotToRecord(turn.record, turn.client.getAgentLifecycleSnapshot());
-@@ -1707,6 +1774,17 @@ var AcpRuntimeManager = class {
+@@ -1707,6 +1785,17 @@ var AcpRuntimeManager = class {
  		});
  		await this.options.sessionStore.save(result.record);
  	}
@@ -1194,7 +1212,7 @@ index a1f4a70a0..a17fce3b3 100644
  	async cancel(handle) {
  		await this.activeControllers.get(handle.acpxRecordId ?? handle.sessionKey)?.requestCancelActivePrompt();
  	}
-@@ -2055,6 +2133,7 @@ var AcpxRuntime = class {
+@@ -2055,6 +2144,7 @@ var AcpxRuntime = class {
  		const turnPromise = this.getManager().then((manager) => manager.startTurn({
  			handle,
  			text: input.text,
@@ -1202,7 +1220,7 @@ index a1f4a70a0..a17fce3b3 100644
  			attachments: input.attachments,
  			mode: input.mode,
  			sessionMode: state.mode,
-@@ -2087,6 +2166,7 @@ var AcpxRuntime = class {
+@@ -2087,6 +2177,7 @@ var AcpxRuntime = class {
  		yield* (await this.getManager()).runTurn({
  			handle,
  			text: input.text,
@@ -1210,7 +1228,7 @@ index a1f4a70a0..a17fce3b3 100644
  			attachments: input.attachments,
  			mode: input.mode,
  			sessionMode: state.mode,
-@@ -2119,6 +2199,14 @@ var AcpxRuntime = class {
+@@ -2119,6 +2210,14 @@ var AcpxRuntime = class {
  		const { handle, state } = this.resolveManagerHandle(input.handle);
  		await (await this.getManager()).setConfigOption(handle, input.key, input.value, state.mode);
  	}
