@@ -158,7 +158,11 @@ function prunePendingRecords(packageRoot, buildId, now) {
  */
 export function expectedBuildOutputs(packageRoot, platform = process.platform) {
   const executable = platform === "win32" ? "paperclip-runnerd.exe" : "paperclip-runnerd";
-  return ["dist/index.js", "dist/live/index.js", "dist/testing.js", `dist/bin/${executable}`]
+  // Fork: scripts/build-runner-binary.mjs skips the native binary on hosts
+  // without cargo and leaves this marker; such a build is still complete.
+  const binarySkipped = process.env.PAPERCLIP_RUNNER_REQUIRE_BINARY !== "1"
+    && existsSync(path.join(packageRoot, "dist", "bin", ".paperclip-runnerd-skipped"));
+  return ["dist/index.js", "dist/live/index.js", "dist/testing.js", ...(binarySkipped ? [] : [`dist/bin/${executable}`])]
     .map((relative) => path.join(packageRoot, ...relative.split("/")));
 }
 
