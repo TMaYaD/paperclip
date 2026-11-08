@@ -40,12 +40,6 @@ export type AcpxProcessIdentitySink = {
   onLaunch?: () => void;
   latest: AcpxAgentProcessIdentity | null;
   localProcess?: ChildProcess;
-  /**
-   * The current run's ACP session-notification observer. Like `current`, a warm
-   * runtime's notifications must reach the run that is live now, never the run
-   * that created the runtime or one that already settled.
-   */
-  sessionNotification?: (notification: unknown) => void;
 };
 
 /** The live-line buffer and log path a warm runtime's child stderr carries. */

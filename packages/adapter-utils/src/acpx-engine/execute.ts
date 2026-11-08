@@ -210,34 +210,6 @@ function flushChildStderr(state: ChildStderrState) {
   state.pendingLiveLine = "";
 }
 
-/**
- * Read Codex rate limits from an ACP `session_info_update` notification
- * (`_meta.codex.rateLimits`, emitted by the patched codex-acp). Keep only the
- * window fields the quota reader uses; ignore anything that is not an object.
- */
-export function codexRateLimitsFromSessionNotification(notification: unknown): {
-  kind: "codex_rate_limits"; info: Record<string, unknown>; observedAt: string;
-} | null {
-  const isObject = (value: unknown): value is Record<string, unknown> =>
-    typeof value === "object" && value !== null && !Array.isArray(value);
-  const update = isObject(notification) ? notification.update : undefined;
-  if (!isObject(update) || update.sessionUpdate !== "session_info_update") return null;
-  const meta = isObject(update._meta) ? update._meta : undefined;
-  const codex = meta && isObject(meta.codex) ? meta.codex : undefined;
-  const limits = codex?.rateLimits;
-  if (!isObject(limits)) return null;
-  const window = (value: unknown) => isObject(value) ? {
-    usedPercent: value.usedPercent,
-    windowDurationMins: value.windowDurationMins,
-    resetsAt: value.resetsAt,
-  } : null;
-  return {
-    kind: "codex_rate_limits",
-    info: { limitId: limits.limitId, primary: window(limits.primary), secondary: window(limits.secondary) },
-    observedAt: new Date().toISOString(),
-  };
-}
-
 type PaperclipAcpRuntimeOptions = AcpRuntimeOptions & {
   onAgentSpawn?: (meta: AcpxAgentProcessIdentity) => Promise<void>;
   // Return the current-run parent-context token. It is the `task.run` token
@@ -4292,12 +4264,6 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
       let sessionHandle!: AcpRuntimeHandle;
       let childStderrState!: ChildStderrState;
       let processIdentitySink!: AcpxProcessIdentitySink;
-      const runQuotaNotificationObserver = (notification: unknown) => {
-        const observation = codexRateLimitsFromSessionNotification(notification);
-        if (!observation) return;
-        // Quota collection must not fail an otherwise healthy run.
-        void Promise.resolve(ctx.onProviderQuotaObserved?.(observation)).catch(() => {});
-      };
       let resumedSession = false;
       let clearSession = false;
       let referencedProjectStagingFailuresField:
@@ -4500,11 +4466,6 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
         // target mutable so a later agent respawn records identity on the current
         // heartbeat instead of the run that originally created the runtime.
         processIdentitySink.current = ctx.onSpawn;
-        // Codex reports its subscription windows as `session_info_update`
-        // notifications. Route them to this run's quota observer only.
-        processIdentitySink.sessionNotification = ctx.agent.adapterType === "codex_local" && ctx.onProviderQuotaObserved
-          ? runQuotaNotificationObserver
-          : undefined;
         // The process-session bridge starts its provider inside the sandbox.
         // ACPX observes only the host relay on that lane, so neither its spawn
         // callback nor a cached relay establishes physical provider reuse.
@@ -4563,7 +4524,6 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
             });
           },
           getRuntimeParentContext,
-          onSessionNotification: (notification) => processIdentitySink.sessionNotification?.(notification),
         };
         // Open Q2: split the ~7s `acp.handshake` into the two in-repo-observable
         // sub-phases — the ACP runtime construction (`createRuntime`) vs the session
@@ -5261,6 +5221,19 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
               // segment while updates must not create extra boundaries.
               flushOutputSegment();
             }
+            if (event.type === "status" && event.tag === "codex_rate_limits") {
+              const info = (event as Record<string, unknown>).rateLimits;
+              if (ctx.agent.adapterType === "codex_local" && info && typeof info === "object" && !Array.isArray(info)) {
+                try {
+                  await ctx.onProviderQuotaObserved?.({
+                    kind: "codex_rate_limits", info: info as Record<string, unknown>, observedAt: new Date().toISOString(),
+                  });
+                } catch {
+                  // Quota collection must not fail an otherwise healthy run.
+                }
+              }
+              continue;
+            }
             if (event.type === "status" && event.tag === "usage_update") {
               eventBreakdown = event.breakdown ?? eventBreakdown;
               eventCostUsd = usdCostAmount(event.cost) ?? eventCostUsd;
@@ -5864,9 +5837,6 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
           const report = await settleAcpRun(runResourceLedger, cause, settlementSteps);
           recordDispositionReport(report);
           if (childStderrState) flushChildStderr(childStderrState);
-          if (processIdentitySink?.sessionNotification === runQuotaNotificationObserver) {
-            processIdentitySink.sessionNotification = undefined;
-          }
         },
         reproduceResult: async (): Promise<AdapterExecutionResult> => {
           if (!capturedResult) {

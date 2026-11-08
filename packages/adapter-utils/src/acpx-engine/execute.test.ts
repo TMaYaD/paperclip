@@ -1730,40 +1730,39 @@ describe("shared ACPX engine runtime behavior", () => {
     expect(result.billingType).toBe("unknown");
   });
 
-  it.each([false, true])("relays Codex quota notifications without failing runs when the observer throws (%s)", async (fails) => {
+  it.each([false, true])("relays Codex quota without failing runs when the observer throws (%s)", async (fails) => {
     const quota = { limitId: "codex", primary: { usedPercent: 12, windowDurationMins: 10080, resetsAt: 1790502487 }, secondary: null };
     const onProviderQuotaObserved = vi.fn(async () => { if (fails) throw new Error("observer unavailable"); });
     const root = await makeTempRoot();
     const stateDir = path.join(root, "state");
-    let notify: ((notification: unknown) => void) | undefined;
-    const quotaNotification = { sessionId: "agent-session", update: {
-      sessionUpdate: "session_info_update", _meta: { codex: { rateLimits: { ...quota, extra: "dropped" } } },
-    } };
     const execute = createAcpxEngineExecutor({
-      createRuntime: (options) => {
-        notify = (options as { onSessionNotification?: (notification: unknown) => void }).onSessionNotification;
-        return {
-          ensureSession: async () => ({
-            backendSessionId: "backend-session",
-            agentSessionId: "agent-session",
-            runtimeSessionName: "runtime-session",
-          }),
-          startTurn: () => ({
-            events: (async function* () {
-              notify?.({ sessionId: "agent-session", update: { sessionUpdate: "session_info_update", _meta: { codex: { rateLimits: "bad" } } } });
-              notify?.(quotaNotification);
-              yield { type: "done", stopReason: "end_turn" };
-            })(),
-            result: Promise.resolve({ status: "completed", stopReason: "end_turn" }),
-            cancel: async () => {},
-          }),
-          close: async () => {},
-        } as never;
-      },
+      createRuntime: () => ({
+        ensureSession: async () => ({
+          backendSessionId: "backend-session",
+          agentSessionId: "agent-session",
+          runtimeSessionName: "runtime-session",
+        }),
+        startTurn: () => ({
+          events: (async function* () {
+            yield {
+              type: "status",
+              text: "usage",
+              tag: "codex_rate_limits",
+              rateLimits: quota,
+              cost: { amount: 0.31, currency: "USD" },
+              breakdown: { inputTokens: 40, outputTokens: 700, cachedReadTokens: 60 },
+            };
+            yield { type: "done", stopReason: "end_turn" };
+          })(),
+          result: Promise.resolve({ status: "completed", stopReason: "end_turn" }),
+          cancel: async () => {},
+        }),
+        close: async () => {},
+      }) as never,
     });
 
     const result = await execute({
-      runId: "run-codex-quota-notification",
+      runId: "run-usage-event-fallback",
       agent: {
         id: "agent-1",
         companyId: "company-1",
@@ -1778,13 +1777,9 @@ describe("shared ACPX engine runtime behavior", () => {
     } as never);
 
     expect(result.exitCode).toBe(0);
-    expect(onProviderQuotaObserved).toHaveBeenCalledTimes(1);
     expect(onProviderQuotaObserved).toHaveBeenCalledWith({
       kind: "codex_rate_limits", info: quota, observedAt: expect.any(String),
     });
-    // A warm runtime can outlive the run: later notifications never reach it.
-    notify?.(quotaNotification);
-    expect(onProviderQuotaObserved).toHaveBeenCalledTimes(1);
   });
 
   it.each(["failed", "cancelled"] as const)("keeps %s in-stream usage provisional without a final receipt", async (status) => {
