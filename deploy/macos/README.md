@@ -73,6 +73,8 @@ run during the source install; deployment reuses those host-specific, patched
 packages without running the scripts again. Files use copy-on-write clones where
 the filesystem supports them. The copier follows installed dependency and peer
 links, keeps workspace builds, and applies their published entrypoint metadata.
-It does not resolve package ranges. pnpm 9 deploy still resolves ranges for the
+It does not resolve package ranges. The internal dependency store stays under
+the server package so provider integrity checks keep their existing boundary.
+Generated provider assets include their nested runtime dependency directories. pnpm 9 deploy still resolves ranges for the
 CLI bundle's additional external imports, so it cannot provide this guarantee. Payload links are checked before
 activation so deleting the source checkout cannot break the installed service.
