@@ -133,52 +133,35 @@ GitHub Actions owns `pnpm-lock.yaml`.
 
 ## Trusted PR Workflow
 
-The PR caller uses `paperclipai/paperclip/.github/workflows/pr-trusted.yml@master`.
-The AWS runner group `paperclip-public-pr` must allow
-`paperclipai/paperclip/.github/workflows/pr-trusted.yml@refs/heads/master`.
-New workflow versions merged into master then receive runner access without a
-separate SHA allowlist update. Dependabot leaves this first-party reference on
-master.
+The fork's PR caller uses `TMaYaD/paperclip/.github/workflows/pr-trusted.yml@main`.
+Pull requests execute the workflow from the protected base branch; a proposed
+workflow edit cannot control its own PR run. The AWS routing gate still checks
+the upstream repository identity and falls back to GitHub-hosted runners on
+this fork. The repair PR therefore uses the previous `main` workflow. A fresh
+PR after merge is required to verify the new lanes.
 
-Runner selection calls `ci-routing.yml@master` on the dedicated
-`paperclip-ci-routing-x64` AWS Fleet. The `paperclip-ci-routing` runner group
-admits only `paperclipai/paperclip/.github/workflows/ci-routing.yml@refs/heads/master`
-and repository ID `1170821064`. GitHub evaluates the canonical repository, author, and sender checks before
-allocating reserved capacity. The validated admission snapshot (`AWS_CI_ROUTING_USER_IDS_SOURCE` and
-`AWS_CI_ROUTING_USER_IDS`) must match `AWS_CI_TRUSTED_USER_IDS`. Refresh it through
-the runner-group configuration helper when the roster changes. Missing, stale,
-or malformed settings keep hosted routing available without evaluating JSON
-in the job's placement expression. Unapproved PRs use hosted metadata routing;
-approved manual canaries on master can use the reserved pool. The routing
-workflow reads GitHub metadata without checking out or executing PR code. Its author, sender, rerun actor,
-repository, head, and merge validation still decide whether tests can use AWS.
-Unapproved test workloads continue to use GitHub-hosted runners.
+The fork runs runner static checks, Rust checks, and two supported Vitest
+shards. `Verify Paperclip Runner (vitest 1/2)` and `(vitest 2/2)` replace
+the upstream `vitest package (1/3)`, `(2/3)`, `(3/3)`, and `vitest native server`
+check names. The final shard runs `general-server-native-runner`. The
+aggregate `verify` job also requires the runner support suite and all
+standalone sandbox provider tests. The Docker dependency, Compose signing
+secret, built-server health, and standalone test-program checks remain active.
 
-The routing workflow also selects the CI scope. Middle PRs in a stack and PRs
-whose diff changes only release notes (`releases/v*.md` or
-`releases/beta/v*.md`) skip the build, test, and e2e lanes. The `policy` job
-and the `verify` and `e2e` aggregate checks still run. The release-notes check
-reads the diff between the event's base and head commits. If that lookup
-fails, or the diff is empty or may be truncated, the PR runs full CI. A
-notes-only PR stacked above other PRs also runs full CI, because its own diff
-does not include the lower PRs' code.
+The upstream `ci-routing.yml@master` remains the routing gate. It checks the
+canonical upstream repository identity and routes this fork to GitHub-hosted
+runners. It also selects CI scope: middle stack PRs and release-notes-only PRs
+skip build, test, and e2e lanes while policy and aggregate checks remain active.
+An unknown or truncated diff runs full CI.
 
-The routing Fleet has two warm On-Demand runners and a four-runner ceiling.
-Test fleets cannot consume its runner slots. Hosted test queues therefore do
-not block AWS runner selection. A manual dispatch of `ci-routing.yml` on master
-checks placement without launching the test matrix; its non-PR event returns
-the hosted test-runner output. Configure and verify the group and Fleet before
-merging this caller. To roll back, restore the hosted gate and retain the routing
-workflow authorization until assigned jobs finish.
-
-Keep the `.github/**` rule in `.github/CODEOWNERS` and the active master ruleset's
+Keep the `.github/**` rule in `.github/CODEOWNERS` and the active main ruleset's
 code-owner review requirement enabled. This covers the caller, the trusted
 workflow, and CODEOWNERS itself. Existing administrator pull-request bypasses
 remain governed by the repository ruleset.
 
-When changing the workflow path or branch, authorize the new reference before
-updating the caller. Retain older authorized SHA references while queued runs or
-supported reruns still use them.
+Do not enable AWS routing for the fork by changing only the runner variable.
+Its repository identity and authorization checks must be adapted and tested
+before an AWS runner is selected.
 
 General server shards run at most two test files at a time in separate Vitest
 forks. Each file retains its own home, config and process state, and its test

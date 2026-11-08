@@ -30,8 +30,8 @@ function readTrustedPrWorkflow() {
   const caller = readFileSync(prCallerWorkflow, "utf8");
   assert.match(
     caller,
-    /^\s+uses: paperclipai\/paperclip\/\.github\/workflows\/pr-trusted\.yml@master\s*$/m,
-    "pr.yml must call the trusted workflow from CODEOWNERS-protected master",
+    /^\s+uses: TMaYaD\/paperclip\/\.github\/workflows\/pr-trusted\.yml@main\s*$/m,
+    "pr.yml must call the trusted workflow from the fork's protected main",
   );
   // Validate proposed workflow changes locally; CI executes the merged master version.
   return readFileSync(trustedPrWorkflow, "utf8");
@@ -158,8 +158,69 @@ test("shard arguments are validated", () => {
   }
 });
 
-test("pr.yml calls the trusted PR workflow from master", () => {
+test("pr.yml calls the trusted PR workflow from the fork's main", () => {
   assert.ok(readTrustedPrWorkflow().length > 0);
+});
+
+test("verify requires the runner support and standalone sandbox provider suites", () => {
+  const jobs = readWorkflowJobs(readTrustedPrWorkflow());
+  const verify = jobs.get("verify");
+  for (const [job, variable] of [
+    ["runner_support_suite", "RUNNER_SUPPORT_SUITE_RESULT"],
+    ["sandbox_provider_tests", "SANDBOX_PROVIDER_TESTS_RESULT"],
+  ]) {
+    assert.ok(jobs.has(job), `${job} must run as a PR job`);
+    assert.match(verify, new RegExp(`needs: \\[.*\\b${job}\\b.*\\]`));
+    assert.match(verify, new RegExp(`${variable}: \\$\\{\\{ needs\\.${job}\\.result \\}\\}`));
+    assert.match(verify, new RegExp(`test "\\$${variable}" = "success"`));
+    assert.match(verify, new RegExp(`test "\\$${variable}" = "skipped"`));
+  }
+  assert.match(jobs.get("runner_support_suite"), /pnpm test:e2e:runner:unit/);
+  assert.match(jobs.get("runner_support_suite"), /fetch-depth: 0/, "historical fixture checks need full Git history");
+  assert.match(jobs.get("sandbox_provider_tests"), /node scripts\/test-sandbox-providers\.mjs/);
+});
+
+test("typecheck lane compiles the standalone test programs", () => {
+  const job = readWorkflowJobs(readTrustedPrWorkflow()).get("typecheck_release_registry");
+  for (const command of [
+    "pnpm test:runner-acceptance:typecheck",
+    "pnpm test:e2e:runner:typecheck",
+    "pnpm test:lifecycle-baseline:typecheck",
+  ]) {
+    assert.ok(job.includes(command), `${command} must run in PR CI`);
+  }
+});
+
+test("policy checks Docker dependency lifecycle and Compose signing secret forwarding", () => {
+  const job = readWorkflowJobs(readTrustedPrWorkflow()).get("policy");
+  assert.match(job, /node --test \.\/scripts\/docker-deps-postinstall\.test\.mjs/);
+  assert.match(job, /node --test \.\/scripts\/docker-compose-secrets\.test\.mjs/);
+});
+
+test("Docker context lane resolves Compose secret forwarding in both files", () => {
+  const job = readWorkflowJobs(readTrustedPrWorkflow()).get("docker_context_integrity");
+  assert.match(job, /docker compose -f "\$file" config --format json/);
+  assert.match(job, /docker\/docker-compose\.yml docker\/docker-compose\.quickstart\.yml/);
+  assert.match(job, /BETTER_AUTH_SECRET: ci-test-signing-secret/);
+});
+
+test("build lane starts the built server and checks health", () => {
+  const job = readWorkflowJobs(readTrustedPrWorkflow()).get("build");
+  assert.match(job, /pnpm --filter @paperclipai\/server build:runtime/);
+  assert.match(job, /scripts\/server-boot-smoke\.sh node server\/dist-runtime\/index\.mjs/);
+});
+
+test("Docker context keeps every ACPX release identity input", () => {
+  const profiles = JSON.parse(readFileSync(path.join(repoRoot, "packages/paperclip-runner/acpx-profiles.json"), "utf8")).profiles;
+  const ignore = readFileSync(path.join(repoRoot, ".dockerignore"), "utf8");
+  const inputs = [
+    `test-fixtures/pi-acp/profile-v${profiles.pi.agentProfileVersion}-identity.json`,
+    `test/fixtures/copilot-profile-v${profiles.copilot.agentProfileVersion}-identity.json`,
+  ];
+  for (const input of inputs) {
+    assert.ok(readFileSync(path.join(repoRoot, "packages/paperclip-runner", input)).length > 0, `${input} must exist`);
+    assert.ok(ignore.split("\n").includes(`!packages/paperclip-runner/${input}`), `${input} must enter the Docker context`);
+  }
 });
 
 test("the trusted PR workflow keeps a stable aggregate check named e2e over the shard matrix", () => {
@@ -255,7 +316,7 @@ test("the trusted PR workflow limits full CI to merge-relevant stack layers", ()
   const verify = jobs.get("verify");
   assert.match(
     verify,
-    /^ {4}needs: \[gate, policy, typecheck_release_registry, general_tests, verify_paperclip_runner, build, docker_context_integrity\]$/m,
+    /^ {4}needs: \[gate, policy, typecheck_release_registry, general_tests, verify_paperclip_runner, runner_support_suite, sandbox_provider_tests, build, docker_context_integrity\]$/m,
   );
   assert.match(verify, /POLICY_RESULT: \$\{\{ needs\.policy\.result \}\}/);
   assert.match(verify, /test "\$TYPECHECK_RELEASE_REGISTRY_RESULT" = "skipped"/);
@@ -343,7 +404,7 @@ test("the trusted PR workflow regenerates stale stacked lockfiles", () => {
   ) ?? [];
   assert.equal(
     fallbackInstalls.length,
-    7,
+    9,
     "every downstream install job must resolve a stale lockfile inline",
   );
   assert.doesNotMatch(

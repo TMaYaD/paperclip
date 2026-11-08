@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -19,6 +19,10 @@ for (const [file, service] of [
   ["docker/docker-compose.quickstart.yml", "paperclip"],
   ["docker/docker-compose.yml", "server"],
 ]) {
+  test(`${file} requires the session signing secret`, () => {
+    const source = readFileSync(path.join(repoRoot, file), "utf8");
+    assert.match(source, /^\s+BETTER_AUTH_SECRET: "\$\{BETTER_AUTH_SECRET:\?BETTER_AUTH_SECRET must be set\}"$/m);
+  });
   test(`${file} forwards the independent tool signing secret`, () => {
     const temporary = mkdtempSync(path.join(os.tmpdir(), "paperclip-compose-secrets-"));
     const envFile = path.join(temporary, "empty.env");

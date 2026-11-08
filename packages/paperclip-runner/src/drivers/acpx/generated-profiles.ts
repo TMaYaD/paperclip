@@ -79,7 +79,7 @@ export const QUALIFIED_ACPX_PROFILE_DATA = {
     "agentServerVersion": "1.6.2",
     "agentRuntimePackage": "@openai/codex",
     "agentRuntimeVersion": "0.160.0",
-    "commandDigest": "sha256:443491f4e814501a5dc47347e4510e84faeec9c9382e2d4e53bfe69386d5aabc",
+    "commandDigest": "sha256:12dc8a4af43958cb0093ad9fffc8c8eaab849ff0579f0ff12db669f59bc5402f",
     "permissionPolicy": "interactive"
   }
 } as const;
