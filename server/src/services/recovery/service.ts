@@ -5751,13 +5751,13 @@ export function recoveryService(
             result.pauseHoldSkipped += 1;
             continue;
           }
-          const handoff = await issuesSvc.getCancelledDependencyHandoff(candidate.id);
-          if (handoff) {
-            if (await findExistingCancelledDependencyHandoffWake(db, { companyId, commentId: handoff.commentId })) {
-              result.existingWakeSkipped += 1;
-              continue;
-            }
-            try {
+          try {
+            const handoff = await issuesSvc.getCancelledDependencyHandoff(candidate.id);
+            if (handoff) {
+              if (await findExistingCancelledDependencyHandoffWake(db, { companyId, commentId: handoff.commentId })) {
+                result.existingWakeSkipped += 1;
+                continue;
+              }
               const wake = await deps.enqueueWakeup(handoff.assigneeAgentId, {
                 ...buildCancelledDependencyHandoffWake(handoff),
                 requestedByActorType: "system",
@@ -5771,11 +5771,12 @@ export function recoveryService(
                 action: "issue.cancelled_dependency_handoff_emitted", entityType: "issue", entityId: candidate.id,
                 details: { source, commentId: handoff.commentId, cancelledBlockerIssueIds: handoff.cancelledBlockerIssueIds,
                   wakeupRunId: wake.id } });
-            } catch (err) {
-              result.deferredOrFailed += 1;
-              result.enqueueFailed += 1;
-              logger.warn({ err, issueId: candidate.id, source }, "failed to deliver cancelled dependency handoff");
+              continue;
             }
+          } catch (err) {
+            result.deferredOrFailed += 1;
+            result.enqueueFailed += 1;
+            logger.warn({ err, issueId: candidate.id, source }, "failed to deliver cancelled dependency handoff");
             continue;
           }
         }

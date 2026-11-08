@@ -15683,16 +15683,21 @@ export function issueRoutes(
           typeof svc.getCancelledDependencyHandoff === "function") {
           const relations = await svc.getRelationSummaries(issue.id);
           for (const dependent of relations.blocks) {
-            if (await treeControlSvc.getActivePauseHoldGate(issue.companyId, dependent.id)) continue;
-            const handoff = await svc.getCancelledDependencyHandoff(dependent.id);
-            if (!handoff || await findExistingCancelledDependencyHandoffWake(db, {
-              companyId: issue.companyId, commentId: handoff.commentId,
-            })) continue;
-            addWakeup(handoff.assigneeAgentId, {
-              ...buildCancelledDependencyHandoffWake(handoff),
-              requestedByActorType: actor.actorType,
-              requestedByActorId: actor.actorId,
-            });
+            try {
+              if (await treeControlSvc.getActivePauseHoldGate(issue.companyId, dependent.id)) continue;
+              const handoff = await svc.getCancelledDependencyHandoff(dependent.id);
+              if (!handoff || await findExistingCancelledDependencyHandoffWake(db, {
+                companyId: issue.companyId, commentId: handoff.commentId,
+              })) continue;
+              addWakeup(handoff.assigneeAgentId, {
+                ...buildCancelledDependencyHandoffWake(handoff),
+                requestedByActorType: actor.actorType,
+                requestedByActorId: actor.actorId,
+              });
+            } catch (err) {
+              logger.warn({ err, issueId: dependent.id, cancelledBlockerIssueId: issue.id },
+                "failed to deliver cancelled dependency handoff");
+            }
           }
         }
 

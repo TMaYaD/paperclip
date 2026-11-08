@@ -11,11 +11,9 @@ import {
 // `beforeEach` forces a fresh import each test, so the first test pays the
 // one-time transform and execution cost of that module. Locally the first
 // test takes about 3.7s while the later tests take about 0.13s each. Under
-// the loaded serial shard (maxWorkers=1) this cold-start can cross vitest's
-// default 5000ms test timeout and produce a flaky "Test timed out in 5000ms"
-// failure. Give the suite generous headroom, far above the observed cold-start
-// yet still below the 30s hook timeout.
-vi.setConfig({ testTimeout: 30000 });
+// the loaded serial shard (maxWorkers=1) this cold-start can exceed 30s.
+// Give the import headroom without changing any assertion.
+vi.setConfig({ testTimeout: 180000 });
 
 const mockWakeup = vi.hoisted(() => vi.fn(async () => undefined));
 const mockFindExistingIssueBlockersResolvedWakeForReadyState = vi.hoisted(() => vi.fn(async () => null));
@@ -226,6 +224,27 @@ describe("issue dependency wakeups in issue routes", () => {
     expect(response.status, JSON.stringify(response.body)).toBe(200);
     await vi.waitFor(() => expect(mockFindExistingCancelledDependencyHandoffWake).toHaveBeenCalled());
     expect(mockWakeup).not.toHaveBeenCalled();
+  });
+
+  it("continues cancellation wakes when one dependent handoff fails", async () => {
+    mockIssueService.getById.mockResolvedValue(issueRecord({ status: "in_progress" }));
+    mockIssueService.update.mockResolvedValue(issueRecord({ status: "cancelled" }));
+    mockIssueService.getRelationSummaries.mockResolvedValue({ blockedBy: [], blocks: [
+      { id: "dependent-1" }, { id: "dependent-2" },
+    ] });
+    mockIssueService.getCancelledDependencyHandoff
+      .mockRejectedValueOnce(new Error("handoff transaction failed"))
+      .mockResolvedValueOnce({
+        issueId: "dependent-2", assigneeAgentId: "agent-owner", commentId: "second-handoff",
+        cancelledBlockerIssueIds: ["issue-1"],
+      });
+
+    const response = await request(await createApp()).patch("/api/issues/issue-1").send({ status: "cancelled" });
+    expect(response.status, JSON.stringify(response.body)).toBe(200);
+    await vi.waitFor(() => expect(mockWakeup).toHaveBeenCalledWith("agent-owner", expect.objectContaining({
+      idempotencyKey: "issue_dependency_cancelled:second-handoff",
+    })));
+    expect(mockIssueService.getCancelledDependencyHandoff).toHaveBeenCalledTimes(2);
   });
 
   it("wakes dependents when the final blocker transitions to done", async () => {
