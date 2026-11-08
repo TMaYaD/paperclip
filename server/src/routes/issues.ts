@@ -15681,8 +15681,14 @@ export function issueRoutes(
 
         if (existing.status !== "cancelled" && issue.status === "cancelled" &&
           typeof svc.getCancelledDependencyHandoff === "function") {
-          const relations = await svc.getRelationSummaries(issue.id);
-          for (const dependent of relations.blocks) {
+          let blockedDependents: Array<{ id: string }> = [];
+          try {
+            blockedDependents = (await svc.getRelationSummaries(issue.id)).blocks;
+          } catch (err) {
+            logger.warn({ err, cancelledBlockerIssueId: issue.id },
+              "failed to list cancelled dependency handoffs");
+          }
+          for (const dependent of blockedDependents) {
             try {
               if (await treeControlSvc.getActivePauseHoldGate(issue.companyId, dependent.id)) continue;
               const handoff = await svc.getCancelledDependencyHandoff(dependent.id);

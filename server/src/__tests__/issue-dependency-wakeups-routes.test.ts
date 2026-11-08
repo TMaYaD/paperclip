@@ -247,6 +247,24 @@ describe("issue dependency wakeups in issue routes", () => {
     expect(mockIssueService.getCancelledDependencyHandoff).toHaveBeenCalledTimes(2);
   });
 
+  it("still wakes the parent when cancellation relation lookup fails", async () => {
+    mockIssueService.getById.mockResolvedValue(issueRecord({ status: "in_progress", parentId: "parent-1" }));
+    mockIssueService.update.mockResolvedValue(issueRecord({ status: "cancelled", parentId: "parent-1" }));
+    mockIssueService.getRelationSummaries.mockRejectedValueOnce(new Error("relation lookup failed"));
+    mockIssueService.getWakeableParentAfterChildCompletion.mockResolvedValue({
+      id: "parent-1", assigneeAgentId: "agent-parent", childIssueIds: ["issue-1"],
+      childIssueSummaries: [], childIssueSummaryTruncated: false,
+    });
+
+    const response = await request(await createApp()).patch("/api/issues/issue-1").send({ status: "cancelled" });
+    expect(response.status, JSON.stringify(response.body)).toBe(200);
+    await vi.waitFor(() => expect(mockWakeup).toHaveBeenCalledWith("agent-parent", expect.objectContaining({
+      reason: "issue_children_completed",
+      payload: expect.objectContaining({ issueId: "parent-1", completedChildIssueId: "issue-1" }),
+    })));
+    expect(mockIssueService.getWakeableParentAfterChildCompletion).toHaveBeenCalledWith("parent-1");
+  });
+
   it("wakes dependents when the final blocker transitions to done", async () => {
     mockIssueService.getById.mockResolvedValue({
       id: "issue-1",
