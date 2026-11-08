@@ -72,7 +72,8 @@ describe("native instruction comparison admission", () => {
     // This historical admission intentionally rejects later production changes.
     // Exercise the retained qualified tree rather than requiring HEAD to remain
     // one of this completed comparison's frozen variants forever.
-    const candidate = new Map(files.map(file => [file, execFileSync("git", ["show", `16ef1a5744b23bb043a8b286e6288921da1de98f:${file}`])]));
+    // Use a retained variant from main ancestry so a full checkout has the fixture.
+    const candidate = new Map(files.map(file => [file, execFileSync("git", ["show", `a386a599983519eb1d399f8b770bfccdb2a74762:${file}`])]));
     const currentVariant = nativeInstructionVariant(file => candidate.get(file)!);
     expect(["baseline", "candidate", "corrected", "feedback", "opencodeFeedback", "opencodeFeedbackSettlement", "opencodeFeedbackResponses"]).toContain(currentVariant);
     candidate.set(files[0]!, currentVariant === "candidate" ? baseline.get(files[0]!)! : Buffer.from("unknown source"));
