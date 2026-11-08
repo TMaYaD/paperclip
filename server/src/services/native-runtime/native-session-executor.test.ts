@@ -1536,7 +1536,7 @@ describe("remote provider pack manifest", () => {
         claude:
           "sha256:9d73d1f0f121fb96cc8badb28c22d5bff02d8582eb2e40360a81c189e1b9422a",
         codex:
-          "sha256:443491f4e814501a5dc47347e4510e84faeec9c9382e2d4e53bfe69386d5aabc",
+          "sha256:12dc8a4af43958cb0093ad9fffc8c8eaab849ff0579f0ff12db669f59bc5402f",
       },
       artifacts: {
         grokLauncher: { path: "dist/providers/grok/launcher.cjs", sha256: digest(grokLauncher) },

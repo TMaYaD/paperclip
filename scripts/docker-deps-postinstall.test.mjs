@@ -8,6 +8,17 @@ import { test } from "node:test";
 
 const repo = fileURLToPath(new URL("../", import.meta.url));
 
+test("Docker deps stage runs the root plugin SDK postinstall", async () => {
+  const dockerfile = await readFile(path.join(repo, "Dockerfile"), "utf8");
+  const rootPackage = JSON.parse(await readFile(path.join(repo, "package.json"), "utf8"));
+  const stage = dockerfile.split(/^FROM .* AS deps\s*$/im)[1]?.split(/^FROM /im)[0];
+  assert.ok(stage, "dependency stage exists");
+  assert.match(stage, /^COPY scripts\/link-plugin-dev-sdk\.mjs scripts\/$/m);
+  assert.equal(rootPackage.scripts.postinstall, "node scripts/link-plugin-dev-sdk.mjs");
+  assert.match(stage, /pnpm install --frozen-lockfile/);
+  assert.doesNotMatch(stage, /pnpm install --frozen-lockfile --ignore-scripts/);
+});
+
 test("dependency-layer inputs can run both Copilot postinstall entrypoints before compilation", async () => {
   const dockerfile = await readFile(path.join(repo, "Dockerfile"), "utf8");
   const stage = dockerfile.split(/^FROM .* AS deps\s*$/im)[1]?.split(/^FROM /im)[0];

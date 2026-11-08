@@ -65,7 +65,7 @@ pub(crate) fn acpx_release_profile(agent: &str) -> Option<AcpxReleaseProfile> {
             agent_runtime_package: Some("@openai/codex"),
             agent_runtime_version: Some("0.160.0"),
             command_digest:
-                "sha256:443491f4e814501a5dc47347e4510e84faeec9c9382e2d4e53bfe69386d5aabc",
+                "sha256:12dc8a4af43958cb0093ad9fffc8c8eaab849ff0579f0ff12db669f59bc5402f",
             requires_provider_policy: false,
         },
         _ => return None,

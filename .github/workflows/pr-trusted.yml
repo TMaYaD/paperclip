@@ -1,8 +1,7 @@
 name: Trusted PR CI
 
-# Rollout is intentionally two-step: merge this reusable workflow first, then
-# replace pr.yml with an immutable-SHA caller so the active CI definition cannot
-# drift from this file.
+# The fork's PR caller selects this workflow from protected main. A PR cannot
+# change the executable CI definition for its own run.
 on:
   workflow_call:
 
@@ -93,6 +92,15 @@ jobs:
         run: |
           node ./scripts/check-docker-deps-stage.mjs
           node "$CI_NODE_TEST" ./scripts/docker-deps-postinstall.test.mjs
+
+      - name: Verify Docker dependency postinstall wiring
+        run: node --test ./scripts/docker-deps-postinstall.test.mjs ./scripts/link-plugin-dev-sdk.test.js
+
+      - name: Verify Compose session signing secret forwarding
+        run: node --test ./scripts/docker-compose-secrets.test.mjs
+
+      - name: Test built-server boot probe
+        run: node --test ./scripts/server-boot-smoke.test.mjs
 
       - name: Validate Node version policy
         run: pnpm check:node-version
@@ -332,6 +340,12 @@ jobs:
       - name: Typecheck workspaces whose build scripts skip TypeScript
         run: pnpm run typecheck:build-gaps
 
+      - name: Typecheck runner test programs outside the workspace build
+        run: |
+          pnpm test:runner-acceptance:typecheck
+          pnpm test:e2e:runner:typecheck
+          pnpm test:lifecycle-baseline:typecheck
+
       - name: Verify release registry test coverage
         run: pnpm run test:release-registry
 
@@ -546,6 +560,16 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Resolve Compose session signing secret
+        env:
+          BETTER_AUTH_SECRET: ci-test-signing-secret
+        run: |
+          set -euo pipefail
+          for file in docker/docker-compose.yml docker/docker-compose.quickstart.yml; do
+            docker compose -f "$file" config --format json |
+              node -e 'const fs = require("node:fs"); const config = JSON.parse(fs.readFileSync(0, "utf8")); const matches = Object.values(config.services).filter((service) => service.environment?.BETTER_AUTH_SECRET === process.env.BETTER_AUTH_SECRET); if (matches.length !== 1) process.exit(1);'
+          done
+
       # Not every runner the gate can select ships the Buildx plugin —
       # the image-build workflows set it up explicitly, so this lane does
       # too rather than failing before it checks anything.
@@ -590,7 +614,7 @@ jobs:
     # Preserve the legacy required-check name while the underlying work runs in parallel.
     name: verify
     if: ${{ always() }}
-    needs: [gate, policy, typecheck_release_registry, general_tests, verify_paperclip_runner, build, docker_context_integrity]
+    needs: [gate, policy, typecheck_release_registry, general_tests, verify_paperclip_runner, runner_support_suite, sandbox_provider_tests, build, docker_context_integrity]
     runs-on: ${{ needs.gate.outputs.runner }}
     timeout-minutes: 5
 
@@ -602,6 +626,8 @@ jobs:
           TYPECHECK_RELEASE_REGISTRY_RESULT: ${{ needs.typecheck_release_registry.result }}
           GENERAL_TESTS_RESULT: ${{ needs.general_tests.result }}
           RUNNER_VERIFICATION_RESULT: ${{ needs.verify_paperclip_runner.result }}
+          RUNNER_SUPPORT_SUITE_RESULT: ${{ needs.runner_support_suite.result }}
+          SANDBOX_PROVIDER_TESTS_RESULT: ${{ needs.sandbox_provider_tests.result }}
           BUILD_RESULT: ${{ needs.build.result }}
           DOCKER_CONTEXT_INTEGRITY_RESULT: ${{ needs.docker_context_integrity.result }}
         run: |
@@ -611,6 +637,8 @@ jobs:
               test "$TYPECHECK_RELEASE_REGISTRY_RESULT" = "success"
               test "$GENERAL_TESTS_RESULT" = "success"
               test "$RUNNER_VERIFICATION_RESULT" = "success"
+              test "$RUNNER_SUPPORT_SUITE_RESULT" = "success"
+              test "$SANDBOX_PROVIDER_TESTS_RESULT" = "success"
               test "$BUILD_RESULT" = "success"
               test "$DOCKER_CONTEXT_INTEGRITY_RESULT" = "success"
               ;;
@@ -618,6 +646,8 @@ jobs:
               test "$TYPECHECK_RELEASE_REGISTRY_RESULT" = "skipped"
               test "$GENERAL_TESTS_RESULT" = "skipped"
               test "$RUNNER_VERIFICATION_RESULT" = "skipped"
+              test "$RUNNER_SUPPORT_SUITE_RESULT" = "skipped"
+              test "$SANDBOX_PROVIDER_TESTS_RESULT" = "skipped"
               test "$BUILD_RESULT" = "skipped"
               test "$DOCKER_CONTEXT_INTEGRITY_RESULT" = "skipped"
               ;;
@@ -626,6 +656,95 @@ jobs:
               exit 1
               ;;
           esac
+
+  runner_support_suite:
+    name: Runner support suite
+    needs: [gate]
+    if: ${{ needs.gate.outputs.full_ci == 'true' }}
+    runs-on: ${{ needs.gate.outputs.runner }}
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Setup Node.js for pnpm bootstrap
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Setup pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+        env:
+          NPM_CONFIG_AUDIT: "false"
+          NPM_CONFIG_FUND: "false"
+          NPM_CONFIG_UPDATE_NOTIFIER: "false"
+        with:
+          version: 9.15.4
+      - name: Locate pnpm store
+        id: pnpm_store
+        run: |
+          echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+          echo "arch=$(node -p 'process.arch')" >> "$GITHUB_OUTPUT"
+      - name: Restore pnpm store (read only)
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.pnpm_store.outputs.path }}
+          key: node-cache-${{ runner.os }}-${{ steps.pnpm_store.outputs.arch }}-pnpm-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: node-cache-${{ runner.os }}-${{ steps.pnpm_store.outputs.arch }}-pnpm-
+      - name: Install dependencies
+        run: |
+          if ! pnpm install --frozen-lockfile; then
+            pnpm install --resolution-only --ignore-scripts --no-frozen-lockfile
+            pnpm install --frozen-lockfile
+          fi
+      - name: Run runner support suite
+        run: pnpm test:e2e:runner:unit
+
+  sandbox_provider_tests:
+    name: Sandbox provider tests
+    needs: [gate]
+    if: ${{ needs.gate.outputs.full_ci == 'true' }}
+    runs-on: ${{ needs.gate.outputs.runner }}
+    timeout-minutes: 25
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Setup Node.js for pnpm bootstrap
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Setup pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+        env:
+          NPM_CONFIG_AUDIT: "false"
+          NPM_CONFIG_FUND: "false"
+          NPM_CONFIG_UPDATE_NOTIFIER: "false"
+        with:
+          version: 9.15.4
+      - name: Locate pnpm store
+        id: pnpm_store
+        run: |
+          echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+          echo "arch=$(node -p 'process.arch')" >> "$GITHUB_OUTPUT"
+      - name: Restore pnpm store (read only)
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.pnpm_store.outputs.path }}
+          key: node-cache-${{ runner.os }}-${{ steps.pnpm_store.outputs.arch }}-pnpm-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: node-cache-${{ runner.os }}-${{ steps.pnpm_store.outputs.arch }}-pnpm-
+      - name: Install dependencies
+        run: |
+          if ! pnpm install --frozen-lockfile; then
+            pnpm install --resolution-only --ignore-scripts --no-frozen-lockfile
+            pnpm install --frozen-lockfile
+          fi
+      - name: Test standalone sandbox providers
+        run: node scripts/test-sandbox-providers.mjs
 
   verify_paperclip_runner:
     name: Verify Paperclip Runner (${{ matrix.lane_label }})
