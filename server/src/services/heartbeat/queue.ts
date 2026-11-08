@@ -2023,7 +2023,11 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       await db.update(agentWakeupRequests).set({ updatedAt: new Date() }).where(and(
         eq(agentWakeupRequests.id, wake.id), eq(agentWakeupRequests.status, "deferred_issue_execution"),
       ));
-      if (currentAssigneeAgentId && currentAssigneeAgentId !== wake.agentId) {
+      if (currentAssigneeAgentId && currentAssigneeAgentId !== wake.agentId &&
+          wake.requestedByActorType === "user" &&
+          ["issue_commented", "issue_reopened_via_comment"].includes(String(
+            parseObject(parseObject(wake.payload)._paperclipWakeContext).wakeReason ?? wake.reason,
+          ))) {
         await resumeSavedLegacyComments(wake.companyId, wake.id).catch(err => {
           logger.warn({ err, queueId: wake.id }, "failed to transfer saved comment to current assignee");
         });
@@ -2974,6 +2978,41 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
           await tx.execute(
             sql`select id from issues where id = ${issueId} and company_id = ${agent.companyId} for update`,
           );
+
+          if (opts.transferCommentRequestId) {
+            // The transfer's earlier read cannot establish that its source is
+            // still deferred. An assignment wake may consume it while the
+            // transfer waits for this issue lock.
+            const [sourceReceipt] = await tx.select().from(agentWakeupRequests).where(and(
+              eq(agentWakeupRequests.companyId, agent.companyId),
+              eq(agentWakeupRequests.id, opts.transferCommentRequestId),
+              eq(agentWakeupRequests.status, "deferred_issue_execution"),
+              ne(agentWakeupRequests.agentId, agentId),
+              sql`${agentWakeupRequests.payload}->>'issueId' = ${issueId}`,
+            ));
+            const [transferIssue] = await tx.select({
+              conversationAgentId: issues.conversationAgentId,
+              conversationUserId: issues.conversationUserId,
+            }).from(issues).where(and(eq(issues.companyId, agent.companyId), eq(issues.id, issueId)));
+            const sourceIds = sourceReceipt ? queuedCommentIdsFromWakePayload(sourceReceipt.payload) : [];
+            const transferIds = queuedCommentIdsFromRunContext(enrichedContextSnapshot);
+            if (!sourceReceipt || !transferIssue || isConversation(transferIssue) || opts.allowRunCoalescing === false ||
+                !transferIds.length || transferIds.some(id => !sourceIds.includes(id)) ||
+                !["issue_commented", "issue_reopened_via_comment"].includes(String(
+                  parseObject(parseObject(sourceReceipt.payload)._paperclipWakeContext).wakeReason ?? sourceReceipt.reason,
+                ))) return { kind: "deferred" as const };
+            const oldOwnerIds = await undeliveredLegacyUserCommentIds(tx as unknown as Db,
+              agent.companyId, issueId, sourceReceipt.agentId, transferIds);
+            const currentOwnerIds = await undeliveredLegacyUserCommentIds(tx as unknown as Db,
+              agent.companyId, issueId, agentId, transferIds);
+            if (oldOwnerIds.length !== transferIds.length || currentOwnerIds.length !== transferIds.length)
+              return { kind: "deferred" as const };
+            const [lastComment] = await tx.select({ authorUserId: issueComments.authorUserId })
+              .from(issueComments).where(and(eq(issueComments.companyId, agent.companyId),
+                eq(issueComments.issueId, issueId), eq(issueComments.id, transferIds[transferIds.length - 1]!)));
+            if (!lastComment?.authorUserId || lastComment.authorUserId !== opts.requestedByActorId)
+              return { kind: "deferred" as const };
+          }
 
           // Route delivery and recovery share this admission fence. The comment
           // transaction alone cannot serialize two subsequent queue writes.
@@ -4416,6 +4455,11 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
           const adoptedComments = [] as typeof eligibleComments;
           for (const wake of eligibleComments) {
             if (wake.agentId !== agentId) {
+              // An assignment naming a stopped source may only inherit that
+              // exact source owner's input. A failed handoff binding must not
+              // fall back to generic former-owner adoption.
+              if (interruptedRunId && !handoffSource && wake.id !== opts.transferCommentRequestId) continue;
+              if (opts.transferCommentRequestId && wake.id !== opts.transferCommentRequestId) continue;
               // A new assignee may take over saved user input, but never a
               // former owner's dedicated continuation or already sent text.
               if (!canCoalesceComments || wake.requestedByActorType !== "user") continue;
@@ -4436,7 +4480,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
               ...queuedCommentIdsFromRunContext(enrichedContextSnapshot),
             ]),
           ];
-          if (opts.queuedCommentRequestId || opts.taskRetryRequestId || handoffSource ||
+          if (opts.queuedCommentRequestId || opts.transferCommentRequestId || opts.taskRetryRequestId || handoffSource ||
               adoptedComments.some(wake => wake.agentId !== agentId)) {
             adoptedCommentIds = await undeliveredLegacyUserCommentIds(tx as unknown as Db,
               agent.companyId, issueId, agentId, adoptedCommentIds);

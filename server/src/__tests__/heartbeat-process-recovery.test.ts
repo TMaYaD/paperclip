@@ -1611,6 +1611,61 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     return { companyId, agentId, runId, wakeupRequestId, issueId };
   }
 
+  it("does not deliver a transferred comment after assignment consumes its receipt", async () => {
+    const companyId = randomUUID();
+    const formerAgentId = randomUUID();
+    const currentAgentId = randomUUID();
+    const issueId = randomUUID();
+    const issuePrefix = `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`;
+    await seedRecoveryCompany(companyId, issuePrefix);
+    await db.insert(agents).values([
+      recoveryAgentRow(formerAgentId, companyId, "Former", "engineer", "idle"),
+      recoveryAgentRow(currentAgentId, companyId, "Current", "engineer", "idle"),
+    ]);
+    await db.update(agents).set({ runtimeConfig: { heartbeat: { wakeOnDemand: true, maxConcurrentRuns: 1 } } })
+      .where(inArray(agents.id, [formerAgentId, currentAgentId]));
+    await db.insert(issues).values({ id: issueId, companyId, title: "Transfer saved input", status: "todo",
+      priority: "medium", assigneeAgentId: currentAgentId, responsibleUserId: "responsible-user" });
+    const [comment] = await db.insert(issueComments).values({ companyId, issueId, authorType: "user",
+      authorUserId: "responsible-user", body: "Deliver once." }).returning();
+    const [receipt] = await db.insert(agentWakeupRequests).values({ companyId, agentId: formerAgentId,
+      source: "automation", reason: "issue_commented", status: "deferred_issue_execution",
+      requestedByActorType: "user", requestedByActorId: "responsible-user",
+      payload: { issueId, _paperclipWakeContext: { issueId, wakeReason: "issue_commented", wakeCommentIds: [comment.id] } },
+    }).returning();
+    mockAdapterExecute.mockImplementationOnce(async () => {
+      await db.update(issues).set({ status: "done" }).where(eq(issues.id, issueId));
+      return { exitCode: 0, signal: null, timedOut: false, errorMessage: null,
+        summary: "Saved input handled.", provider: "test", model: "test-model" };
+    });
+    const heartbeat = heartbeatService(db);
+    // The transfer has read the deferred receipt. Assignment wins the issue
+    // lock and consumes it before transfer admission starts.
+    const assigned = await heartbeat.wakeup(currentAgentId, { source: "assignment", triggerDetail: "system",
+      reason: "issue_assigned", requestedByActorType: "system", requestedByActorId: "assignment",
+      payload: { issueId }, contextSnapshot: { issueId } });
+    expect(assigned).not.toBeNull();
+    await heartbeat.drainActiveRunExecutions();
+    expect(mockAdapterExecute).toHaveBeenCalledTimes(1);
+    expect((await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, receipt.id)))[0])
+      .toMatchObject({ status: "coalesced", runId: assigned!.id });
+    await db.update(issues).set({ status: "todo" }).where(eq(issues.id, issueId));
+    const staleTransfer = await heartbeat.wakeup(currentAgentId, { source: "on_demand", triggerDetail: "manual",
+      reason: "issue_commented", requestedByActorType: "user", requestedByActorId: "responsible-user",
+      payload: { issueId, _paperclipWakeContext: { issueId, wakeReason: "issue_commented", wakeCommentIds: [comment.id] } },
+      contextSnapshot: { issueId, triggeredBy: "board", actorId: "responsible-user",
+        responsibleUserId: "responsible-user", wakeCommentIds: [comment.id] },
+      transferCommentRequestId: receipt.id,
+      issueStateGuard: { assigneeAgentId: currentAgentId, statuses: ["todo", "in_progress", "in_review", "blocked"] },
+      idempotencyKey: `queued-comment-transfer:${receipt.id}:${currentAgentId}` });
+    expect(staleTransfer).toBeNull();
+    await heartbeat.drainActiveRunExecutions();
+    expect(mockAdapterExecute).toHaveBeenCalledTimes(1);
+    const deliveries = await db.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.companyId, companyId),
+      eq(heartbeatRuns.agentId, currentAgentId), sql`${heartbeatRuns.contextSnapshot}->'wakeCommentIds' @> ${JSON.stringify([comment.id])}::jsonb`));
+    expect(deliveries).toHaveLength(1);
+  });
+
   it.each(["owned", "forged"] as const)("keeps unresolved-ref recovery and reporting while persisting only owned diagnostics: %s", async provenance => {
     const { companyId, agentId, issueId, runId, wakeupRequestId } = await seedQueuedIssueRunFixture();
     const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), "base-ref-heartbeat-"));

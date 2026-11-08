@@ -725,7 +725,8 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
             issueId, triggeredBy: "board", actorId, responsibleUserId: actorId,
           }, commentIds),
       requestedByActorType: "user", requestedByActorId: actorId,
-      ...(interrupted ? { queuedCommentInterruptId: queueId } : transfer ? {} : { queuedCommentRequestId: queueId }),
+      ...(interrupted ? { queuedCommentInterruptId: queueId } : transfer
+        ? { transferCommentRequestId: queueId } : { queuedCommentRequestId: queueId }),
       issueStateGuard: { assigneeAgentId: deliveryAgentId, statuses: ["todo", "in_progress", "in_review", "blocked"] },
       idempotencyKey: `queued-comment-${interrupted ? "interrupt" : transfer ? "transfer" : "delivery"}:${queueId}${transfer ? `:${deliveryAgentId}` : ""}`,
     }, transfer ? undefined : queueId);
