@@ -96,12 +96,18 @@ export async function withGitBuildWorkspace<T>(
     if (!reuse && previous?.clean === true && previous.generation !== state.generation) {
       fs.rmSync(path.join(root, previous.generation), { recursive: true, force: true });
     }
-    // Failed/interrupted generations remain quarantined. Do not remove or recycle
-    // a directory that may still be used by an orphaned compiler or pnpm process.
+    // Recent failed generations remain isolated from possible orphaned writers.
     clearGitBuildSources(source);
     console.log(`[git install] prepare build workspace: ${((performance.now() - start) / 1000).toFixed(2)}s`);
     const result = await build(source);
     writeState(statePath, { ...state, clean: true });
+    // A successful build bounds quarantine growth while this repo lock is held.
+    const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+    for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+      if (entry.name === state.generation || !entry.name.startsWith("work-") || !entry.isDirectory()) continue;
+      const candidate = path.join(root, entry.name);
+      if (fs.lstatSync(candidate).mtimeMs < cutoff) fs.rmSync(candidate, { recursive: true, force: true });
+    }
     return result;
   }, { ...paths, lockPath: path.join(root, ".build.lock") }, { initialize: false });
 }

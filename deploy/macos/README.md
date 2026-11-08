@@ -93,8 +93,10 @@ Set `PAPERCLIP_GIT_INSTALL_CLEAN=1` for a fresh build workspace. This applies on
 to git builds; an already installed SHA still uses its verified cached payload.
 A failed or interrupted build marks its workspace dirty. The next attempt uses a
 new directory, so an orphaned compiler cannot write into that attempt. Dirty
-`work-*` generations remain quarantined under the repository build folder; they
-can be removed when all old build processes have stopped. A forced clean build
+`work-*` generations remain quarantined under the repository build folder. After
+a successful build, while holding the build lock, the installer removes other
+generations with a directory mtime older than 24 hours. It keeps the current
+generation and recent failures. A forced clean build
 replaces a previously successful workspace. Runtime/architecture changes also
 start a fresh workspace. Published npm installs are unaffected.
 

@@ -93,3 +93,26 @@ it("refuses a symlinked workspace root", async () => {
   await expect(withGitBuildWorkspace("owner/repo", paths, async () => undefined)).rejects.toThrow("unsafe git build workspace");
   expect(fs.readdirSync(target)).toEqual([]);
 });
+
+it("prunes only other generations older than 24 hours after a successful build", async () => {
+  const repoRoot = gitBuildWorkspaceRoot("owner/repo", paths);
+  let current = "";
+  await withGitBuildWorkspace("owner/repo", paths, async source => { current = path.dirname(source); });
+  const stale = path.join(repoRoot, "work-stale");
+  const recent = path.join(repoRoot, "work-recent");
+  const unrelated = path.join(repoRoot, "keep-other");
+  for (const directory of [stale, recent, unrelated]) write(path.join(directory, "source/node_modules/fixture"));
+  const old = new Date(Date.now() - 25 * 60 * 60 * 1000);
+  for (const directory of [stale, unrelated, current]) fs.utimesSync(directory, old, old);
+  await expect(withGitBuildWorkspace("owner/repo", paths, async () => { throw new Error("failed"); })).rejects.toThrow("failed");
+  expect(fs.existsSync(stale)).toBe(true);
+  await withGitBuildWorkspace("owner/repo", paths, async source => {
+    current = path.dirname(source);
+    fs.utimesSync(current, old, old);
+    expect(fs.existsSync(stale)).toBe(true);
+  });
+  expect(fs.existsSync(stale)).toBe(false);
+  expect(fs.existsSync(recent)).toBe(true);
+  expect(fs.existsSync(unrelated)).toBe(true);
+  expect(fs.existsSync(current)).toBe(true);
+});
