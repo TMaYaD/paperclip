@@ -3,6 +3,7 @@ import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   buildIssueBlockersResolvedWakeStateKey,
+  type CancelledDependencyHandoff,
 } from "../services/issue-dependency-wakeups.ts";
 
 // The first test in this suite imports the large `routes/issues.ts` module
@@ -10,14 +11,13 @@ import {
 // `beforeEach` forces a fresh import each test, so the first test pays the
 // one-time transform and execution cost of that module. Locally the first
 // test takes about 3.7s while the later tests take about 0.13s each. Under
-// the loaded serial shard (maxWorkers=1) this cold-start can cross vitest's
-// default 5000ms test timeout and produce a flaky "Test timed out in 5000ms"
-// failure. Give the suite generous headroom, far above the observed cold-start
-// yet still below the 30s hook timeout.
-vi.setConfig({ testTimeout: 30000 });
+// the loaded serial shard (maxWorkers=1) this cold-start can exceed 30s.
+// Give the import headroom without changing any assertion.
+vi.setConfig({ testTimeout: 180000 });
 
 const mockWakeup = vi.hoisted(() => vi.fn(async () => undefined));
 const mockFindExistingIssueBlockersResolvedWakeForReadyState = vi.hoisted(() => vi.fn(async () => null));
+const mockFindExistingCancelledDependencyHandoffWake = vi.hoisted(() => vi.fn<() => Promise<{ id: string } | null>>(async () => null));
 const mockIssueService = vi.hoisted(() => ({
   getAncestors: vi.fn(),
   getById: vi.fn(),
@@ -28,6 +28,7 @@ const mockIssueService = vi.hoisted(() => ({
   getRelationSummaries: vi.fn(),
   update: vi.fn(),
   getDependencyReadiness: vi.fn(),
+  getCancelledDependencyHandoff: vi.fn<() => Promise<CancelledDependencyHandoff | null>>(async () => null),
   listWakeableBlockedDependents: vi.fn(),
   getWakeableParentAfterChildCompletion: vi.fn(),
   findMentionedAgents: vi.fn(async () => []),
@@ -67,6 +68,7 @@ vi.mock("../services/index.js", () => ({
   }),
   heartbeatService: () => ({
     wakeup: mockWakeup,
+    getActiveRunForAgent: vi.fn(async () => null),
     reportRunActivity: vi.fn(async () => undefined),
   }),
   getIssueContinuationSummaryDocument: vi.fn(async () => null),
@@ -118,6 +120,7 @@ vi.mock("../services/issue-dependency-wakeups.js", async () => {
   );
   return {
     ...actual,
+    findExistingCancelledDependencyHandoffWake: mockFindExistingCancelledDependencyHandoffWake,
     findExistingIssueBlockersResolvedWakeForReadyState:
       mockFindExistingIssueBlockersResolvedWakeForReadyState,
   };
@@ -167,6 +170,8 @@ describe("issue dependency wakeups in issue routes", () => {
     vi.doUnmock("../middleware/index.js");
     vi.clearAllMocks();
     mockFindExistingIssueBlockersResolvedWakeForReadyState.mockResolvedValue(null);
+    mockFindExistingCancelledDependencyHandoffWake.mockResolvedValue(null);
+    mockIssueService.getCancelledDependencyHandoff.mockResolvedValue(null);
     mockIssueService.getAncestors.mockResolvedValue([]);
     mockIssueService.getByIdForUpdate.mockImplementation(async () => mockIssueService.getById());
     mockIssueService.getComment.mockResolvedValue(null);
@@ -187,6 +192,77 @@ describe("issue dependency wakeups in issue routes", () => {
     });
     mockIssueService.listWakeableBlockedDependents.mockResolvedValue([]);
     mockIssueService.getWakeableParentAfterChildCompletion.mockResolvedValue(null);
+  });
+
+  it("hands a cancelled blocker to its dependent owner without claiming its result is ready", async () => {
+    mockIssueService.getById.mockResolvedValue(issueRecord({ status: "in_progress" }));
+    mockIssueService.update.mockResolvedValue(issueRecord({ status: "cancelled" }));
+    mockIssueService.getRelationSummaries.mockResolvedValue({ blockedBy: [], blocks: [{ id: "dependent-1" }] });
+    mockIssueService.getCancelledDependencyHandoff.mockResolvedValue({
+      issueId: "dependent-1", assigneeAgentId: "agent-owner", commentId: "handoff-comment",
+      cancelledBlockerIssueIds: ["issue-1"],
+    });
+    const response = await request(await createApp()).patch("/api/issues/issue-1").send({ status: "cancelled" });
+    expect(response.status, JSON.stringify(response.body)).toBe(200);
+    await vi.waitFor(() => expect(mockWakeup).toHaveBeenCalledWith("agent-owner", expect.objectContaining({
+      reason: "issue_commented", idempotencyKey: "issue_dependency_cancelled:handoff-comment",
+      payload: expect.objectContaining({ issueId: "dependent-1", commentId: "handoff-comment", mutation: "interaction" }),
+    })));
+    expect(mockIssueService.listWakeableBlockedDependents).not.toHaveBeenCalled();
+    expect(mockWakeup).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not deliver the same cancellation handoff twice", async () => {
+    mockIssueService.getById.mockResolvedValue(issueRecord({ status: "in_progress" }));
+    mockIssueService.update.mockResolvedValue(issueRecord({ status: "cancelled" }));
+    mockIssueService.getRelationSummaries.mockResolvedValue({ blockedBy: [], blocks: [{ id: "dependent-1" }] });
+    mockIssueService.getCancelledDependencyHandoff.mockResolvedValue({
+      issueId: "dependent-1", assigneeAgentId: "agent-owner", commentId: "handoff-comment", cancelledBlockerIssueIds: ["issue-1"],
+    });
+    mockFindExistingCancelledDependencyHandoffWake.mockResolvedValue({ id: "delivered" });
+    const response = await request(await createApp()).patch("/api/issues/issue-1").send({ status: "cancelled" });
+    expect(response.status, JSON.stringify(response.body)).toBe(200);
+    await vi.waitFor(() => expect(mockFindExistingCancelledDependencyHandoffWake).toHaveBeenCalled());
+    expect(mockWakeup).not.toHaveBeenCalled();
+  });
+
+  it("continues cancellation wakes when one dependent handoff fails", async () => {
+    mockIssueService.getById.mockResolvedValue(issueRecord({ status: "in_progress" }));
+    mockIssueService.update.mockResolvedValue(issueRecord({ status: "cancelled" }));
+    mockIssueService.getRelationSummaries.mockResolvedValue({ blockedBy: [], blocks: [
+      { id: "dependent-1" }, { id: "dependent-2" },
+    ] });
+    mockIssueService.getCancelledDependencyHandoff
+      .mockRejectedValueOnce(new Error("handoff transaction failed"))
+      .mockResolvedValueOnce({
+        issueId: "dependent-2", assigneeAgentId: "agent-owner", commentId: "second-handoff",
+        cancelledBlockerIssueIds: ["issue-1"],
+      });
+
+    const response = await request(await createApp()).patch("/api/issues/issue-1").send({ status: "cancelled" });
+    expect(response.status, JSON.stringify(response.body)).toBe(200);
+    await vi.waitFor(() => expect(mockWakeup).toHaveBeenCalledWith("agent-owner", expect.objectContaining({
+      idempotencyKey: "issue_dependency_cancelled:second-handoff",
+    })));
+    expect(mockIssueService.getCancelledDependencyHandoff).toHaveBeenCalledTimes(2);
+  });
+
+  it("still wakes the parent when cancellation relation lookup fails", async () => {
+    mockIssueService.getById.mockResolvedValue(issueRecord({ status: "in_progress", parentId: "parent-1" }));
+    mockIssueService.update.mockResolvedValue(issueRecord({ status: "cancelled", parentId: "parent-1" }));
+    mockIssueService.getRelationSummaries.mockRejectedValueOnce(new Error("relation lookup failed"));
+    mockIssueService.getWakeableParentAfterChildCompletion.mockResolvedValue({
+      id: "parent-1", assigneeAgentId: "agent-parent", childIssueIds: ["issue-1"],
+      childIssueSummaries: [], childIssueSummaryTruncated: false,
+    });
+
+    const response = await request(await createApp()).patch("/api/issues/issue-1").send({ status: "cancelled" });
+    expect(response.status, JSON.stringify(response.body)).toBe(200);
+    await vi.waitFor(() => expect(mockWakeup).toHaveBeenCalledWith("agent-parent", expect.objectContaining({
+      reason: "issue_children_completed",
+      payload: expect.objectContaining({ issueId: "parent-1", completedChildIssueId: "issue-1" }),
+    })));
+    expect(mockIssueService.getWakeableParentAfterChildCompletion).toHaveBeenCalledWith("parent-1");
   });
 
   it("wakes dependents when the final blocker transitions to done", async () => {
@@ -322,7 +398,7 @@ describe("issue dependency wakeups in issue routes", () => {
     });
   });
 
-  it("wakes the parent when all direct children become terminal", async () => {
+  it.each(["done", "cancelled"] as const)("wakes the parent when the last child becomes %s and all direct children are terminal", async (terminalStatus) => {
     mockIssueService.getById.mockResolvedValue({
       id: "child-1",
       companyId: "company-1",
@@ -346,7 +422,7 @@ describe("issue dependency wakeups in issue routes", () => {
       identifier: "PAP-101",
       title: "Last child",
       description: null,
-      status: "done",
+      status: terminalStatus,
       priority: "medium",
       parentId: "parent-1",
       assigneeAgentId: "agent-1",
@@ -377,7 +453,7 @@ describe("issue dependency wakeups in issue routes", () => {
           id: "child-1",
           identifier: "PAP-101",
           title: "Last child",
-          status: "done",
+          status: terminalStatus,
           priority: "medium",
           assigneeAgentId: "agent-1",
           assigneeUserId: null,
@@ -388,7 +464,7 @@ describe("issue dependency wakeups in issue routes", () => {
       childIssueSummaryTruncated: false,
     });
 
-    const res = await request(await createApp()).patch("/api/issues/child-1").send({ status: "done" });
+    const res = await request(await createApp()).patch("/api/issues/child-1").send({ status: terminalStatus });
     expect(res.status).toBe(200);
     await vi.waitFor(() => {
       expect(mockWakeup).toHaveBeenCalledWith(
