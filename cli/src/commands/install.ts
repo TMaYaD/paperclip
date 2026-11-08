@@ -303,7 +303,9 @@ export async function installGitPayload(repo: string, sha: string, runCommand: C
     await timeGitInstallStage("smoke payload", () => smokePayload(stagedPayload, metadata.version, runCommand));
     fs.renameSync(stagedPayload, payloadPath);
     return { payloadPath, reused: false, version: metadata.version };
-  } finally { fs.rmSync(stagingRoot, { recursive: true, force: true }); }
+  } finally {
+    await timeGitInstallStage("cleanup staging", async () => fs.rmSync(stagingRoot, { recursive: true, force: true }));
+  }
 }
 
 function pathContains(directory: string): boolean {
