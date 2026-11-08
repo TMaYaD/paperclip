@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { createRequire } from "node:module";
 import { execFileSync } from "node:child_process";
 import { afterEach, expect, it } from "vitest";
 import { assertSelfContainedPayload, materializeGitPayload } from "../git-payload.js";
@@ -30,6 +31,7 @@ it("preserves installed versions, patches, peers, optional natives, cycles, bins
   write(path.join(server, "ui-dist/index.html"), "UI");
   write(path.join(checkout, "LICENSE"), "workspace license");
   write(path.join(server, "provider-assets/copilot/host/copilot"), "verified native closure");
+  write(path.join(server, "provider-assets/copilot/host/distribution/foundry/node_modules/runtime/index.js"), "opaque runtime dependency");
   write(path.join(server, "skills/paperclip/SKILL.md"), "skill");
   const bridge = pkg("node_modules/.pnpm/bridge/node_modules/bridge", { name: "bridge", dependencies: { peer: "*" }, optionalDependencies: { native: "*", absent: "*" }, bin: { bridge: "cli.js" } }, "export {value} from 'peer';");
   write(path.join(bridge, "cli.js"), "#!/usr/bin/env node\nconsole.log('bridge');");
@@ -61,7 +63,11 @@ it("preserves installed versions, patches, peers, optional natives, cycles, bins
   expect(fs.readFileSync(path.join(moved, "node_modules/@paperclipai/server/ui-dist/index.html"), "utf8")).toBe("UI");
   expect(fs.readFileSync(path.join(moved, "node_modules/@paperclipai/server/provider-assets/copilot/host/copilot"), "utf8")).toBe("verified native closure");
   expect(fs.readFileSync(path.join(moved, "node_modules/@paperclipai/server/LICENSE"), "utf8")).toBe("workspace license");
-  const files = fs.readdirSync(path.join(moved, "node_modules/.paperclip"), { recursive: true }).map(String);
+  const serverRoot = fs.realpathSync(path.join(moved, "node_modules/@paperclipai/server"));
+  expect(fs.readFileSync(path.join(serverRoot, "provider-assets/copilot/host/distribution/foundry/node_modules/runtime/index.js"), "utf8")).toBe("opaque runtime dependency");
+  const bridgeEntry = createRequire(path.join(serverRoot, "package.json")).resolve("bridge");
+  expect(fs.realpathSync(bridgeEntry).startsWith(`${serverRoot}${path.sep}node_modules${path.sep}`)).toBe(true);
+  const files = fs.readdirSync(path.join(serverRoot, "node_modules/.paperclip"), { recursive: true }).map(String);
   expect(files.some(file => file.endsWith("/native/package.json"))).toBe(true);
   expect(files.some(file => file.includes("unused"))).toBe(false);
   expect(files.some(file => file.includes("absent"))).toBe(false);

@@ -34,6 +34,11 @@ export function materializeGitPayload(checkoutPath: string, payloadPath: string)
   const workspaces = new Set(entries.map(entry => fs.realpathSync(path.join(checkout, entry.dir))));
   workspaces.add(cliSource);
   const modules = path.join(payloadPath, "node_modules");
+  const serverSource = fs.realpathSync(path.join(checkout, "server"));
+  const serverRoot = path.join(modules, "@paperclipai", "server");
+  // Provider integrity checks admit only dependencies beneath the server root.
+  // Keep the shared graph inside that authority, rather than beside the server.
+  const packageStore = path.join(serverRoot, "node_modules", ".paperclip");
   const copied = new Map<string, { directory: string; manifest: Manifest }>();
   fs.mkdirSync(modules, { recursive: true });
 
@@ -47,9 +52,7 @@ export function materializeGitPayload(checkoutPath: string, payloadPath: string)
       fs.symlinkSync(fs.readlinkSync(source), destination);
     } else if (stat.isDirectory()) {
       fs.mkdirSync(destination, { recursive: true });
-      for (const entry of fs.readdirSync(source)) {
-        if (entry !== "node_modules") copy(path.join(source, entry), path.join(destination, entry));
-      }
+      for (const entry of fs.readdirSync(source)) copy(path.join(source, entry), path.join(destination, entry));
     } else if (stat.isFile()) {
       // APFS reflinks avoid copying native binaries, without sharing mutable inodes
       // with the build workspace. Other filesystems fall back to a regular copy.
@@ -63,7 +66,8 @@ export function materializeGitPayload(checkoutPath: string, payloadPath: string)
     const original = source === cliSource ? originalCli : readManifest(source);
     const manifest: Manifest = { ...original };
     const directory = source === cliSource ? path.join(modules, "paperclipai")
-      : path.join(modules, ".paperclip", String(copied.size), "node_modules", original.name);
+      : source === serverSource ? serverRoot
+      : path.join(packageStore, String(copied.size), "node_modules", original.name);
     const result = { directory, manifest };
     // Memoize before walking dependencies to preserve peer contexts and cycles.
     copied.set(source, result);
@@ -154,7 +158,8 @@ export function materializeGitPayload(checkoutPath: string, payloadPath: string)
   fs.writeFileSync(path.join(cli.directory, "package.json"), `${JSON.stringify(cli.manifest, null, 2)}\n`);
   // Preserve the historical top-level server/workspace lookup layout.
   for (const [source, target] of copied) {
-    if (source !== cliSource && workspaces.has(source)) link(path.join(modules, target.manifest.name), target.directory);
+    const alias = path.join(modules, target.manifest.name);
+    if (source !== cliSource && workspaces.has(source) && alias !== target.directory) link(alias, target.directory);
   }
 }
 
