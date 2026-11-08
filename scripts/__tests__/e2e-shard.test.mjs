@@ -377,7 +377,7 @@ test("the trusted PR workflow regenerates stale stacked lockfiles", () => {
   ) ?? [];
   assert.equal(
     fallbackInstalls.length,
-    7,
+    9,
     "every downstream install job must resolve a stale lockfile inline",
   );
   assert.doesNotMatch(
