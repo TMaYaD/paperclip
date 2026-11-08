@@ -22,6 +22,8 @@ import {
   type InstallRecord,
 } from "../install-store.js";
 
+import { materializeGitPayload, assertSelfContainedPayload } from "../git-payload.js";
+
 const execFileAsync = promisify(execFile);
 export const PUBLIC_NPM_REGISTRY = "https://registry.npmjs.org";
 const DEFAULT_GITHUB_REPO = "paperclipai/paperclip";
@@ -259,50 +261,6 @@ export async function timeGitInstallStage<T>(name: string, operation: () => Prom
   }
 }
 
-/** Deploy the workspace graph, but expose built package exports instead of TS sources. */
-export function prepareGitDeployManifests(checkoutPath: string): void {
-  const cliPath = path.join(checkoutPath, "cli", "package.json");
-  const builtCli = JSON.parse(fs.readFileSync(cliPath, "utf8"));
-  const originalCli = JSON.parse(fs.readFileSync(path.join(checkoutPath, "cli", "package.dev.json"), "utf8"));
-  // The esbuild bundle imports external dependencies from bundled workspace code.
-  // Keep those flattened declarations AND workspace:* so no workspace package can
-  // resolve to an older published copy. Only the disposable checkout is modified.
-  const cli = { ...originalCli, dependencies: { ...builtCli.dependencies, ...originalCli.dependencies },
-    optionalDependencies: { ...builtCli.optionalDependencies, ...originalCli.optionalDependencies } };
-  fs.writeFileSync(cliPath, `${JSON.stringify(cli, null, 2)}\n`);
-  for (const entry of [...resolveGitInstallWorkspacePackages(checkoutPath), { dir: "cli" }]) {
-    const manifestPath = path.join(checkoutPath, entry.dir, "package.json");
-    const pkg = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
-    for (const key of ["main", "types", "exports", "bin"]) {
-      if (pkg.publishConfig?.[key] !== undefined) pkg[key] = pkg.publishConfig[key];
-    }
-    // pnpm deploy supplies the already patched production closure. Do not copy
-    // bundled node_modules through packlist or run publish lifecycle hooks again.
-    delete pkg.bundleDependencies;
-    delete pkg.bundledDependencies;
-    fs.writeFileSync(manifestPath, `${JSON.stringify(pkg, null, 2)}\n`);
-  }
-}
-
-/** All runtime links must survive both the staging deletion and payload rename. */
-export function assertSelfContainedPayload(payloadPath: string): void {
-  const root = fs.realpathSync(payloadPath);
-  const visit = (directory: string): void => {
-    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
-      const candidate = path.join(directory, entry.name);
-      if (entry.isSymbolicLink()) {
-        const target = fs.readlinkSync(candidate);
-        const resolved = fs.realpathSync(candidate);
-        const relative = path.relative(root, resolved);
-        if (path.isAbsolute(target) || relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
-          throw new Error(`Git payload link escapes its payload: ${candidate} -> ${target}`);
-        }
-      } else if (entry.isDirectory()) visit(candidate);
-    }
-  };
-  visit(root);
-}
-
 export async function installGitPayload(repo: string, sha: string, runCommand: CommandRunner, paths = resolveInstallStorePaths()): Promise<{ payloadPath: string; reused: boolean; version: string }> {
   const identifier = sha.slice(0, 12);
   const payloadPath = payloadPathFor(paths, "git", identifier);
@@ -340,22 +298,7 @@ export async function installGitPayload(repo: string, sha: string, runCommand: C
     await timeGitInstallStage("build CLI", () => runCommand("bash", ["scripts/build-npm.sh", "--skip-checks", "--skip-typecheck"], { cwd: checkoutPath, env: buildEnv(), maxBuffer: 32 * 1024 * 1024 }));
     await timeGitInstallStage("build server", () => runCommand("corepack", ["pnpm", "-r", "--filter", "@paperclipai/server...", "--if-present", "run", "build"], { cwd: checkoutPath, env: buildEnv(), maxBuffer: 32 * 1024 * 1024 }));
     const metadata = JSON.parse(fs.readFileSync(path.join(checkoutPath, "cli", "package.json"), "utf8")) as { version: string };
-    prepareGitDeployManifests(checkoutPath);
-    // pnpm 9 deploy injects workspace dependencies itself (no --legacy flag).
-    // Offline disallows a second registry resolution/download round trip.
-    const deployedCli = path.join(stagedPayload, "node_modules", "paperclipai");
-    fs.mkdirSync(path.dirname(deployedCli), { recursive: true });
-    await timeGitInstallStage("deploy payload", () => runCommand("corepack", ["pnpm", "--filter", "paperclipai", "deploy", "--prod", "--offline", "--ignore-scripts", deployedCli], { cwd: checkoutPath, env: buildEnv(), maxBuffer: 32 * 1024 * 1024 }));
-    // Keep the historical public layout for service commands and operators.
-    const deployedModules = path.join(deployedCli, "node_modules");
-    fs.mkdirSync(path.join(stagedPayload, "node_modules", "@paperclipai"), { recursive: true });
-    for (const entry of resolveGitInstallWorkspacePackages(checkoutPath)) {
-      const direct = path.join(deployedModules, entry.name);
-      const hoisted = path.join(deployedModules, ".pnpm", "node_modules", entry.name);
-      const target = fs.existsSync(direct) ? direct : hoisted;
-      const link = path.join(stagedPayload, "node_modules", entry.name);
-      fs.symlinkSync(path.relative(path.dirname(link), target), link, "dir");
-    }
+    await timeGitInstallStage("materialize payload", async () => materializeGitPayload(checkoutPath, stagedPayload));
     await timeGitInstallStage("validate payload links", async () => assertSelfContainedPayload(stagedPayload));
     await timeGitInstallStage("smoke payload", () => smokePayload(stagedPayload, metadata.version, runCommand));
     fs.renameSync(stagedPayload, payloadPath);

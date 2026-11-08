@@ -1,0 +1,66 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { execFileSync } from "node:child_process";
+import { afterEach, expect, it } from "vitest";
+import { assertSelfContainedPayload, materializeGitPayload } from "../git-payload.js";
+
+const roots: string[] = [];
+afterEach(() => { for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true }); });
+
+it("preserves installed versions, patches, peers, optional natives, cycles, bins and built exports after deleting source", () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "git-payload-")));
+  roots.push(root);
+  const checkout = path.join(root, "source");
+  const payload = path.join(root, "payload");
+  const write = (file: string, contents: string) => { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, contents); };
+  const pkg = (dir: string, manifest: object, code = "export const value = 'patched';") => {
+    const directory = path.join(checkout, dir);
+    write(path.join(directory, "package.json"), JSON.stringify({ name: dir, version: "9.0.0", type: "module", main: "index.js", ...manifest }));
+    write(path.join(directory, "index.js"), code);
+    return directory;
+  };
+  const bind = (issuer: string, name: string, target: string) => {
+    const file = path.join(issuer, "node_modules", name);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.symlinkSync(path.relative(path.dirname(file), target), file);
+  };
+  const server = pkg("server", { name: "@paperclipai/server", files: ["dist", "ui-dist", "skills"], exports: "./src/index.ts", publishConfig: { exports: "./dist/index.js" }, dependencies: { bridge: "^1.0.0" }, devDependencies: { unused: "1" }, bundleDependencies: ["bridge"] });
+  write(path.join(server, "dist/index.js"), "export {value} from 'bridge';");
+  write(path.join(server, "ui-dist/index.html"), "UI");
+  write(path.join(server, "skills/paperclip/SKILL.md"), "skill");
+  const bridge = pkg("node_modules/.pnpm/bridge/node_modules/bridge", { name: "bridge", dependencies: { peer: "*" }, optionalDependencies: { native: "*", absent: "*" }, bin: { bridge: "cli.js" } }, "export {value} from 'peer';");
+  write(path.join(bridge, "cli.js"), "#!/usr/bin/env node\nconsole.log('bridge');");
+  fs.chmodSync(path.join(bridge, "cli.js"), 0o755);
+  const peer = pkg("node_modules/.pnpm/context/node_modules/peer", { name: "peer", peerDependencies: { bridge: "*" } });
+  const wrongPeer = pkg("node_modules/peer", { name: "peer", version: "0.3.1" }, "export const value='stale';");
+  const native = pkg("node_modules/.pnpm/native/node_modules/native", { name: "native", os: [process.platform], cpu: [process.arch] });
+  const unused = pkg("node_modules/unused", { name: "unused" });
+  const cli = pkg("cli", { name: "paperclipai", files: ["dist"], dependencies: { "@paperclipai/server": "workspace:*" } });
+  fs.copyFileSync(path.join(cli, "package.json"), path.join(cli, "package.dev.json"));
+  write(path.join(cli, "package.json"), JSON.stringify({ name: "paperclipai", version: "9.0.0", dependencies: { "@paperclipai/server": "9.0.0", bridge: "^1.0.0" } }));
+  write(path.join(cli, "dist/index.js"), "import {value} from '@paperclipai/server'; import {value as direct} from 'bridge'; console.log(value, direct);");
+  write(path.join(checkout, "scripts/release-package-manifest.json"), JSON.stringify([{ dir: "server", name: "@paperclipai/server" }, { dir: "cli", name: "paperclipai" }]));
+  bind(cli, "@paperclipai/server", server);
+  bind(server, "bridge", bridge);
+  bind(server, "unused", unused);
+  bind(bridge, "peer", peer);
+  bind(bridge, "native", native);
+  bind(peer, "bridge", bridge);
+  materializeGitPayload(checkout, payload);
+  assertSelfContainedPayload(payload);
+  // A later dependency postinstall must not mutate an existing payload's inode.
+  write(path.join(peer, "index.js"), "throw new Error('mutated source')");
+  fs.rmSync(checkout, { recursive: true });
+  const moved = path.join(root, "activated");
+  fs.renameSync(payload, moved);
+  assertSelfContainedPayload(moved);
+  expect(execFileSync(process.execPath, [path.join(moved, "node_modules/paperclipai/dist/index.js")], { encoding: "utf8" }).trim()).toBe("patched patched");
+  expect(fs.readFileSync(path.join(moved, "node_modules/@paperclipai/server/ui-dist/index.html"), "utf8")).toBe("UI");
+  const files = fs.readdirSync(path.join(moved, "node_modules/.paperclip"), { recursive: true }).map(String);
+  expect(files.some(file => file.endsWith("/native/package.json"))).toBe(true);
+  expect(files.some(file => file.includes("unused"))).toBe(false);
+  expect(files.some(file => file.includes("absent"))).toBe(false);
+  expect(execFileSync(path.join(moved, "node_modules/@paperclipai/server/node_modules/.bin/bridge"), { encoding: "utf8" }).trim()).toBe("bridge");
+  expect(wrongPeer).toContain("node_modules/peer");
+});
