@@ -50,18 +50,13 @@ function writeState(file: string, state: BuildState): void {
   }
 }
 
-/** Remove every source/output file before extraction; retain dependency directories only. */
+/** Keep only the root dependency store; nested node_modules can be generated assets. */
 export function clearGitBuildSources(source: string): void {
   for (const entry of fs.readdirSync(source, { withFileTypes: true })) {
     const candidate = path.join(source, entry.name);
-    if (entry.isDirectory()) {
-      if (entry.name === "node_modules") continue;
-      clearGitBuildSources(candidate);
-      if (fs.readdirSync(candidate).length === 0) fs.rmdirSync(candidate);
-    } else {
-      // unlink also handles directory symlinks on older Node 24 releases.
-      fs.unlinkSync(candidate);
-    }
+    if (entry.name === "node_modules" && entry.isDirectory()) continue;
+    if (entry.isSymbolicLink()) fs.unlinkSync(candidate);
+    else fs.rmSync(candidate, { recursive: true, force: true });
   }
 }
 

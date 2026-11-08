@@ -79,8 +79,10 @@ activation so deleting the source checkout cannot break the installed service.
 
 Git builds keep dependency directories in a private per-repository workspace under
 `$PAPERCLIP_HOME/cli/build/`. Each install removes all source and generated files
-before extracting the requested commit. It retains only `node_modules`
-directories, including pnpm's virtual store. It never reuses `dist`, UI output,
+before extracting the requested commit. It retains only the root `node_modules`
+directory, including pnpm's virtual store. pnpm recreates workspace-local links.
+Nested `node_modules` inside generated provider assets are removed with those
+assets, so the next build can materialize a complete verified closure. It never reuses `dist`, UI output,
 or TypeScript build state. A per-repository lock also protects direct build
 callers; managed install/update activation keeps its existing store lock.
 

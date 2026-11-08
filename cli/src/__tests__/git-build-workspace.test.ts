@@ -23,16 +23,16 @@ it("keeps dependency inodes but removes deleted sources, outputs, build state an
     previous = source;
     for (const file of ["src/deleted.ts", "dist/deleted.js", "ui/dist/index.html", "server/dist/old.js", "packages/renamed/dist/old.js", "tsconfig.tsbuildinfo"]) write(path.join(source, file));
     write(path.join(source, "node_modules/.pnpm/pkg/index.js"), "dependency");
-    write(path.join(source, "server/node_modules/pkg/index.js"), "dependency");
+    write(path.join(source, "server/node_modules/pkg/index.js"), "workspace-local link tree");
+    write(path.join(source, "server/provider-assets/copilot/host/distribution/node_modules/vendor/index.js"), "generated asset");
     inode = fs.statSync(path.join(source, "node_modules/.pnpm/pkg/index.js")).ino;
     fs.symlinkSync("dist", path.join(source, "linked-output"));
   });
   await withGitBuildWorkspace("owner/repo", paths, async source => {
     expect(source).toBe(previous);
     expect(fs.statSync(path.join(source, "node_modules/.pnpm/pkg/index.js")).ino).toBe(inode);
-    expect(fs.readFileSync(path.join(source, "server/node_modules/pkg/index.js"), "utf8")).toBe("dependency");
-    expect(fs.readdirSync(source).sort()).toEqual(["node_modules", "server"]);
-    expect(fs.readdirSync(path.join(source, "server"))).toEqual(["node_modules"]);
+    expect(fs.existsSync(path.join(source, "server"))).toBe(false);
+    expect(fs.readdirSync(source)).toEqual(["node_modules"]);
   });
 });
 
