@@ -28,6 +28,8 @@ it("preserves installed versions, patches, peers, optional natives, cycles, bins
   const server = pkg("server", { name: "@paperclipai/server", files: ["dist", "ui-dist", "skills"], exports: "./src/index.ts", publishConfig: { exports: "./dist/index.js" }, dependencies: { bridge: "^1.0.0" }, devDependencies: { unused: "1" }, bundleDependencies: ["bridge"] });
   write(path.join(server, "dist/index.js"), "export {value} from 'bridge';");
   write(path.join(server, "ui-dist/index.html"), "UI");
+  write(path.join(checkout, "LICENSE"), "workspace license");
+  write(path.join(server, "provider-assets/copilot/host/copilot"), "verified native closure");
   write(path.join(server, "skills/paperclip/SKILL.md"), "skill");
   const bridge = pkg("node_modules/.pnpm/bridge/node_modules/bridge", { name: "bridge", dependencies: { peer: "*" }, optionalDependencies: { native: "*", absent: "*" }, bin: { bridge: "cli.js" } }, "export {value} from 'peer';");
   write(path.join(bridge, "cli.js"), "#!/usr/bin/env node\nconsole.log('bridge');");
@@ -57,6 +59,8 @@ it("preserves installed versions, patches, peers, optional natives, cycles, bins
   assertSelfContainedPayload(moved);
   expect(execFileSync(process.execPath, [path.join(moved, "node_modules/paperclipai/dist/index.js")], { encoding: "utf8" }).trim()).toBe("patched patched");
   expect(fs.readFileSync(path.join(moved, "node_modules/@paperclipai/server/ui-dist/index.html"), "utf8")).toBe("UI");
+  expect(fs.readFileSync(path.join(moved, "node_modules/@paperclipai/server/provider-assets/copilot/host/copilot"), "utf8")).toBe("verified native closure");
+  expect(fs.readFileSync(path.join(moved, "node_modules/@paperclipai/server/LICENSE"), "utf8")).toBe("workspace license");
   const files = fs.readdirSync(path.join(moved, "node_modules/.paperclip"), { recursive: true }).map(String);
   expect(files.some(file => file.endsWith("/native/package.json"))).toBe(true);
   expect(files.some(file => file.includes("unused"))).toBe(false);
