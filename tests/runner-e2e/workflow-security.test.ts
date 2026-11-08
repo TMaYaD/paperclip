@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 
 const repositoryRoot = path.resolve(import.meta.dirname, "../..");
 // PR #13470 uses the code-owner-reviewed default branch for this first-party workflow.
-const ordinaryPrTrustedWorkflowRevision = "master";
+const ordinaryPrTrustedWorkflowRevision = "main";
 const fullStackTestNeeds =
   /needs:\s*\[\s*authorize,\s*target_lock,\s*catalog,\s*daytona_image,\s*build_runner_artifacts,\s*build_remote_provider_pack,?\s*\]/u;
 const buildRunnerNeeds =
@@ -30,20 +30,20 @@ describe("public repository paid workflow security", () => {
     expect(manual).toContain('docker logout ghcr.io');
   });
 
-  it("uses the reviewed master branch for the first-party trusted PR workflow", async () => {
+  it("uses the reviewed fork main branch for the first-party trusted PR workflow", async () => {
     const ordinaryPrWorkflow = await readFile(
       path.join(repositoryRoot, ".github/workflows/pr.yml"),
       "utf8",
     );
     const trustedWorkflowCalls = [
       ...ordinaryPrWorkflow.matchAll(
-        /^\s+uses:\s+(paperclipai\/paperclip\/\.github\/workflows\/pr-trusted\.yml)@([^\s#]+)$/gmu,
+        /^\s+uses:\s+(TMaYaD\/paperclip\/\.github\/workflows\/pr-trusted\.yml)@([^\s#]+)$/gmu,
       ),
     ];
 
     expect(trustedWorkflowCalls).toHaveLength(1);
     expect(trustedWorkflowCalls[0]?.[1]).toBe(
-      "paperclipai/paperclip/.github/workflows/pr-trusted.yml",
+      "TMaYaD/paperclip/.github/workflows/pr-trusted.yml",
     );
     expect(trustedWorkflowCalls[0]?.[2]).toBe(
       ordinaryPrTrustedWorkflowRevision,
@@ -64,7 +64,7 @@ describe("public repository paid workflow security", () => {
         .filter((step) => step.includes("uses: pnpm/action-setup@"));
 
       expect(pnpmSetupSteps, workflowName).toHaveLength(
-        workflowName === "pr-trusted.yml" ? 8 : 7,
+        workflowName === "pr-trusted.yml" ? 10 : 7,
       );
       for (const step of pnpmSetupSteps) {
         expect(step, workflowName).toContain('NPM_CONFIG_AUDIT: "false"');
@@ -110,7 +110,7 @@ describe("public repository paid workflow security", () => {
       );
 
       expect(pnpmSetupStepIndexes, name).toHaveLength(
-        name === "pr-trusted.yml" ? 8 : 7,
+        name === "pr-trusted.yml" ? 10 : 7,
       );
       for (const pnpmSetupStepIndex of pnpmSetupStepIndexes) {
         const pnpmSetupStep = steps[pnpmSetupStepIndex]!;

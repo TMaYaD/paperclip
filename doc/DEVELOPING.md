@@ -28,21 +28,29 @@ GitHub Actions owns `pnpm-lock.yaml`.
 
 ## Trusted PR Workflow
 
-The PR caller uses `paperclipai/paperclip/.github/workflows/pr-trusted.yml@master`.
-The AWS runner group `paperclip-public-pr` must allow
-`paperclipai/paperclip/.github/workflows/pr-trusted.yml@refs/heads/master`.
-New workflow versions merged into master then receive runner access without a
-separate SHA allowlist update. Dependabot leaves this first-party reference on
-master.
+The fork's PR caller uses `TMaYaD/paperclip/.github/workflows/pr-trusted.yml@main`.
+Pull requests execute the workflow from the protected base branch; a proposed
+workflow edit cannot control its own PR run. The AWS routing gate still checks
+the upstream repository identity and falls back to GitHub-hosted runners on
+this fork. The repair PR therefore uses the previous `main` workflow. A fresh
+PR after merge is required to verify the new lanes.
 
-Keep the `.github/**` rule in `.github/CODEOWNERS` and the active master ruleset's
+The fork runs runner static checks, Rust checks, and two supported Vitest
+shards. `Verify Paperclip Runner (vitest 1/2)` and `(vitest 2/2)` replace
+the upstream `vitest package (1/3)`, `(2/3)`, `(3/3)`, and `vitest native server`
+check names. The final shard runs `general-server-native-runner`. The
+aggregate `verify` job also requires the runner support suite and all
+standalone sandbox provider tests. The Docker dependency, Compose signing
+secret, built-server health, and standalone test-program checks remain active.
+
+Keep the `.github/**` rule in `.github/CODEOWNERS` and the active main ruleset's
 code-owner review requirement enabled. This covers the caller, the trusted
 workflow, and CODEOWNERS itself. Existing administrator pull-request bypasses
 remain governed by the repository ruleset.
 
-When changing the workflow path or branch, authorize the new reference before
-updating the caller. Retain older authorized SHA references while queued runs or
-supported reruns still use them.
+Do not enable AWS routing for the fork by changing only the runner variable.
+Its repository identity and authorization checks must be adapted and tested
+before an AWS runner is selected.
 
 ## Start Dev
 
