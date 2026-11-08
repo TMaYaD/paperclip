@@ -5,7 +5,9 @@ import {
   agents,
   agentWakeupRequests,
   budgetPolicies,
+  authUsers,
   companies,
+  companyMemberships,
   createDb,
   heartbeatRunEvents,
   heartbeatRuns,
@@ -213,6 +215,10 @@ describeEmbeddedPostgres("heartbeat subscription window wait", () => {
       defaultResponsibleUserId: "responsible-user",
       requireBoardApprovalForNewAgents: false,
     });
+    // Runs execute only for a responsible user who exists and is an active member.
+    await db.insert(authUsers).values({ id: "responsible-user", name: "Fixture owner", email: "owner@example.test", createdAt: new Date(), updatedAt: new Date() })
+      .onConflictDoNothing();
+    await db.insert(companyMemberships).values({ companyId, principalType: "user", principalId: "responsible-user", status: "active", membershipRole: "member" });
     await db.insert(agents).values({
       id: agentId,
       companyId,

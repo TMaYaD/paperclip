@@ -22,12 +22,12 @@ export const QUALIFIED_ACPX_PROFILE_DATA = {
     "protocolVersion": 1,
     "acpxVersion": "0.13.1",
     "agent": "pi",
-    "agentProfileVersion": 23,
+    "agentProfileVersion": 29,
     "agentServerPackage": "pi-acp",
     "agentServerVersion": "0.0.33",
     "agentRuntimePackage": "@earendil-works/pi-coding-agent",
     "agentRuntimeVersion": "1.0.0",
-    "commandDigest": "sha256:8fa8c858682dae04319a5875dda04823a3e991fe3cb82cc9107cf0ea70633c50",
+    "commandDigest": "sha256:b6fadf9eff1b85f4f239fad025b5afbc9b35df1cc70c4360420284eea2290fc2",
     "permissionPolicy": "interactive"
   },
   "cursor": {
@@ -48,13 +48,12 @@ export const QUALIFIED_ACPX_PROFILE_DATA = {
     "protocolVersion": 1,
     "acpxVersion": "0.13.1",
     "agent": "copilot",
-    "agentProfileVersion": 18,
+    "agentProfileVersion": 59,
     "agentServerPackage": "@github/copilot",
     "agentServerVersion": "1.0.88",
     "agentRuntimePackage": null,
     "agentRuntimeVersion": null,
-    "commandDigest": "sha256:fe3d0d2cd8e50812a5dc2f4b84edac65cf2b2f7a54db488ae11f05998b94fa85",
-    "qualificationStatus": "pending",
+    "commandDigest": "sha256:4e41d20b2399c85bd35b129f62f8bf36f30e8f4f8cc0c566981db18163d53ff1",
     "permissionPolicy": "interactive"
   },
   "claude": {
@@ -80,7 +79,7 @@ export const QUALIFIED_ACPX_PROFILE_DATA = {
     "agentServerVersion": "1.6.2",
     "agentRuntimePackage": "@openai/codex",
     "agentRuntimeVersion": "0.160.0",
-    "commandDigest": "sha256:c4538599d1ab767db5dff50934f13bb5ba313a59d9c4a83e993fac4617ea63d3",
+    "commandDigest": "sha256:443491f4e814501a5dc47347e4510e84faeec9c9382e2d4e53bfe69386d5aabc",
     "permissionPolicy": "interactive"
   }
 } as const;

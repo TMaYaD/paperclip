@@ -1,3 +1,4 @@
+import { createUuid } from "@/lib/uuid";
 /**
  * Cross-tab shared polling coordination (PAP-12557 / Phase 2 of PAP-12542).
  *
@@ -493,7 +494,7 @@ export function getSharedPollingTabId(): string {
 
 function createRandomId(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
-    return crypto.randomUUID();
+    return createUuid();
   }
   return `tab-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
