@@ -1,15 +1,56 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import test from "node:test";
+import { execFileSync } from "node:child_process";
+import { cp, mkdtemp, mkdir, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { test } from "node:test";
 
-const dockerfile = readFileSync(new URL("../Dockerfile", import.meta.url), "utf8");
-const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
-const depsStage = dockerfile.split(/^FROM .* AS deps$/m)[1]?.split(/^FROM /m)[0];
+const repo = fileURLToPath(new URL("../", import.meta.url));
 
-test("Docker deps stage supplies and executes the plugin SDK postinstall", () => {
-  assert.ok(depsStage, "Dockerfile must define a deps stage");
-  assert.match(depsStage, /^COPY scripts\/link-plugin-dev-sdk\.mjs scripts\/$/m);
-  assert.equal(packageJson.scripts.postinstall, "node scripts/link-plugin-dev-sdk.mjs");
-  assert.match(depsStage, /pnpm install --frozen-lockfile/);
-  assert.doesNotMatch(depsStage, /pnpm install --frozen-lockfile --ignore-scripts/);
+test("Docker deps stage runs the root plugin SDK postinstall", async () => {
+  const dockerfile = await readFile(path.join(repo, "Dockerfile"), "utf8");
+  const rootPackage = JSON.parse(await readFile(path.join(repo, "package.json"), "utf8"));
+  const stage = dockerfile.split(/^FROM .* AS deps\s*$/im)[1]?.split(/^FROM /im)[0];
+  assert.ok(stage, "dependency stage exists");
+  assert.match(stage, /^COPY scripts\/link-plugin-dev-sdk\.mjs scripts\/$/m);
+  assert.equal(rootPackage.scripts.postinstall, "node scripts/link-plugin-dev-sdk.mjs");
+  assert.match(stage, /pnpm install --frozen-lockfile/);
+  assert.doesNotMatch(stage, /pnpm install --frozen-lockfile --ignore-scripts/);
+});
+
+test("dependency-layer inputs can run both Copilot postinstall entrypoints before compilation", async () => {
+  const dockerfile = await readFile(path.join(repo, "Dockerfile"), "utf8");
+  const stage = dockerfile.split(/^FROM .* AS deps\s*$/im)[1]?.split(/^FROM /im)[0];
+  assert.ok(stage, "dependency stage exists");
+  const beforeInstall = stage.split(/^RUN pnpm install/m)[0];
+  const fixture = await mkdtemp(path.join(tmpdir(), "paperclip-docker-postinstall-"));
+  try {
+    for (const line of beforeInstall.split("\n")) {
+      if (!line.startsWith("COPY ") || line.includes("--")) continue;
+      const args = line.trim().split(/\s+/).slice(1);
+      const destination = args.pop();
+      for (const source of args) {
+        if (source !== "pnpm-workspace.yaml"
+          && !source.startsWith("packages/paperclip-runner/")
+          && !source.startsWith("server/")) continue;
+        assert.ok(destination.endsWith("/"), "fixture supports directory COPY destinations");
+        const target = path.join(fixture, destination, path.basename(source));
+        await mkdir(path.dirname(target), { recursive: true });
+        await cp(path.join(repo, source), target, { recursive: true });
+      }
+    }
+    for (const owner of ["packages/paperclip-runner", "server"]) {
+      const cwd = path.join(fixture, owner);
+      const manifest = JSON.parse(await readFile(path.join(cwd, "package.json"), "utf8"));
+      assert.equal(manifest.scripts.postinstall, "node scripts/install-copilot-assets.mjs");
+      const output = execFileSync(process.execPath, ["scripts/install-copilot-assets.mjs"], {
+        cwd, encoding: "utf8", timeout: 10_000,
+      });
+      assert.match(output, /Copilot runtime assets: (source-workspace-pending-build|unsupported-platform)/);
+      await assert.rejects(readFile(path.join(cwd, "provider-assets/copilot")), { code: "ENOENT" });
+    }
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
+  }
 });

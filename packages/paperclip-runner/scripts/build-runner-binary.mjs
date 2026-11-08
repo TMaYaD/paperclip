@@ -12,11 +12,15 @@
 // Set PAPERCLIP_RUNNER_REQUIRE_BINARY=1 to turn a missing toolchain back into
 // a hard failure (release CI should do this).
 import { spawnSync } from "node:child_process";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const cargo = process.env.CARGO?.trim() || "cargo";
+// Tells the build-inputs stamp (scripts/build-inputs.mjs) that this build
+// deliberately has no native binary, so the build still records as current.
+const skippedMarker = path.join(packageRoot, "dist", "bin", ".paperclip-runnerd-skipped");
 
 const probe = spawnSync(cargo, ["--version"], { stdio: "ignore" });
 if (probe.error || probe.status !== 0) {
@@ -26,6 +30,8 @@ if (probe.error || probe.status !== 0) {
     process.exit(1);
   }
   console.warn(`${message} Set PAPERCLIP_RUNNER_REQUIRE_BINARY=1 to fail instead.`);
+  mkdirSync(path.dirname(skippedMarker), { recursive: true });
+  writeFileSync(skippedMarker, `${message}\n`);
   process.exit(0);
 }
 
@@ -35,6 +41,7 @@ function run(command, args) {
   if (result.status !== 0) process.exit(result.status ?? 1);
 }
 
+rmSync(skippedMarker, { force: true });
 run(cargo, [
   "build",
   "--release",

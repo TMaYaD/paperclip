@@ -1,5 +1,5 @@
 {
-  "commandDigest": "sha256:fe3d0d2cd8e50812a5dc2f4b84edac65cf2b2f7a54db488ae11f05998b94fa85",
+  "commandDigest": "sha256:2ec904f44218f51058fa83d7437b26c4551e1c65e6f2c55f5a6386fa4061e96d",
   "declaration": {
     "schema": "paperclip.acpx_profile_declaration.v1",
     "agent": "copilot",
@@ -7,7 +7,7 @@
     "acpxVersion": "0.13.1",
     "agentServerVersion": "1.0.88",
     "protocolPolicyRevision": "copilot-agent-manual-v1",
-    "acpxPatchSha256": "e0ee1f3a69fa716905cad8ae833571060cc92356b9724c45e6e6adbb1e1827e0",
+    "acpxPatchSha256": "00d6af17216cb0cad902b48633eb19bf0ec6b05837a984cb24661fca593f09c1",
     "policySha256": "a4be69be43db84052560420a3ca546a665c9165573c24d543eb33d144ba138a3",
     "distributionSourceSha256": "c0a65e247fc47b263bd369a3d5ab505c4b323d4e6493be8a9ecbeb0e9dbb9107",
     "agentFilesBinding": "registered-runtime-context-v1",
@@ -36,7 +36,7 @@
     "semanticNormalizationSourceSha256": "8b628b82e8eacc91cdcc6fdca2210ba4cf282f01e9c6f74e95ff271655b5047e",
     "semanticCompletionContractSourceSha256": "fa2b0c81cb9a62965839c905db81b930794774d8d557a01bce077dae5830b594",
     "semanticValidatorsSourceSha256": "4f0219ed00938c5d8bc1b11532ecab9c13230012b23bfd6b7dd6b992e58e98d5",
-    "semanticSchemaBundleSourceSha256": "fe82ac2cbf194d31ac801de6a3cacfb165cb34146c5c26557f283b8c87a5f01e",
+    "semanticSchemaBundleSourceSha256": "969c1c47bc538422210e3789bd53249ebf0f6be335a38c7997d201f0783dfd6b",
     "semanticSidecarProtocolSourceSha256": "334b67857bd81e9924186890258cb2ad41f92b1ef68ec60fa5c5d9fbb277673c",
     "semanticSidecarReceiptCommitContract": "correlated-tool-resolve-v1"
   }
