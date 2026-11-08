@@ -63,3 +63,12 @@ absolute path to a private JSON object mapping the installed full SHA to its
 verified equivalent full SHA. The script logs use of the mapping and avoids an
 unnecessary reinstall. It does not change the install manifest. Do not map
 revisions with different application behavior. Later commits deploy normally.
+
+Git-ref installs print `[git install] <stage>: <seconds>s` to stdout. The build
+uses the checkout's pnpm lockfile and deploys its production workspace graph
+without packing tarballs or running a second npm install. The payload retains
+`node_modules/paperclipai/dist/index.js` and `node_modules/@paperclipai/server`,
+including the server UI, skills, Runner, and migration assets. Dependency scripts
+run during the source install; deployment reuses those host-specific, patched
+packages without running the scripts again. Payload links are checked before
+activation so deleting the source checkout cannot break the installed service.
