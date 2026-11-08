@@ -554,6 +554,10 @@ while [ "$#" -gt 0 ]; do
 done
 patch_input="$(cat)"
 printf '%s\\n' "$patch_input" > "$target/applied.patch"
+if [[ "$target" == */@agentclientprotocol/codex-acp ]]; then
+  grep -q paperclipSandboxPolicy <<< "$patch_input"
+  printf 'patched paperclipSandboxPolicy runtime\\n' > "$target/dist/index.js"
+fi
 if [[ "$target" != */acpx ]]; then
   exit 0
 fi
