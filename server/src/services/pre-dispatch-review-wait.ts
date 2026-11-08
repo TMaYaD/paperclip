@@ -1,9 +1,77 @@
-import { and, eq, inArray, isNotNull } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, isNull, or, sql } from "drizzle-orm";
 import { environmentLeases, heartbeatRunEvents, heartbeatRuns, nativeRunFinalizations, type Db } from "@paperclipai/db";
 import { hasRemoteTerminationReceipt } from "./remote-execution-termination.js";
 import { hasRequiredWorkspaceRecovery } from "./workspace-restore-recovery-state.js";
 import { executionStartedEventPredicate, noRetainedExecutionPredicate } from "./pre-dispatch-execution-evidence.js";
+import { canonicalExecutionUuid } from "./execution-identity.js";
 import type { QueuedRunStalenessErrorCode } from "../modules/run-dispatch/index.js";
+
+/** A disposition repair may have entered running before its final dispatch gate.
+ * Its terminal code is meaningful only with a bound repair source and no
+ * retained provider or workspace evidence. Older rows have no controller
+ * receipt, so they require the durable repair binding instead. */
+export function suppressedLegacyDispositionPredicate(options: { requireSettledLeases?: boolean } = {}) {
+  const receipt = sql`(${heartbeatRuns.runnerProfileJson}->'legacyDispositionDispatchSuppression'->>'version' = '1'
+    and ${heartbeatRuns.runnerProfileJson}->'legacyDispositionDispatchSuppression'->>'runId' = ${heartbeatRuns.id}::text
+    and ${heartbeatRuns.runnerProfileJson}->'legacyDispositionDispatchSuppression'->>'controllerBootId' = ${heartbeatRuns.controllerBootId}::text
+    and ${heartbeatRuns.runnerProfileJson}->'legacyDispositionDispatchSuppression'->>'providerDispatchStarted' = 'false'
+    and nullif(${heartbeatRuns.runnerProfileJson}->'legacyDispositionDispatchSuppression'->>'reason', '') is not null
+    and ${heartbeatRuns.executionStage} in ('dispatching', 'settled'))`;
+  const historical = sql`(${heartbeatRuns.contextSnapshot}->>'source' = 'issue.legacy_disposition_repair'
+    and not (coalesce(${heartbeatRuns.runnerProfileJson}, '{}'::jsonb) ? 'legacyDispositionDispatchSuppression')
+    and ${heartbeatRuns.contextSnapshot}->>'dispositionRepairSourceRunId' = ${heartbeatRuns.contextSnapshot}->>'retryOfRunId'
+    and ${heartbeatRuns.contextSnapshot}->'legacyDispositionEpisode'->>'id' is not null
+    and exists (select 1 from ${heartbeatRuns} source
+      where source.id = ${canonicalExecutionUuid(sql`${heartbeatRuns.contextSnapshot}->>'dispositionRepairSourceRunId'`)}
+        and source.company_id = ${heartbeatRuns.companyId}
+        and source.context_snapshot->>'issueId' = ${heartbeatRuns.contextSnapshot}->>'issueId'
+        and coalesce(source.context_snapshot->'legacyDispositionEpisode'->>'id', source.id::text) =
+          ${heartbeatRuns.contextSnapshot}->'legacyDispositionEpisode'->>'id')
+    and ${heartbeatRuns.executionStage} = 'settled')`;
+  return and(
+    eq(heartbeatRuns.runtimeMode, "legacy"), eq(heartbeatRuns.status, "cancelled"),
+    eq(heartbeatRuns.errorCode, "legacy_disposition_repair_suppressed"), isNotNull(heartbeatRuns.finishedAt),
+    sql`${canonicalExecutionUuid(sql`${heartbeatRuns.contextSnapshot}->>'issueId'`)} is not null`,
+    sql`(${heartbeatRuns.issueId} is null or ${heartbeatRuns.issueId} = ${canonicalExecutionUuid(sql`${heartbeatRuns.contextSnapshot}->>'issueId'`)})`,
+    or(receipt, historical),
+    isNull(heartbeatRuns.processPid), isNull(heartbeatRuns.processGroupId), isNull(heartbeatRuns.processStartedAt),
+    isNull(heartbeatRuns.nativeIssueId), isNull(heartbeatRuns.nativeSessionId), isNull(heartbeatRuns.sessionIdAfter),
+    sql`coalesce(${heartbeatRuns.resultJson}->>'workspaceRestoreFailure', '') = ''`,
+    sql`not (coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) ?| array['workspaceRestoreRecovery', 'workspaceRepairEvidence'])`,
+    sql`not (coalesce(${heartbeatRuns.runnerProfileJson}, '{}'::jsonb) ?| array[
+      'nativeExecutionInput', 'nativeWorkspaceSync', 'remoteWorkspace', 'nativeWorkspaceFinalizationOwner', 'sessionCheckpoint'])`,
+    sql`not exists (select 1 from ${nativeRunFinalizations}
+      where ${nativeRunFinalizations.companyId} = ${heartbeatRuns.companyId} and ${nativeRunFinalizations.runId} = ${heartbeatRuns.id})`,
+    options.requireSettledLeases === false ? undefined : sql`not exists (select 1 from ${environmentLeases}
+      where ${environmentLeases.companyId} = ${heartbeatRuns.companyId} and ${environmentLeases.heartbeatRunId} = ${heartbeatRuns.id}
+        and (coalesce(${environmentLeases.metadata}->>'pendingCleanupInFlight', 'false') <> 'false'
+          or (${environmentLeases.releasedAt} is not null
+            and ${environmentLeases.status} in ('released', 'expired', 'failed')
+            and ((${environmentLeases.provider} = 'local'
+              and (${environmentLeases.cleanupStatus} = 'success'
+                or (${environmentLeases.cleanupStatus} is null and ${environmentLeases.providerLeaseId} is null)))
+              or (${environmentLeases.provider} <> 'local' and ${environmentLeases.cleanupStatus} = 'success' and (
+            ${environmentLeases.metadata}->'remoteExecutionTermination'->>'schema' = 'paperclip.remote-termination.v1'
+            and ${environmentLeases.metadata}->'remoteExecutionTermination'->>'companyId' = ${environmentLeases.companyId}::text
+            and ${environmentLeases.metadata}->'remoteExecutionTermination'->>'runId' = ${heartbeatRuns.id}::text
+            and ${environmentLeases.metadata}->'remoteExecutionTermination'->>'leaseId' = ${environmentLeases.id}::text
+            and ${environmentLeases.metadata}->'remoteExecutionTermination'->>'provider' = ${environmentLeases.provider}
+            and ${environmentLeases.metadata}->'remoteExecutionTermination'->>'providerLeaseId' = ${environmentLeases.providerLeaseId}
+            and ${environmentLeases.metadata}->'remoteExecutionTermination'->>'state' in ('stopped', 'destroyed')
+              )))) is not true))`,
+    sql`not exists (select 1 from ${heartbeatRunEvents}
+      where ${and(eq(heartbeatRunEvents.companyId, heartbeatRuns.companyId), eq(heartbeatRunEvents.runId, heartbeatRuns.id), executionStartedEventPredicate())})`,
+  );
+}
+
+export async function isSuppressedLegacyDispositionVerified(
+  db: Db, run: Run, options: { requireSettledLeases?: boolean } = {},
+): Promise<boolean> {
+  const [verified] = await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
+    eq(heartbeatRuns.companyId, run.companyId), eq(heartbeatRuns.id, run.id), suppressedLegacyDispositionPredicate(options),
+  )).limit(1);
+  return Boolean(verified);
+}
 
 type Run = typeof heartbeatRuns.$inferSelect;
 type DispatchFields = "startedAt" | "runtimeModeResolvedAt" | "processPid" | "processGroupId" |

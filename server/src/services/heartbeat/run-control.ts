@@ -619,6 +619,12 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
     let commentIds = queuedCommentIdsFromWakePayload(payload);
     const issueId = readNonEmptyString(payload.issueId);
     if (!issueId || wake.idempotencyKey?.startsWith("chat-inbound:")) return;
+    const [task] = await db.select({ assigneeAgentId: issues.assigneeAgentId, status: issues.status }).from(issues).where(and(
+      eq(issues.companyId, companyId), eq(issues.id, issueId),
+    )).limit(1);
+    const transfer = Boolean(!interrupted && task?.assigneeAgentId && task.assigneeAgentId !== wake.agentId);
+    if (transfer && task && ["done", "cancelled"].includes(task.status)) return;
+    const deliveryAgentId = transfer ? task.assigneeAgentId! : wake.agentId;
     const response = await readQueuedInteractionResponse(db, companyId, issueId, payload);
     if (!commentIds.length && !response) return;
     // Resolved cards are immutable input. Only an explicit Interrupt click can
@@ -627,6 +633,7 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
     if (response && !interrupted) return;
     if (!interrupted) {
       commentIds = await undeliveredLegacyUserCommentIds(db, companyId, issueId, wake.agentId, commentIds);
+      if (transfer) commentIds = await undeliveredLegacyUserCommentIds(db, companyId, issueId, deliveryAgentId, commentIds);
       if (!commentIds.length) return;
       // The queue itself may have begun as a system wake. The saved human
       // comment, not that wake's origin or mutable caller payload, is authority.
@@ -639,11 +646,11 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
       actorId = comment.authorUserId;
     }
     if (!actorId) return;
-    const agent = await getAgent(wake.agentId);
-    if (!agent || agent.companyId !== companyId || (agent.adapterType === "paperclip_runner" && !response?.source.requiresFreshSession)) return;
+    const agent = await getAgent(deliveryAgentId);
+    if (!agent || agent.companyId !== companyId || (agent.adapterType === "paperclip_runner" && !transfer && !response?.source.requiresFreshSession)) return;
     const [active] = await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
       eq(heartbeatRuns.companyId, companyId),
-      eq(heartbeatRuns.agentId, wake.agentId),
+      eq(heartbeatRuns.agentId, deliveryAgentId),
       sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${issueId}`,
       inArray(heartbeatRuns.status, ["running", "queued", "scheduled_retry"]),
     )).limit(1);
@@ -709,7 +716,7 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
     }
     const deliveryPayload = response ? { ...payload } : withQueuedCommentIdsInWakePayload(payload, commentIds);
     delete deliveryPayload.queuedCommentInterrupt;
-    await enqueueWakeup(wake.agentId, {
+    await enqueueWakeup(deliveryAgentId, {
       source: "on_demand", triggerDetail: "manual", reason: "issue_commented",
       payload: deliveryPayload, contextSnapshot: response
         ? { ...parseObject(payload._paperclipWakeContext), issueId, triggeredBy: "board", actorId,
@@ -718,10 +725,10 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
             issueId, triggeredBy: "board", actorId, responsibleUserId: actorId,
           }, commentIds),
       requestedByActorType: "user", requestedByActorId: actorId,
-      ...(interrupted ? { queuedCommentInterruptId: queueId } : { queuedCommentRequestId: queueId }),
-      issueStateGuard: { assigneeAgentId: wake.agentId, statuses: ["todo", "in_progress", "in_review", "blocked"] },
-      idempotencyKey: `queued-comment-${interrupted ? "interrupt" : "delivery"}:${queueId}`,
-    }, queueId);
+      ...(interrupted ? { queuedCommentInterruptId: queueId } : transfer ? {} : { queuedCommentRequestId: queueId }),
+      issueStateGuard: { assigneeAgentId: deliveryAgentId, statuses: ["todo", "in_progress", "in_review", "blocked"] },
+      idempotencyKey: `queued-comment-${interrupted ? "interrupt" : transfer ? "transfer" : "delivery"}:${queueId}${transfer ? `:${deliveryAgentId}` : ""}`,
+    }, transfer ? undefined : queueId);
   }
 
   async function resumeTaskRetry(companyId: string, requestId: string) {

@@ -28,6 +28,7 @@ import { isSupersededConversationRun } from "./agent-conversations.js";
 import { hasRequiredWorkspaceRecovery } from "./workspace-restore-recovery-state.js";
 import { hasRemoteTerminationReceipt } from "./remote-execution-termination.js";
 import { readSystemRecovery } from "./system-recovery-state.js";
+import { neverStartedDispatchCancellationPredicate, suppressedLegacyDispositionPredicate } from "./pre-dispatch-review-wait.js";
 
 /** An operator records observed outcomes; this is not permission to blindly retry. */
 export async function validateExecutionReconciliation(input: {
@@ -417,6 +418,45 @@ export async function settleUnrecoverableExecutions(
   now = new Date(),
   options: { failpoint?: (phase: "persisted") => void } = {},
 ) {
+  // Correct old no-replay verdicts only when the source run and the original
+  // action both prove that no provider work or unsafe workspace state remains.
+  // This scan is bounded; a resolved row is not revisited on the next pass.
+  await db.transaction(async tx => {
+    const falseHolds = await tx.select({ action: issueRecoveryActions }).from(issueRecoveryActions)
+      .innerJoin(heartbeatRuns, and(
+        eq(heartbeatRuns.companyId, issueRecoveryActions.companyId),
+        eq(heartbeatRuns.id, canonicalExecutionUuid(sql`${issueRecoveryActions.evidence}->>'runId'`)),
+        or(neverStartedDispatchCancellationPredicate(), suppressedLegacyDispositionPredicate()),
+      ))
+      .where(and(
+        eq(issueRecoveryActions.cause, "legacy_execution_requires_reconciliation"),
+        sql`${issueRecoveryActions.fingerprint} = 'legacy-execution:' || ${heartbeatRuns.id}::text`,
+        sql`${heartbeatRuns.errorCode} <> 'issue_continuation_waiting_on_review'`,
+        sql`${issueRecoveryActions.sourceIssueId} = ${canonicalExecutionUuid(sql`${heartbeatRuns.contextSnapshot}->>'issueId'`)}`,
+        sql`(${heartbeatRuns.issueId} is null or ${heartbeatRuns.issueId} = ${issueRecoveryActions.sourceIssueId})`,
+        sql`(${issueRecoveryActions.evidence}->>'originalFailureCode' is null
+          or ${issueRecoveryActions.evidence}->>'originalFailureCode' = ${heartbeatRuns.errorCode})`,
+        sql`not (${issueRecoveryActions.evidence} ? 'executionReconciliation')`,
+        sql`not (${issueRecoveryActions.evidence} ?| array['workspaceRestoreRecovery', 'workspaceRepairEvidence'])`,
+        sql`coalesce(${issueRecoveryActions.evidence}->>'workspaceRestoreFailure', '') = ''`,
+        or(inArray(issueRecoveryActions.status, ["active", "escalated"]), and(
+          eq(issueRecoveryActions.status, "resolved"), eq(issueRecoveryActions.outcome, "blocked"),
+          sql`${issueRecoveryActions.evidence}->'automaticRecovery'->>'replay' = 'blocked'`,
+        )),
+      )).limit(25).for("update", { skipLocked: true });
+    for (const { action } of falseHolds) {
+      const automaticRecovery = action.evidence.automaticRecovery as Record<string, unknown> | undefined;
+      await tx.update(issueRecoveryActions).set({
+        status: "resolved", outcome: "false_positive", resolvedAt: now, updatedAt: now,
+        resolutionNote: "The suppressed run has no retained provider work or unsafe cleanup.",
+        evidence: { ...action.evidence, automaticRecovery: { ...automaticRecovery, replay: "allowed" } },
+      }).where(eq(issueRecoveryActions.id, action.id));
+      await persistActivity(tx as unknown as Db, { companyId: action.companyId,
+        actorType: "system", actorId: "execution-recovery", action: "issue.execution_recovery_settled",
+        entityType: "issue", entityId: action.sourceIssueId,
+        details: { recoveryActionId: action.id, outcome: "false_positive" } });
+    }
+  });
   // Fold obsolete conversation holds without waking historical work on upgrade.
   // Keep their evidence and record the policy change in the task's activity log.
   const obsoleteConversationHold = obsoleteExecutionConversationHold();

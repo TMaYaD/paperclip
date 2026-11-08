@@ -1,4 +1,4 @@
-import { isPreDispatchReviewWait, neverStartedDispatchCancellationPredicate } from "./pre-dispatch-review-wait.js";
+import { isPreDispatchReviewWait, neverStartedDispatchCancellationPredicate, suppressedLegacyDispositionPredicate } from "./pre-dispatch-review-wait.js";
 import { canonicalExecutionUuid } from "./execution-identity.js";
 import { preDispatchExecutionWaitRecoveryActionPredicate } from "./pre-dispatch-execution-wait.js";
 import { and, desc, eq, gt, inArray, not, or, sql } from "drizzle-orm";
@@ -53,10 +53,12 @@ export function executionBlockerPredicate() {
         and ${heartbeatRuns.id} = ${canonicalExecutionUuid(sql`coalesce(${issueRecoveryActions.evidence}->>'runId', ${issueRecoveryActions.evidence}->>'sourceRunId')`)}
         and ${issueRecoveryActions.sourceIssueId} = ${canonicalExecutionUuid(sql`${heartbeatRuns.contextSnapshot}->>'issueId'`)}
         and (${heartbeatRuns.issueId} is null or ${heartbeatRuns.issueId} = ${issueRecoveryActions.sourceIssueId})
-        and ${neverStartedDispatchCancellationPredicate()}
+        and (${issueRecoveryActions.evidence}->>'originalFailureCode' is null
+          or ${issueRecoveryActions.evidence}->>'originalFailureCode' = ${heartbeatRuns.errorCode})
+        and (${neverStartedDispatchCancellationPredicate()} or ${suppressedLegacyDispositionPredicate()})
         and ${heartbeatRuns.errorCode} <> 'issue_continuation_waiting_on_review'
-        and coalesce(${issueRecoveryActions.evidence}->>'workspaceRestoreFailure', '') <> 'restore_unsafe_archive'
-        and coalesce(${issueRecoveryActions.evidence}->'workspaceRestoreRecovery'->>'schema', '') <> ${LEGACY_WORKSPACE_RECOVERY_SCHEMA}
+        and coalesce(${issueRecoveryActions.evidence}->>'workspaceRestoreFailure', '') = ''
+        and not (${issueRecoveryActions.evidence} ?| array['workspaceRestoreRecovery', 'workspaceRepairEvidence'])
     ))`,
     or(unreconciledNativeExportPredicate(), and(
       inArray(issueRecoveryActions.cause, [...EXECUTION_RECONCILIATION_CAUSES]),

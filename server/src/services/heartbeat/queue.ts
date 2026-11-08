@@ -1989,11 +1989,13 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
     // A server restart or a message/cleanup race can leave a deferred wake
     // after its owner has released the issue lock. Revisit it through the same
     // release admission, so recovery holds and operator Stops still apply.
-    const strandedQueues = await db.select({ wake: agentWakeupRequests })
+    const strandedQueues = await db.select({ wake: agentWakeupRequests, currentAssigneeAgentId: issues.assigneeAgentId })
       .from(agentWakeupRequests)
       .innerJoin(issues, and(eq(issues.companyId, agentWakeupRequests.companyId),
         sql`${issues.id}::text = ${agentWakeupRequests.payload}->>'issueId'`,
         or(eq(issues.assigneeAgentId, agentWakeupRequests.agentId),
+          and(eq(agentWakeupRequests.requestedByActorType, "user"),
+            sql`${agentWakeupRequests.payload} #>> '{_paperclipWakeContext,wakeReason}' in ('issue_commented', 'issue_reopened_via_comment')`),
           sql`${agentWakeupRequests.payload} #>> '{_paperclipWakeContext,wakeReason}' = 'issue_comment_mentioned'`)))
       .innerJoin(companies, and(eq(companies.id, issues.companyId), eq(companies.status, "active")))
       .where(and(eq(agentWakeupRequests.status, "deferred_issue_execution"),
@@ -2010,7 +2012,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
             AND live_issue_run.status IN ('queued', 'running', 'scheduled_retry'))`,
         cutoff ? gte(agentWakeupRequests.requestedAt, cutoff) : undefined))
       .orderBy(asc(agentWakeupRequests.updatedAt)).limit(50);
-    for (const { wake } of strandedQueues) {
+    for (const { wake, currentAssigneeAgentId } of strandedQueues) {
       if (!queuedCommentIdsFromWakePayload(wake.payload).length &&
           !await readQueuedInteractionResponse(db, wake.companyId, String(wake.payload?.issueId), wake.payload)) continue;
       const [latest] = await db.select().from(heartbeatRuns).where(and(
@@ -2021,6 +2023,12 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       await db.update(agentWakeupRequests).set({ updatedAt: new Date() }).where(and(
         eq(agentWakeupRequests.id, wake.id), eq(agentWakeupRequests.status, "deferred_issue_execution"),
       ));
+      if (currentAssigneeAgentId && currentAssigneeAgentId !== wake.agentId) {
+        await resumeSavedLegacyComments(wake.companyId, wake.id).catch(err => {
+          logger.warn({ err, queueId: wake.id }, "failed to transfer saved comment to current assignee");
+        });
+        continue;
+      }
       if (!latest || !latest.finishedAt || !isHeartbeatRunTerminalStatus(latest.status)) continue;
       if (latest.runtimeMode !== "legacy" && latest.runtimeMode !== "native") continue;
       if (latest.runtimeMode === "legacy") {
@@ -4378,7 +4386,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
                   .where(
                     and(
                       eq(agentWakeupRequests.companyId, issue.companyId),
-                      inArray(agentWakeupRequests.agentId, handoffSource ? [agentId, handoffSource.agentId] : [agentId]),
+                      canCoalesceComments ? undefined : inArray(agentWakeupRequests.agentId, handoffSource ? [agentId, handoffSource.agentId] : [agentId]),
                       eq(agentWakeupRequests.status, "deferred_issue_execution"),
                       sql`${agentWakeupRequests.payload}->>'issueId' = ${issue.id}`,
                       canCoalesceComments || opts.taskRetryRequestId ? undefined : eq(agentWakeupRequests.id, executionWaitRequestId!),
@@ -4386,7 +4394,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
                   )
                   .orderBy(asc(agentWakeupRequests.requestedAt))
               : [];
-          const adoptedComments = pendingComments.filter((wake) => {
+          const eligibleComments = pendingComments.filter((wake) => {
             if (wake.id === executionWaitRequestId) return true;
             if (wake.id === opts.queuedCommentInterruptId || wake.id === opts.queuedCommentRequestId) return true;
             const deferredPayload = parseObject(wake.payload);
@@ -4405,6 +4413,21 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
               queuedCommentIdsFromWakePayload(wake.payload).length > 0
             );
           });
+          const adoptedComments = [] as typeof eligibleComments;
+          for (const wake of eligibleComments) {
+            if (wake.agentId !== agentId) {
+              // A new assignee may take over saved user input, but never a
+              // former owner's dedicated continuation or already sent text.
+              if (!canCoalesceComments || wake.requestedByActorType !== "user") continue;
+              const ids = queuedCommentIdsFromWakePayload(wake.payload);
+              const oldOwnerIds = await undeliveredLegacyUserCommentIds(tx as unknown as Db,
+                agent.companyId, issueId, wake.agentId, ids);
+              const currentOwnerIds = await undeliveredLegacyUserCommentIds(tx as unknown as Db,
+                agent.companyId, issueId, agentId, ids);
+              if (oldOwnerIds.length !== ids.length || currentOwnerIds.length !== ids.length) continue;
+            }
+            adoptedComments.push(wake);
+          }
           let adoptedCommentIds = [
             ...new Set([
               ...adoptedComments.flatMap((wake) =>
@@ -4413,7 +4436,8 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
               ...queuedCommentIdsFromRunContext(enrichedContextSnapshot),
             ]),
           ];
-          if (opts.queuedCommentRequestId || opts.taskRetryRequestId || handoffSource) {
+          if (opts.queuedCommentRequestId || opts.taskRetryRequestId || handoffSource ||
+              adoptedComments.some(wake => wake.agentId !== agentId)) {
             adoptedCommentIds = await undeliveredLegacyUserCommentIds(tx as unknown as Db,
               agent.companyId, issueId, agentId, adoptedCommentIds);
           }
