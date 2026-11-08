@@ -208,6 +208,16 @@ test("build lane starts the built server and checks health", () => {
   assert.match(job, /node scripts\/server-boot-smoke\.mjs/);
 });
 
+test("Docker context keeps every ACPX release identity input", () => {
+  const generator = readFileSync(path.join(repoRoot, "packages/paperclip-runner/scripts/generate-acpx-profiles.mjs"), "utf8");
+  const ignore = readFileSync(path.join(repoRoot, ".dockerignore"), "utf8");
+  const inputs = [...generator.matchAll(/"((?:test-fixtures|test\/fixtures)\/[^"\n]+-identity\.json)"/g)].map((match) => match[1]);
+  assert.ok(inputs.length > 0, "expected immutable release identity inputs");
+  for (const input of inputs) {
+    assert.ok(ignore.split("\n").includes(`!packages/paperclip-runner/${input}`), `${input} must enter the Docker context`);
+  }
+});
+
 test("the trusted PR workflow keeps a stable aggregate check named e2e over the shard matrix", () => {
   // Branch protection requires a check literally named `e2e`. The shards run
   // as `e2e shard (n/3)`, so the aggregate job below is what keeps the
