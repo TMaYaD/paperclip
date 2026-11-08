@@ -13,11 +13,20 @@ it("keeps Codex authentication, observability and runtime transports out of the 
   const configured = {
     SLACK_BOT_TOKEN: "assigned", OPENAI_API_KEY: "openai", CODEX_API_KEY: "codex",
     PAPERCLIP_AI_PROVIDER_KEY: "managed", OTEL_EXPORTER_OTLP_HEADERS: "authorization=export",
-    PAPERCLIP_GITHUB_BROKER_TOKEN: "broker", PAPERCLIP_NATIVE_MCP_TOKEN: "mcp",
+    PAPERCLIP_NATIVE_MCP_TOKEN: "mcp",
   };
   const names = codexShellEnvironmentKeys(configured, configured, true);
   expect(names).toContain("SLACK_BOT_TOKEN");
   for (const key of Object.keys(configured).filter(key => key !== "SLACK_BOT_TOKEN")) expect(names).not.toContain(key);
+});
+
+// Fork: the shell's managed Git launcher reads the run-scoped GitHub broker
+// capability and bridge token from its environment, so both pass by name.
+it("passes the scoped GitHub launcher tokens by name, never by value", () => {
+  const environment = { PAPERCLIP_GITHUB_BROKER_TOKEN: "broker", PAPERCLIP_GITHUB_BRIDGE_TOKEN: "bridge" };
+  const names = codexShellEnvironmentKeys(environment, {}, false);
+  expect(names).toEqual(expect.arrayContaining(["PAPERCLIP_GITHUB_BROKER_TOKEN", "PAPERCLIP_GITHUB_BRIDGE_TOKEN"]));
+  expect(JSON.stringify(names)).not.toContain("broker\"");
 });
 
 it("does not turn a configured glob into permission to inherit other secrets", () => {
