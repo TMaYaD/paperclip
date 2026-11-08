@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  timeGitInstallStage,
   type CommandRunner,
   installCommand,
   installGitPayload,
@@ -14,6 +15,7 @@ import {
   resolvePublishedVersion,
   runCommandWithDiagnostics,
 } from "../commands/install.js";
+import { assertSelfContainedPayload } from "../git-payload.js";
 import { uninstallCommand } from "../commands/uninstall.js";
 import { resolvePaperclipInstanceId } from "../config/home.js";
 import {
@@ -128,36 +130,29 @@ describe("managed install commands", () => {
           { dir: "server", name: "@paperclipai/server", packageJson: { name: "@paperclipai/server", version: "0.3.1", dependencies: { "@paperclipai/db": "workspace:*" } } },
         ];
         fs.mkdirSync(path.join(checkout, "cli"), { recursive: true });
-        fs.writeFileSync(path.join(checkout, "cli", "package.json"), JSON.stringify({ version: "0.3.1" }));
+        fs.writeFileSync(path.join(checkout, "cli", "package.json"), JSON.stringify({ name: "paperclipai", version: "0.3.1", files: ["dist"], dependencies: { "@paperclipai/server": "workspace:*" } }));
+        fs.copyFileSync(path.join(checkout, "cli", "package.json"), path.join(checkout, "cli", "package.dev.json"));
         fs.mkdirSync(path.join(checkout, "scripts"), { recursive: true });
         fs.writeFileSync(path.join(checkout, "scripts", "release-package-manifest.json"), JSON.stringify(packages.map(({ dir, name }) => ({ dir, name }))));
         for (const workspacePackage of packages) {
           fs.mkdirSync(path.join(checkout, workspacePackage.dir), { recursive: true });
-          fs.writeFileSync(path.join(checkout, workspacePackage.dir, "package.json"), JSON.stringify(workspacePackage.packageJson));
+          fs.writeFileSync(path.join(checkout, workspacePackage.dir, "package.json"), JSON.stringify({ ...workspacePackage.packageJson, files: ["dist"] }));
+          fs.mkdirSync(path.join(checkout, workspacePackage.dir, "dist"));
+          fs.writeFileSync(path.join(checkout, workspacePackage.dir, "dist/index.js"), "// built");
         }
+        fs.mkdirSync(path.join(checkout, "cli/dist"));
+        fs.writeFileSync(path.join(checkout, "cli/dist/index.js"), "// CLI");
+        const bind = (issuer: string, name: string, target: string) => {
+          const link = path.join(checkout, issuer, "node_modules", name);
+          fs.mkdirSync(path.dirname(link), { recursive: true });
+          fs.symlinkSync(path.relative(path.dirname(link), path.join(checkout, target)), link);
+        };
+        bind("cli", "@paperclipai/server", "server");
+        bind("server", "@paperclipai/db", "packages/db");
+        bind("packages/db", "@paperclipai/shared", "packages/shared");
         return { stdout: "", stderr: "" };
       }
-      if (file === "corepack") {
-        if (args.includes("pack")) {
-          const destination = args[args.indexOf("--pack-destination") + 1];
-          const packageDir = args[args.indexOf("--dir") + 1];
-          const packageName = packageDir === "server" ? "paperclipai-server" : "paperclipai-shared";
-          fs.writeFileSync(path.join(destination, `${packageName}-0.3.1.tgz`), "package");
-        }
-        return { stdout: "", stderr: "" };
-      }
-      if (file === "bash") return { stdout: "", stderr: "" };
-      if (file === "npm" && args[0] === "pack") {
-        const packageName = args[1]?.includes("workspace-package-") ? "paperclipai-db" : "paperclipai";
-        fs.writeFileSync(path.join(args[args.indexOf("--pack-destination") + 1], `${packageName}-0.3.1.tgz`), "package");
-        return { stdout: "", stderr: "" };
-      }
-      if (file === "npm" && args[0] === "install") { const prefix = args[args.indexOf("--prefix") + 1]; const packageRoot = path.join(prefix, "node_modules", "paperclipai"); fs.mkdirSync(path.join(packageRoot, "dist"), { recursive: true }); fs.writeFileSync(path.join(packageRoot, "package.json"), JSON.stringify({ version: "0.3.1" })); fs.writeFileSync(path.join(packageRoot, "dist", "index.js"), "#!/usr/bin/env node\n"); return { stdout: "", stderr: "" }; }
-      if (file === process.execPath && args[0]?.endsWith("prepare-bundled-package.mjs")) {
-        fs.mkdirSync(args[2], { recursive: true });
-        fs.writeFileSync(path.join(args[2], "package.json"), JSON.stringify({ name: "@paperclipai/db", version: "0.3.1" }));
-        return { stdout: "", stderr: "" };
-      }
+      if (file === "corepack" || file === "bash") return { stdout: "", stderr: "" };
       if (file === process.execPath) return { stdout: "0.3.1\n", stderr: "" };
       throw new Error(`Unexpected command: ${file} ${args.join(" ")}`);
     });
@@ -172,15 +167,9 @@ describe("managed install commands", () => {
     expect(manifest?.payloadPath).toContain(path.join("git", sha.slice(0, 12)));
     expect(runCommand.mock.calls.filter(([command, args]) => command === "curl" && args.includes("--output"))).toHaveLength(1);
     expect(runCommand.mock.calls.filter(([command, args]) => command === "corepack" && args[1] === "install")).toHaveLength(1);
-    expect(runCommand.mock.calls.filter(([command, args]) => command === "corepack" && args.includes("pack"))).toHaveLength(2);
-    expect(runCommand.mock.calls.filter(([command, args]) => command === process.execPath && args[0]?.endsWith("prepare-bundled-package.mjs"))).toHaveLength(1);
-    expect(runCommand.mock.calls.filter(([command, args]) => command === "npm" && args[0] === "pack")).toHaveLength(2);
-    const stagedPack = runCommand.mock.calls.find(([command, args]) => command === "npm" && args[1]?.includes("workspace-package-"));
-    expect(stagedPack?.[1]).toContain("--ignore-scripts");
-    const cliPack = runCommand.mock.calls.find(([command, args]) => command === "npm" && args[0] === "pack" && !args[1]?.includes("workspace-package-"));
-    expect(cliPack?.[1]).not.toContain("--ignore-scripts");
-    const installCall = runCommand.mock.calls.find(([command, args]) => command === "npm" && args[0] === "install");
-    expect(installCall?.[1].filter((arg) => arg.endsWith(".tgz"))).toHaveLength(4);
+    expect(runCommand.mock.calls.some(([command]) => command === "npm")).toBe(false);
+    expect(fs.existsSync(path.join(manifest!.payloadPath, "node_modules/@paperclipai/server"))).toBe(true);
+    assertSelfContainedPayload(manifest!.payloadPath);
   });
 
   it("installs a full commit SHA without asking GitHub to resolve it", async () => {
@@ -209,14 +198,14 @@ describe("managed install commands", () => {
       file === "corepack" ||
       (file === "npm" && args[0] === "pack") ||
       (file === process.execPath && args[0]?.endsWith("prepare-bundled-package.mjs")));
-    expect(buildCalls).toHaveLength(9);
+    expect(buildCalls).toHaveLength(4);
     for (const call of buildCalls) {
       const env = call[2]?.env;
       expect(env, `${call[0]} ${call[1].join(" ")} must run with an explicit env`).toBeDefined();
       expect(env, `${call[0]} ${call[1].join(" ")} must not inherit NODE_ENV`).not.toHaveProperty("NODE_ENV");
+      expect(env).toHaveProperty("PAPERCLIP_BUILD_COMMIT", sha);
     }
-    const uiPackCall = buildCalls.find(([file, , options]) => file === "corepack" && options?.env?.PAPERCLIP_RELEASE_REUSE_UI_DIST === "1");
-    expect(uiPackCall).toBeDefined();
+
   });
 
   it("resolves the complete server workspace dependency closure in dependency order", () => {
@@ -238,6 +227,29 @@ describe("managed install commands", () => {
       "@paperclipai/db",
       "@paperclipai/server",
     ]);
+  });
+
+  it("rejects links into staging and absolute links before publishing a payload", () => {
+    const payload = path.join(root, "payload");
+    fs.mkdirSync(payload);
+    fs.writeFileSync(path.join(root, "outside"), "outside");
+    fs.symlinkSync("../outside", path.join(payload, "escape"));
+    expect(() => assertSelfContainedPayload(payload)).toThrow("escapes its payload");
+    fs.rmSync(path.join(payload, "escape"));
+    fs.writeFileSync(path.join(payload, "inside"), "inside");
+    fs.symlinkSync(path.join(payload, "inside"), path.join(payload, "absolute"));
+    expect(() => assertSelfContainedPayload(payload)).toThrow("escapes its payload");
+    fs.rmSync(path.join(payload, "absolute"));
+    fs.symlinkSync("inside", path.join(payload, "relative"));
+    assertSelfContainedPayload(payload);
+    const moved = path.join(root, "moved");
+    fs.renameSync(payload, moved);
+    assertSelfContainedPayload(moved);
+  });
+
+  it("reports timing when a build stage fails", async () => {
+    await expect(timeGitInstallStage("build", async () => { throw new Error("failed"); })).rejects.toThrow("failed");
+    expect(console.log).toHaveBeenCalledWith(expect.stringMatching(/^\[git install\] build: \d+\.\d{2}s$/));
   });
 
   it("includes child-process stderr in command failures", async () => {
