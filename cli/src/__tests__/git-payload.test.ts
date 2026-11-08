@@ -51,6 +51,17 @@ it("preserves installed versions, patches, peers, optional natives, cycles, bins
   bind(bridge, "peer", peer);
   bind(bridge, "native", native);
   bind(peer, "bridge", bridge);
+  // bridge requires a phantom dependency available only through pnpm's hoist.
+  const phantom = pkg("node_modules/.pnpm/phantom/node_modules/@fixture/phantom", { name: "@fixture/phantom" }, "export const phantom='hidden-hoist';");
+  const bridgePackage = JSON.parse(fs.readFileSync(path.join(server, "package.json"), "utf8"));
+  bridgePackage.dependencies["@fixture/phantom"] = "*";
+  write(path.join(server, "package.json"), JSON.stringify(bridgePackage));
+  bind(server, "@fixture/phantom", phantom);
+  const hoist = path.join(checkout, "node_modules/.pnpm");
+  bind(hoist, "@fixture/phantom", phantom);
+  bind(hoist, "unused", unused);
+  write(path.join(bridge, "index.js"), "import {phantom} from '@fixture/phantom'; if(phantom !== 'hidden-hoist') throw Error('wrong hoist'); export {value} from 'peer';");
+  expect(createRequire(path.join(bridge, "package.json")).resolve("@fixture/phantom")).toBe(path.join(phantom, "index.js"));
   materializeGitPayload(checkout, payload);
   assertSelfContainedPayload(payload);
   // A later dependency postinstall must not mutate an existing payload's inode.

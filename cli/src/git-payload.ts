@@ -156,6 +156,20 @@ export function materializeGitPayload(checkoutPath: string, payloadPath: string)
   cli.manifest.dependencies = { ...builtCli.dependencies, ...cli.manifest.dependencies };
   cli.manifest.optionalDependencies = { ...builtCli.optionalDependencies, ...cli.manifest.optionalDependencies };
   fs.writeFileSync(path.join(cli.directory, "package.json"), `${JSON.stringify(cli.manifest, null, 2)}\n`);
+  // Match pnpm's hidden hoist for undeclared imports, but only for packages
+  // already reached through the production graph. Do not pull in dev packages.
+  const hiddenHoist = path.join(checkout, "node_modules/.pnpm/node_modules");
+  if (fs.existsSync(hiddenHoist)) {
+    const hoist = (name: string): void => {
+      const target = copied.get(fs.realpathSync(path.join(hiddenHoist, name)));
+      if (target) link(path.join(packageStore, "node_modules", name), target.directory);
+    };
+    for (const entry of fs.readdirSync(hiddenHoist)) {
+      if (entry.startsWith("@")) {
+        for (const name of fs.readdirSync(path.join(hiddenHoist, entry))) hoist(`${entry}/${name}`);
+      } else if (!entry.startsWith(".")) hoist(entry);
+    }
+  }
   // Preserve the historical top-level server/workspace lookup layout.
   for (const [source, target] of copied) {
     const alias = path.join(modules, target.manifest.name);
