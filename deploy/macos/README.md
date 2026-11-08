@@ -83,7 +83,8 @@ before extracting the requested commit. It retains only the root `node_modules`
 directory, including pnpm's virtual store. pnpm recreates workspace-local links.
 Nested `node_modules` inside generated provider assets are removed with those
 assets, so the next build can materialize a complete verified closure. It never reuses `dist`, UI output,
-or TypeScript build state. A per-repository lock also protects direct build
+or TypeScript build state. Dependency installation runs noninteractively, including module recreation when
+pnpm detects a configuration change. A per-repository lock also protects direct build
 callers; managed install/update activation keeps its existing store lock.
 
 Set `PAPERCLIP_GIT_INSTALL_CLEAN=1` for a fresh build workspace. This applies only
