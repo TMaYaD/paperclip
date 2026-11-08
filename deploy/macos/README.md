@@ -78,3 +78,27 @@ the server package so provider integrity checks keep their existing boundary.
 Generated provider assets include their nested runtime dependency directories. pnpm 9 deploy still resolves ranges for the
 CLI bundle's additional external imports, so it cannot provide this guarantee. Payload links are checked before
 activation so deleting the source checkout cannot break the installed service.
+
+Git builds keep dependency directories in a private per-repository workspace under
+`$PAPERCLIP_HOME/cli/build/`. Each install removes all source and generated files
+before extracting the requested commit. It retains only the root `node_modules`
+directory, including pnpm's virtual store. pnpm recreates workspace-local links.
+Nested `node_modules` inside generated provider assets are removed with those
+assets, so the next build can materialize a complete verified closure. It never reuses `dist`, UI output,
+or TypeScript build state. Dependency installation runs noninteractively, including module recreation when
+pnpm detects a configuration change. A per-repository lock also protects direct build
+callers; managed install/update activation keeps its existing store lock.
+
+Set `PAPERCLIP_GIT_INSTALL_CLEAN=1` for a fresh build workspace. This applies only
+to git builds; an already installed SHA still uses its verified cached payload.
+A failed or interrupted build marks its workspace dirty. The next attempt uses a
+new directory, so an orphaned compiler cannot write into that attempt. Dirty
+`work-*` generations remain quarantined under the repository build folder. After
+a successful build, while holding the build lock, the installer removes other
+generations with a directory mtime older than 24 hours. It keeps the current
+generation and recent failures. A forced clean build
+replaces a previously successful workspace. Runtime/architecture changes also
+start a fresh workspace. Published npm installs are unaffected.
+
+Keep pnpm store settings stable across builds. If you customize `store-dir`, use
+the operator home's `.npmrc` so nested build commands use the same setting.

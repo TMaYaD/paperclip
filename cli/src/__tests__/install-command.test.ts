@@ -199,6 +199,8 @@ describe("managed install commands", () => {
       (file === "npm" && args[0] === "pack") ||
       (file === process.execPath && args[0]?.endsWith("prepare-bundled-package.mjs")));
     expect(buildCalls).toHaveLength(4);
+    const dependencyInstall = buildCalls.find(([file, args]) => file === "corepack" && args[1] === "install");
+    expect(dependencyInstall?.[2]?.env?.CI).toBe("true");
     for (const call of buildCalls) {
       const env = call[2]?.env;
       expect(env, `${call[0]} ${call[1].join(" ")} must run with an explicit env`).toBeDefined();

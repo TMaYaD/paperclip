@@ -120,7 +120,7 @@ Capability ID: `instance-operations/install-update`.
 
 Scope: cli
 Storybook: No authored story required for install, channel selection, update or rollback command execution.
-Production: Use an owned managed installation: check/dry-run, installed version, retained payload rollback and failure. Git-ref installs deploy the built pnpm workspace graph and print stage timings; verify health and static UI after source staging is deleted. Source-checkout guidance is a separate case; rollback does not undo database migrations.
+Production: Use an owned managed installation: check/dry-run, installed version, retained payload rollback and failure. Git-ref installs copy the built pnpm workspace graph and print stage timings. Per-repository build workspaces retain dependencies only; source and outputs are replaced. Set `PAPERCLIP_GIT_INSTALL_CLEAN=1` to force a fresh build. Verify health and static UI after source staging is deleted. Source-checkout guidance is a separate case; rollback does not undo database migrations.
 Sources: Source: [index.ts](../../cli/src/index.ts), [install.ts](../../cli/src/commands/install.ts), [update.ts](../../cli/src/commands/update.ts). Tests: [install-command.test.ts](../../cli/src/__tests__/install-command.test.ts), [update-command.test.ts](../../cli/src/__tests__/update-command.test.ts)
 
 #### `diagnostics`
