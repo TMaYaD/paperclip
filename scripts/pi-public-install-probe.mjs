@@ -53,7 +53,7 @@ const { resolvePaperclipRunnerBinary } = await import(pathToFileURL(join(server,
 const { createCapabilityRunnerdCodexTransport } = await import(pathToFileURL(join(server, 'dist/vendor/paperclip-runner/live/runnerd-codex-transport.js')));
 const { QUALIFIED_ACPX_PROFILES } = await import(pathToFileURL(join(server, 'dist/vendor/paperclip-runner/drivers/acpx/qualified-profiles.js')));
 assert.equal(QUALIFIED_ACPX_PROFILES.pi.agentProfileVersion, 28);
-assert.equal(QUALIFIED_ACPX_PROFILES.pi.commandDigest, 'sha256:4918a4d5472d66b22b1ec642b68b5c60a8092a39c84ec1ab1c9ad0289cb8c68c');
+assert.equal(QUALIFIED_ACPX_PROFILES.pi.commandDigest, 'sha256:b6fadf9eff1b85f4f239fad025b5afbc9b35df1cc70c4360420284eea2290fc2');
 assert.equal(Object.hasOwn(QUALIFIED_ACPX_PROFILES.pi, 'qualificationModel'), false);
 assert.equal(Object.hasOwn(QUALIFIED_ACPX_PROFILES.pi, 'reportedModelId'), false);
 const daemon = resolvePaperclipRunnerBinary();
