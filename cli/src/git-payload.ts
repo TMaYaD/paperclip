@@ -81,7 +81,15 @@ export function materializeGitPayload(checkoutPath: string, payloadPath: string)
         copy(path.join(source, entry), path.join(directory, entry));
       }
       for (const entry of ["README.md", "LICENSE", "LICENSE.md"]) {
-        if (fs.existsSync(path.join(source, entry)) && !fs.existsSync(path.join(directory, entry))) copy(path.join(source, entry), path.join(directory, entry));
+        const local = path.join(source, entry);
+        const inherited = entry.startsWith("LICENSE") ? path.join(checkout, entry) : local;
+        const candidate = fs.existsSync(local) ? local : inherited;
+        if (fs.existsSync(candidate) && !fs.existsSync(path.join(directory, entry))) copy(candidate, path.join(directory, entry));
+      }
+      // The server postinstall normally creates these OUTSIDE its files list.
+      // Source builds already materialize and verify the host's pinned closure.
+      if (original.name === "@paperclipai/server" && fs.existsSync(path.join(source, "provider-assets"))) {
+        copy(path.join(source, "provider-assets"), path.join(directory, "provider-assets"));
       }
       for (const key of ["main", "types", "exports", "bin"]) {
         if (original.publishConfig?.[key] !== undefined) manifest[key] = original.publishConfig[key];
