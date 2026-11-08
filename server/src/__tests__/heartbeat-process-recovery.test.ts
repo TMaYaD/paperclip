@@ -21,7 +21,7 @@ import * as runEvents from "../services/heartbeat-run-events.js";
 import { waitForPendingRunFailureReports } from "../services/run-failure-report.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
 import { createHash, randomUUID } from "node:crypto";
-import { recordLegacyWorkspaceRestoreFailure, terminalizeLegacyExecution } from "../services/legacy-execution-recovery.js";
+import { LEGACY_DISPOSITION_SUPPRESSION_KEY, isSuppressedLegacyDispositionDispatch, recordLegacyWorkspaceRestoreFailure, terminalizeLegacyExecution } from "../services/legacy-execution-recovery.js";
 import { issueService } from "../services/issues.js";
 import { getExecutionBlocker } from "../services/execution-blocker.js";
 import { adapterExecutionControls, createAdapterExecutionControl } from "../services/adapter-execution-control.js";
@@ -1610,6 +1610,61 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
 
     return { companyId, agentId, runId, wakeupRequestId, issueId };
   }
+
+  it("does not deliver a transferred comment after assignment consumes its receipt", async () => {
+    const companyId = randomUUID();
+    const formerAgentId = randomUUID();
+    const currentAgentId = randomUUID();
+    const issueId = randomUUID();
+    const issuePrefix = `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`;
+    await seedRecoveryCompany(companyId, issuePrefix);
+    await db.insert(agents).values([
+      recoveryAgentRow(formerAgentId, companyId, "Former", "engineer", "idle"),
+      recoveryAgentRow(currentAgentId, companyId, "Current", "engineer", "idle"),
+    ]);
+    await db.update(agents).set({ runtimeConfig: { heartbeat: { wakeOnDemand: true, maxConcurrentRuns: 1 } } })
+      .where(inArray(agents.id, [formerAgentId, currentAgentId]));
+    await db.insert(issues).values({ id: issueId, companyId, title: "Transfer saved input", status: "todo",
+      priority: "medium", assigneeAgentId: currentAgentId, responsibleUserId: "responsible-user" });
+    const [comment] = await db.insert(issueComments).values({ companyId, issueId, authorType: "user",
+      authorUserId: "responsible-user", body: "Deliver once." }).returning();
+    const [receipt] = await db.insert(agentWakeupRequests).values({ companyId, agentId: formerAgentId,
+      source: "automation", reason: "issue_commented", status: "deferred_issue_execution",
+      requestedByActorType: "user", requestedByActorId: "responsible-user",
+      payload: { issueId, _paperclipWakeContext: { issueId, wakeReason: "issue_commented", wakeCommentIds: [comment.id] } },
+    }).returning();
+    mockAdapterExecute.mockImplementationOnce(async () => {
+      await db.update(issues).set({ status: "done" }).where(eq(issues.id, issueId));
+      return { exitCode: 0, signal: null, timedOut: false, errorMessage: null,
+        summary: "Saved input handled.", provider: "test", model: "test-model" };
+    });
+    const heartbeat = heartbeatService(db);
+    // The transfer has read the deferred receipt. Assignment wins the issue
+    // lock and consumes it before transfer admission starts.
+    const assigned = await heartbeat.wakeup(currentAgentId, { source: "assignment", triggerDetail: "system",
+      reason: "issue_assigned", requestedByActorType: "system", requestedByActorId: "assignment",
+      payload: { issueId }, contextSnapshot: { issueId } });
+    expect(assigned).not.toBeNull();
+    await heartbeat.drainActiveRunExecutions();
+    expect(mockAdapterExecute).toHaveBeenCalledTimes(1);
+    expect((await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, receipt.id)))[0])
+      .toMatchObject({ status: "coalesced", runId: assigned!.id });
+    await db.update(issues).set({ status: "todo" }).where(eq(issues.id, issueId));
+    const staleTransfer = await heartbeat.wakeup(currentAgentId, { source: "on_demand", triggerDetail: "manual",
+      reason: "issue_commented", requestedByActorType: "user", requestedByActorId: "responsible-user",
+      payload: { issueId, _paperclipWakeContext: { issueId, wakeReason: "issue_commented", wakeCommentIds: [comment.id] } },
+      contextSnapshot: { issueId, triggeredBy: "board", actorId: "responsible-user",
+        responsibleUserId: "responsible-user", wakeCommentIds: [comment.id] },
+      transferCommentRequestId: receipt.id,
+      issueStateGuard: { assigneeAgentId: currentAgentId, statuses: ["todo", "in_progress", "in_review", "blocked"] },
+      idempotencyKey: `queued-comment-transfer:${receipt.id}:${currentAgentId}` });
+    expect(staleTransfer).toBeNull();
+    await heartbeat.drainActiveRunExecutions();
+    expect(mockAdapterExecute).toHaveBeenCalledTimes(1);
+    const deliveries = await db.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.companyId, companyId),
+      eq(heartbeatRuns.agentId, currentAgentId), sql`${heartbeatRuns.contextSnapshot}->'wakeCommentIds' @> ${JSON.stringify([comment.id])}::jsonb`));
+    expect(deliveries).toHaveLength(1);
+  });
 
   it.each(["owned", "forged"] as const)("keeps unresolved-ref recovery and reporting while persisting only owned diagnostics: %s", async provenance => {
     const { companyId, agentId, issueId, runId, wakeupRequestId } = await seedQueuedIssueRunFixture();
@@ -14166,6 +14221,92 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
 
     const followupRuns = await selectRecoveryRunsByAgent(agentId);
     expect(followupRuns).toHaveLength(1);
+  });
+
+  it.each([false, true])("fences intentional disposition suppression before provider dispatch (stale controller: %s)", async staleController => {
+    const f = await seedStrandedIssueFixture({ status: "in_progress", runStatus: "succeeded", livenessState: "blocked" });
+    let gated = false;
+    const heartbeat = heartbeatService(db, {
+      beforeChatControlRecoveryCheck: async ({ runId, stage }) => {
+        if (stage !== "dispatch" || gated) return;
+        gated = true;
+        await db.insert(issueThreadInteractions).values({ companyId: f.companyId, issueId: f.issueId,
+          kind: "request_confirmation", status: "pending", payload: { version: 1, prompt: "Wait for the existing technical response" } });
+        if (staleController) await db.update(heartbeatRuns).set({ controllerBootId: randomUUID() }).where(eq(heartbeatRuns.id, runId));
+      },
+    });
+    const repair = await heartbeat.wakeup(f.agentId, {
+      source: "automation", triggerDetail: "system", reason: "issue_continuation_needed",
+      requestedByActorType: "system", requestedByActorId: "recovery",
+      payload: { issueId: f.issueId },
+      contextSnapshot: { issueId: f.issueId, taskId: f.issueId, retryOfRunId: f.runId,
+        dispositionRepairSourceRunId: f.runId, source: "issue.legacy_disposition_repair",
+        legacyDispositionEpisode: { id: f.runId, attempt: 1, maxAttempts: 2 } },
+    });
+    expect(repair).not.toBeNull();
+    await heartbeat.drainActiveRunExecutions();
+    expect(gated).toBe(true);
+    const [settled] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, repair!.id));
+    expect(mockAdapterExecute).not.toHaveBeenCalled();
+    expect(mockExecutePaperclipNativeSession).not.toHaveBeenCalled();
+    if (staleController) {
+      expect(isSuppressedLegacyDispositionDispatch(settled!)).toBe(false);
+      expect(settled?.runnerProfileJson?.[LEGACY_DISPOSITION_SUPPRESSION_KEY]).toBeUndefined();
+      return;
+    }
+    expect(settled).toMatchObject({ status: "cancelled", errorCode: "legacy_disposition_repair_suppressed" });
+    expect(isSuppressedLegacyDispositionDispatch(settled!)).toBe(true);
+    expect(settled?.executionStatusDeliveryId).toBeTruthy();
+    const accounting = { scheduledRetryAttempt: settled?.scheduledRetryAttempt,
+      continuationAttempt: settled?.continuationAttempt, context: settled?.contextSnapshot };
+    for (let pass = 0; pass < 2; pass++) await heartbeat.reconcileStrandedAssignedIssues();
+    expect(await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.companyId, f.companyId))).toEqual([]);
+    const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, f.companyId));
+    expect(runs).toHaveLength(2);
+    const same = runs.find(row => row.id === repair!.id)!;
+    expect({ scheduledRetryAttempt: same.scheduledRetryAttempt, continuationAttempt: same.continuationAttempt,
+      context: same.contextSnapshot }).toEqual(accounting);
+    expect(await heartbeat.scheduleBoundedRetry(repair!.id)).toMatchObject({ outcome: "not_scheduled", errorCode: "legacy_disposition_repair_suppressed" });
+  });
+
+  it("settles a native run with an inherited legacy episode without stamping legacy dispatch proof", async () => {
+    await withTempPaperclipHome(async () => {
+      const f = await seedStrandedIssueFixture({ status: "in_progress", runStatus: "succeeded", livenessState: "blocked" });
+      await db.update(agents).set({ adapterType: "paperclip_runner",
+        adapterConfig: { provider: "codex", model: "gpt-5.6-luna" },
+      }).where(eq(agents.id, f.agentId));
+      let gated = false;
+      const factory = vi.fn(() => { throw new Error("provider must not start"); });
+      const heartbeat = heartbeatService(db, {
+        nativeSessionBackendFactory: factory,
+        beforeChatControlRecoveryCheck: async ({ runId, stage }) => {
+          if (stage !== "dispatch" || gated) return;
+          gated = true;
+          expect((await heartbeat.getRun(runId))?.runtimeMode).toBe("native");
+          await db.insert(issueThreadInteractions).values({ companyId: f.companyId, issueId: f.issueId,
+            kind: "request_confirmation", status: "pending", payload: { version: 1, prompt: "Wait for the existing technical response" } });
+        },
+      });
+      const repair = await heartbeat.wakeup(f.agentId, {
+        source: "automation", triggerDetail: "system", reason: "issue_continuation_needed",
+        requestedByActorType: "system", requestedByActorId: "recovery",
+        payload: { issueId: f.issueId },
+        contextSnapshot: { issueId: f.issueId, taskId: f.issueId, retryOfRunId: f.runId,
+          dispositionRepairSourceRunId: f.runId, source: "issue.legacy_disposition_repair",
+          legacyDispositionEpisode: { id: f.runId, attempt: 1, maxAttempts: 2 } },
+      });
+      expect(repair).not.toBeNull();
+      await heartbeat.drainActiveRunExecutions();
+      expect(gated).toBe(true);
+      const settled = await heartbeat.getRun(repair!.id);
+      expect(settled).toMatchObject({ runtimeMode: "native", status: "cancelled", errorCode: "legacy_disposition_repair_suppressed" });
+      expect(settled?.runnerProfileJson?.[LEGACY_DISPOSITION_SUPPRESSION_KEY]).toBeUndefined();
+      expect(isSuppressedLegacyDispositionDispatch(settled!)).toBe(false);
+      expect(settled?.executionStatusDeliveryId).toBeTruthy();
+      expect(factory).not.toHaveBeenCalled();
+      expect(mockAdapterExecute).not.toHaveBeenCalled();
+      expect(mockExecutePaperclipNativeSession).not.toHaveBeenCalled();
+    });
   });
 
   it("preserves a persisted issue monitor as the durable external-wait path", async () => {
