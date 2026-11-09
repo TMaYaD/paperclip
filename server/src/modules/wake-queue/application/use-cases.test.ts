@@ -98,6 +98,7 @@ function createFakeHost(overrides: Partial<WakeQueueHost> = {}): WakeQueueHost {
 
 function createFakeTransaction(overrides: Partial<WakeQueueTransaction> = {}): WakeQueueTransaction {
   return {
+    isChildReadyWakeEligible: vi.fn(async () => true),
     findInvokableAgent: vi.fn(async () => AGENT),
     isCompletedOnboardingHandoffWake: vi.fn(async () => false),
     findNextDeferredWake: vi.fn(async () => null),
@@ -146,6 +147,25 @@ function createFakeRecovery(): RecoveryEscalationPort {
 }
 
 describe("releaseIssueExecution", () => {
+  it("does not promote a child-ready wake after its child becomes ineligible", async () => {
+    const candidate = wakeCandidate({ reason: "issue_execution_deferred", wakeReason: "issue_child_ready_for_assignment" });
+    const queue = [candidate];
+    const transaction = createFakeTransaction({
+      findNextDeferredWake: vi.fn(async () => queue.shift() ?? null),
+      isChildReadyWakeEligible: vi.fn(async () => false),
+    });
+    const release = createReleaseIssueExecution({
+      issueLock: createFakeIssueLock(createFakeHost(), transaction), recovery: createFakeRecovery(),
+    });
+
+    await release({ companyId: RUN.companyId, runId: RUN.id, now: new Date(), suppressImmediateRecovery: true });
+    expect(transaction.isChildReadyWakeEligible).toHaveBeenCalledWith({
+      companyId: RUN.companyId, issueId: ISSUE.id, agentId: candidate.agentId, wakeId: candidate.id,
+    });
+    expect(transaction.cancelDeferredWake).toHaveBeenCalledWith(expect.objectContaining({ wakeId: candidate.id }));
+    expect(transaction.claimDeferredWakeForPromotion).not.toHaveBeenCalled();
+    expect(transaction.finalizePromotedWake).not.toHaveBeenCalled();
+  });
   it.each([false, true])("preserves a paused head without blocking an eligible follower (%s)", async withFollower => {
     const paused = wakeCandidate({ id: "paused-wake", wakeReason: "issue_comment_mentioned", queuedCommentIds: ["paused-comment"] });
     const ready = wakeCandidate({ id: "ready-wake", agentId: "ready-agent", queuedCommentIds: ["ready-comment"] });

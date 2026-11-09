@@ -124,6 +124,8 @@ import {
 } from "../issue-execution-policy.js";
 import {
   ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
+  buildIssueChildReadyForAssignmentWake,
+  findExistingIssueChildReadyForAssignmentWakeForReadyState,
   buildIssueBlockersResolvedWakeStateKey,
   findExistingIssueBlockersResolvedWakeForReadyState,
   buildCancelledDependencyHandoffWake,
@@ -953,6 +955,7 @@ export function recoveryService(
   const treeControlSvc = issueTreeControlService(db);
   const budgets = budgetService(db);
   let resolvedDependencyWakeBackstopCandidateCursor: string | null = null;
+  let readyUnassignedChildWakeBackstopCandidateCursor: string | null = null;
 
   async function getAgent(agentId: string, database: DbOrTransaction = db) {
     return database
@@ -2935,20 +2938,6 @@ export function recoveryService(
     );
   }
 
-  async function openChildIssues(issue: typeof issues.$inferSelect) {
-    return db
-      .select({ id: issues.id, identifier: issues.identifier })
-      .from(issues)
-      .where(
-        and(
-          eq(issues.companyId, issue.companyId),
-          eq(issues.parentId, issue.id),
-          visibleIssueCondition(),
-          notInArray(issues.status, ["done", "cancelled"]),
-        ),
-      );
-  }
-
   async function healthyOpenChildIssues(issue: typeof issues.$inferSelect, sameWorkspaceOnly = false) {
     if (sameWorkspaceOnly && !issue.projectWorkspaceId) return [];
     const childCandidates = await db
@@ -2981,16 +2970,8 @@ export function recoveryService(
   async function resolveContinuationWaitingOnReview(
     issue: typeof issues.$inferSelect,
   ) {
-    const [existingBlockers, openChildren] = await Promise.all([
-      existingUnresolvedBlockerIssues(issue.companyId, issue.id),
-      openChildIssues(issue),
-    ]);
-    const blockedByIssueIds = [
-      ...new Set([
-        ...existingBlockers.map((row) => row.id),
-        ...openChildren.map((row) => row.id),
-      ]),
-    ];
+    const existingBlockers = await existingUnresolvedBlockerIssues(issue.companyId, issue.id);
+    const blockedByIssueIds = existingBlockers.map((row) => row.id);
     if (blockedByIssueIds.length === 0) return null;
 
     const updated = await issuesSvc.update(issue.id, {
@@ -2999,10 +2980,7 @@ export function recoveryService(
     });
     if (!updated) return null;
 
-    const waitingOn = formatIssueLinksForComment([
-      ...openChildren,
-      ...existingBlockers,
-    ]);
+    const waitingOn = formatIssueLinksForComment(existingBlockers);
     await issuesSvc.addComment(
       issue.id,
       `This task is waiting on ${waitingOn} to finish. ` +
@@ -3526,34 +3504,16 @@ export function recoveryService(
         continue;
       }
 
-      const [sourceState, healthyChildren, hasNewSourcePath] =
+      const [sourceState, hasNewSourcePath] =
         await Promise.all([
           collectDispositionRepairSourceState(db, { issue }),
-          healthyOpenChildIssues(issue),
           sourceHasNewPathOutsideRecoveryAction(action),
         ]);
       const durablePathRestored =
         action.ownerType !== "board" && sourceState.hasDurableWaitingPath;
       if (
-        durablePathRestored ||
-        healthyChildren.length > 0 ||
-        hasNewSourcePath
+        durablePathRestored || hasNewSourcePath
       ) {
-        if (healthyChildren.length > 0 && !sourceState.hasDurableWaitingPath) {
-          const blockerIds = await existingUnresolvedBlockerIssueIds(
-            issue.companyId,
-            issue.id,
-          );
-          await issuesSvc.update(issue.id, {
-            status: "blocked",
-            blockedByIssueIds: [
-              ...new Set([
-                ...blockerIds,
-                ...healthyChildren.map((child) => child.id),
-              ]),
-            ],
-          });
-        }
         const resolved = await recoveryActionsSvc.resolveActiveForIssue({
           companyId: action.companyId,
           sourceIssueId: action.sourceIssueId,
@@ -3562,9 +3522,7 @@ export function recoveryService(
           outcome: "restored",
           resolutionNote: durablePathRestored
             ? `durable_path_restored:${sourceState.durablePathReason ?? "unknown"}`
-            : healthyChildren.length > 0
-              ? "durable_path_restored:healthy_child"
-              : "new_source_execution_path",
+            : "new_source_execution_path",
         });
         if (resolved) {
           result.resolved += 1;
@@ -6045,6 +6003,106 @@ export function recoveryService(
             "failed to enqueue dependency wake from issue graph liveness backstop",
           );
         }
+      }
+    }
+
+    // A completed blocker can make an unassigned child ready without giving the
+    // child an execution path. Its assigned parent owns the next routing turn.
+    const childFilters = [
+      inArray(issues.status, ["backlog", "todo"]),
+      isNull(issues.assigneeAgentId),
+      isNull(issues.assigneeUserId),
+      isNotNull(issues.parentId),
+      isNull(issues.conversationAgentId),
+      visibleIssueCondition(),
+      sql`exists (
+        select 1 from issue_relations ready_edge
+        join issues ready_blocker on ready_blocker.id = ready_edge.issue_id
+        where ready_edge.company_id = ${issues.companyId}
+          and ready_edge.related_issue_id = ${issues.id}
+          and ready_edge.type = 'blocks'
+          and ready_blocker.company_id = ${issues.companyId}
+          and ready_blocker.status = 'done'
+          ${opts?.blockerIssueId ? sql`and ready_edge.issue_id = ${opts.blockerIssueId}` : sql``}
+      )`,
+    ];
+    if (opts?.companyId) childFilters.push(eq(issues.companyId, opts.companyId));
+    if (!opts?.blockerIssueId && readyUnassignedChildWakeBackstopCandidateCursor) {
+      childFilters.push(gt(issues.id, readyUnassignedChildWakeBackstopCandidateCursor));
+    }
+    const queryReadyChildren = () => db.select({
+      id: issues.id,
+      companyId: issues.companyId,
+      totalCount: sql<number>`count(*) over()::int`,
+    }).from(issues).where(and(...childFilters)).orderBy(asc(issues.id))
+      .limit(RESOLVED_DEPENDENCY_WAKE_BACKSTOP_CANDIDATE_LIMIT);
+    let readyChildRows = await queryReadyChildren();
+    if (!opts?.blockerIssueId && readyChildRows.length === 0 && readyUnassignedChildWakeBackstopCandidateCursor) {
+      readyUnassignedChildWakeBackstopCandidateCursor = null;
+      childFilters.pop();
+      readyChildRows = await queryReadyChildren();
+    }
+    const lastReadyChild = readyChildRows[readyChildRows.length - 1];
+    const childCandidateLimitSkipped = Math.max(0, (readyChildRows[0]?.totalCount ?? 0) - readyChildRows.length);
+    result.candidateLimitSkipped += childCandidateLimitSkipped;
+    if (!opts?.blockerIssueId) {
+      readyUnassignedChildWakeBackstopCandidateCursor = childCandidateLimitSkipped > 0 && lastReadyChild ? lastReadyChild.id : null;
+    }
+    result.checked += readyChildRows.length;
+    for (const candidate of readyChildRows) {
+      const completedBlockers = await db.select({ id: issueRelations.issueId })
+        .from(issueRelations).innerJoin(issues, eq(issueRelations.issueId, issues.id))
+        .where(and(
+          eq(issueRelations.companyId, candidate.companyId),
+          eq(issueRelations.relatedIssueId, candidate.id),
+          eq(issueRelations.type, "blocks"),
+          eq(issues.companyId, candidate.companyId),
+          eq(issues.status, "done"),
+          opts?.blockerIssueId ? eq(issueRelations.issueId, opts.blockerIssueId) : sql`true`,
+        )).orderBy(asc(issueRelations.issueId)).limit(1);
+      const resolvedBlockerIssueId = completedBlockers[0]?.id;
+      if (!resolvedBlockerIssueId) { result.notReadySkipped += 1; continue; }
+      const readyChildren = await issuesSvc.listReadyUnassignedChildDependents(resolvedBlockerIssueId);
+      const child = readyChildren.find((row) => row.id === candidate.id);
+      if (!child) { result.notReadySkipped += 1; continue; }
+      const readyState = { companyId: candidate.companyId, parentIssueId: child.parentIssueId,
+        childIssueId: child.id, blockerIssueIds: child.blockerIssueIds,
+        blockerStatusVersions: child.blockerStatusVersions, blockedTransitionAt: child.blockedTransitionAt };
+      if (await findExistingIssueChildReadyForAssignmentWakeForReadyState(db, readyState)) {
+        result.existingWakeSkipped += 1;
+        continue;
+      }
+      if (await hasPendingWakeInteraction(candidate.companyId, child.parentIssueId)) {
+        result.interactionSkipped += 1;
+        continue;
+      }
+      if (await isAutomaticRecoverySuppressedByPauseHold(db, candidate.companyId, child.parentIssueId, treeControlSvc) ||
+          await isAutomaticRecoverySuppressedByPauseHold(db, candidate.companyId, child.id, treeControlSvc)) {
+        result.pauseHoldSkipped += 1;
+        continue;
+      }
+      const wake = buildIssueChildReadyForAssignmentWake({ ...readyState,
+        parentAssigneeAgentId: child.parentAssigneeAgentId, resolvedBlockerIssueId,
+        source, mutation: payloadBackstop });
+      try {
+        const dispatched = await deps.enqueueWakeup(wake.agentId, {
+          source: wake.source, triggerDetail: wake.triggerDetail, reason: wake.reason,
+          payload: wake.payload, contextSnapshot: wake.contextSnapshot,
+          idempotencyKey: wake.idempotencyKey,
+          requestedByActorType: "system", requestedByActorId,
+        });
+        if (!dispatched) { result.deferredOrFailed += 1; continue; }
+        result.healed += 1;
+        result.issueIds.push(child.id);
+        await logActivity(db, { companyId: candidate.companyId, actorType: "system", actorId: requestedByActorId,
+          agentId: child.parentAssigneeAgentId, runId: opts?.runId ?? null,
+          action: "issue.child_ready_for_assignment_wake_emitted", entityType: "issue", entityId: child.id,
+          details: { source, parentIssueId: child.parentIssueId, resolvedBlockerIssueId,
+            blockerIssueIds: child.blockerIssueIds, idempotencyKey: wake.idempotencyKey, wakeupRunId: dispatched.id } });
+      } catch (err) {
+        result.deferredOrFailed += 1;
+        result.enqueueFailed += 1;
+        logger.warn({ err, childIssueId: child.id, source }, "failed to enqueue child assignment wake");
       }
     }
 

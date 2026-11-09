@@ -19,4 +19,11 @@ describe("shouldQueueFollowupForRunningIssueWake", () => {
       wakeCommentId: null,
     })).toBe(false);
   });
+
+  it("queues a later coordinator turn when a child becomes ready during an active run", () => {
+    expect(shouldQueueFollowupForRunningIssueWake({
+      contextSnapshot: { wakeReason: "issue_child_ready_for_assignment", readyChildIssueId: "child-1" },
+      wakeCommentId: null,
+    })).toBe(true);
+  });
 });

@@ -2633,6 +2633,13 @@
       "when": 1792713113842,
       "tag": "0377_dapper_lockheed",
       "breakpoints": true
+    },
+    {
+      "idx": 378,
+      "version": "7",
+      "when": 1794191908432,
+      "tag": "0378_magenta_lady_mastermind",
+      "breakpoints": true
     }
   ]
 }

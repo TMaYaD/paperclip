@@ -48,6 +48,7 @@ import {
   readIssueCommentRunLogText,
 } from "../services/issues.ts";
 import { getRunLogStore } from "../services/run-log-store.js";
+import { buildIssueChildReadyForAssignmentWakeStateKey } from "../services/issue-dependency-wakeups.js";
 import { terminalizeLegacyExecution } from "../services/legacy-execution-recovery.js";
 import { settleUnrecoverableExecutions } from "../services/execution-recovery-resolution.js";
 import {
@@ -4513,6 +4514,65 @@ describeEmbeddedPostgres("issueService blockers and dependency wake readiness", 
       }),
     ]);
     expect(wakeable[0]?.blockerIssueIds).toHaveLength(2);
+  });
+
+  it("projects ready unassigned direct children to their assigned parent after every blocker finishes", async () => {
+    const companyId = randomUUID();
+    const foreignCompanyId = randomUUID();
+    const parentAssigneeAgentId = randomUUID();
+    await seedIssueCompany(db, companyId);
+    await seedIssueCompany(db, foreignCompanyId);
+    await seedCodexCoder(db, companyId, parentAssigneeAgentId);
+    const parentIssueId = randomUUID();
+    const blockerA = randomUUID();
+    const blockerB = randomUUID();
+    const childIssueId = randomUUID();
+    const siblingIssueId = randomUUID();
+    const foreignIssueId = randomUUID();
+    const cycle = new Date("2026-11-09T12:00:00.000Z");
+    await db.insert(issues).values([
+      { id: parentIssueId, companyId, title: "Parent", status: "blocked", priority: "medium", assigneeAgentId: parentAssigneeAgentId },
+      { id: blockerA, companyId, title: "Blocker A", status: "done", priority: "medium" },
+      { id: blockerB, companyId, title: "Blocker B", status: "todo", priority: "medium" },
+      { id: childIssueId, companyId, parentId: parentIssueId, title: "Child", status: "todo", priority: "medium", blockedTransitionAt: cycle },
+      { id: siblingIssueId, companyId, parentId: parentIssueId, title: "Sibling", status: "todo", priority: "medium", assigneeAgentId: parentAssigneeAgentId },
+      { id: foreignIssueId, companyId: foreignCompanyId, title: "Foreign", status: "todo", priority: "medium" },
+    ]);
+    await svc.update(childIssueId, { blockedByIssueIds: [blockerA, blockerB] });
+    await svc.update(siblingIssueId, { blockedByIssueIds: [blockerA] });
+    expect(await svc.listReadyUnassignedChildDependents(blockerA)).toEqual([]);
+
+    await svc.update(blockerB, { status: "done" });
+    expect(await svc.listReadyUnassignedChildDependents(blockerA)).toEqual([
+      { id: childIssueId, parentIssueId, parentAssigneeAgentId, blockerIssueIds: expect.arrayContaining([blockerA, blockerB]), blockerStatusVersions: expect.arrayContaining([
+        expect.objectContaining({ id: blockerA, statusVersion: expect.any(Number) }),
+        expect.objectContaining({ id: blockerB, statusVersion: expect.any(Number) }),
+      ]), blockedTransitionAt: cycle },
+    ]);
+    const firstReadyState = (await svc.listReadyUnassignedChildDependents(blockerA))[0]!;
+    const firstKey = buildIssueChildReadyForAssignmentWakeStateKey({ ...firstReadyState, childIssueId: firstReadyState.id });
+    await svc.update(blockerB, { status: "todo" });
+    expect(await svc.listReadyUnassignedChildDependents(blockerA)).toEqual([]);
+    await svc.update(blockerB, { status: "done" });
+    const secondReadyState = (await svc.listReadyUnassignedChildDependents(blockerA))[0]!;
+    expect(secondReadyState.blockedTransitionAt).toEqual(firstReadyState.blockedTransitionAt);
+    expect(secondReadyState.blockerIssueIds).toEqual(firstReadyState.blockerIssueIds);
+    expect(buildIssueChildReadyForAssignmentWakeStateKey({ ...secondReadyState, childIssueId: secondReadyState.id })).not.toBe(firstKey);
+    expect(await svc.listReadyUnassignedChildDependents(foreignIssueId)).toEqual([]);
+    await svc.update(parentIssueId, { blockedByIssueIds: [childIssueId] });
+    expect(await svc.listReadyUnassignedChildDependents(blockerA)).toEqual([]);
+    await svc.update(parentIssueId, { blockedByIssueIds: [] });
+    await db.update(issues).set({ assigneeAgentId: null }).where(eq(issues.id, parentIssueId));
+    expect(await svc.listReadyUnassignedChildDependents(blockerA)).toEqual([]);
+    await db.update(issues).set({ assigneeAgentId: parentAssigneeAgentId, status: "in_review" })
+      .where(eq(issues.id, parentIssueId));
+    expect(await svc.listReadyUnassignedChildDependents(blockerA)).toEqual([]);
+    await db.update(issues).set({ status: "todo", hiddenAt: new Date() })
+      .where(eq(issues.id, childIssueId));
+    expect(await svc.listReadyUnassignedChildDependents(blockerA)).toEqual([]);
+    await db.update(issues).set({ hiddenAt: null }).where(eq(issues.id, childIssueId));
+    await db.update(issues).set({ hiddenAt: new Date() }).where(eq(issues.id, parentIssueId));
+    expect(await svc.listReadyUnassignedChildDependents(blockerA)).toEqual([]);
   });
 
   it("treats done blockers on a shared workspace as ready while a foreign issue is in-flight", async () => {

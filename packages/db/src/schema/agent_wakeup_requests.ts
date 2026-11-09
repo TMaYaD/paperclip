@@ -93,6 +93,12 @@ export const agentWakeupRequests = pgTable(
     chatCompletionIdempotencyUq: uniqueIndex("agent_wakeup_requests_chat_completion_uq")
       .on(table.companyId, table.idempotencyKey)
       .where(sql`${table.idempotencyKey} LIKE 'chat-completion:%'`),
+    childReadyDeliveryIdempotencyUq: uniqueIndex("agent_wakeup_requests_child_ready_delivery_uq")
+      .on(table.companyId, table.idempotencyKey)
+      .where(sql`${table.idempotencyKey} LIKE 'issue_child_ready_for_assignment:%' AND ${table.requestedByActorId} IS DISTINCT FROM 'native-status-committer' AND ${table.status} NOT IN ('skipped', 'failed', 'cancelled')`),
+    childReadyNativeIntentIdempotencyUq: uniqueIndex("agent_wakeup_requests_child_ready_native_intent_uq")
+      .on(table.companyId, table.idempotencyKey)
+      .where(sql`${table.idempotencyKey} LIKE 'issue_child_ready_for_assignment:%' AND ${table.requestedByActorId} = 'native-status-committer' AND ${table.status} NOT IN ('skipped', 'failed', 'cancelled')`),
     companyPayloadIssueIdx: index("agent_wakeup_requests_company_payload_issue_idx").on(
       table.companyId,
       sql`(${table.payload} ->> 'issueId')`,

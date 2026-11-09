@@ -43,6 +43,8 @@ Automated: [dependency wakeups](../../server/src/__tests__/issue-dependency-wake
 
 Manual: Block one task on another, finish the prerequisite, and observe the dependent task’s eligible continuation. Follow parent/child links back to the source request. Verify no duplicate run or false parent completion occurs.
 
+For an unassigned child, finish its last explicit blocker and check that the assigned parent receives the child ID for routing. An open sibling must not block this wake. Reopen and finish the blocker again to check a new readiness cycle. Hold the child or leave a parent decision pending to check that delivery waits. A parent/child link alone must not create a blocker relation.
+
 ### `review-and-controls`
 
 Automated: [execution policy](../../server/src/__tests__/issue-execution-policy.test.ts), [tree control](../../server/src/__tests__/issue-tree-control-service.test.ts), and [signoff browser suite](../../tests/e2e/signoff-policy.spec.ts) target these layers. A linked suite is not a claim that its current run is green.

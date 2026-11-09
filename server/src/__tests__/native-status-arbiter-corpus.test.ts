@@ -15,6 +15,8 @@ import {
   heartbeatRuns,
   issueThreadInteractions,
   issueRecoveryActions,
+  issueRelations,
+  issueTreeHolds,
   issueWorkProducts,
   issues,
   nativeRunFinalizations,
@@ -69,6 +71,7 @@ import {
 import * as activityLog from "../services/activity-log.js";
 import { dismissObsoleteNativePolicyReviews } from "../services/native-runtime/obsolete-policy-reviews.js";
 import { issueService } from "../services/issues.js";
+import { buildIssueChildReadyForAssignmentWakeStateKey } from "../services/issue-dependency-wakeups.js";
 import { issueThreadInteractionService } from "../services/issue-thread-interactions.js";
 import { startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 
@@ -2077,6 +2080,59 @@ describe("P6-31 Section 18.13 executable status-authority corpus", () => {
     await reconcileNativeFinalizations(db, [seeded.runId]);
     expect(await db.select().from(statusDecisions).where(eq(statusDecisions.issueId, seeded.issueId))).toEqual(decisions);
   }, 30_000);
+
+  it("commits a parent assignment wake when completion makes its unassigned child ready", async () => {
+    const seeded = await seedAutomaticReview();
+    const parentIssueId = randomUUID();
+    const childIssueId = randomUUID();
+    await db.insert(issues).values([
+      { id: parentIssueId, companyId, title: "Route child", status: "in_progress", assigneeAgentId: agentId },
+      { id: childIssueId, companyId, title: "Ready to assign", status: "todo", parentId: parentIssueId },
+    ]);
+    await db.insert(issueRelations).values({ companyId, issueId: seeded.issueId, relatedIssueId: childIssueId, type: "blocks" });
+
+    await reconcileNativeFinalizations(db, [seeded.runId]);
+
+    const [completedBlocker] = await db.select({ statusVersion: issues.statusVersion })
+      .from(issues).where(eq(issues.id, seeded.issueId));
+    const key = buildIssueChildReadyForAssignmentWakeStateKey({
+      parentIssueId, childIssueId, blockerIssueIds: [seeded.issueId],
+      blockerStatusVersions: [{ id: seeded.issueId, statusVersion: completedBlocker!.statusVersion }],
+    });
+    const wakes = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.idempotencyKey, key));
+    expect(wakes).toHaveLength(1);
+    expect(wakes[0]).toMatchObject({ agentId, reason: "issue_child_ready_for_assignment" });
+    await reconcileNativeFinalizations(db, [seeded.runId]);
+    expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.idempotencyKey, key))).toHaveLength(1);
+  }, 30_000);
+
+  it.each(["child pause hold", "pending parent interaction"] as const)(
+    "does not commit a parent assignment wake during %s", async (gate) => {
+      const seeded = await seedAutomaticReview();
+      const parentIssueId = randomUUID();
+      const childIssueId = randomUUID();
+      await db.insert(issues).values([
+        { id: parentIssueId, companyId, title: "Route child", status: "in_progress", assigneeAgentId: agentId },
+        { id: childIssueId, companyId, title: "Ready to assign", status: "todo", parentId: parentIssueId },
+      ]);
+      await db.insert(issueRelations).values({ companyId, issueId: seeded.issueId, relatedIssueId: childIssueId, type: "blocks" });
+      if (gate === "child pause hold") {
+        await db.insert(issueTreeHolds).values({ companyId, rootIssueId: childIssueId, mode: "pause" });
+      } else {
+        await db.insert(issueThreadInteractions).values({ companyId, issueId: parentIssueId,
+          kind: "request_confirmation", status: "pending", payload: { version: 1, prompt: "Approve next routing turn" } });
+      }
+
+      await reconcileNativeFinalizations(db, [seeded.runId]);
+
+      const [completedBlocker] = await db.select({ statusVersion: issues.statusVersion })
+        .from(issues).where(eq(issues.id, seeded.issueId));
+      const key = buildIssueChildReadyForAssignmentWakeStateKey({ parentIssueId, childIssueId, blockerIssueIds: [seeded.issueId],
+        blockerStatusVersions: [{ id: seeded.issueId, statusVersion: completedBlocker!.statusVersion }] });
+      expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.idempotencyKey, key))).toHaveLength(0);
+      expect((await issueService(db).getById(seeded.issueId))?.status).toBe("done");
+    }, 30_000,
+  );
 
   it.each(["queued", "claimed", "deferred_issue_execution", "current_run", "current_intent", "consumed"])(
     "automatic review reconciliation preserves unread child results (%s)", async (delivery) => {

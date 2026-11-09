@@ -33,6 +33,7 @@ import { issueTreeControlService, isVerifiedIssueTreeControlInteractionWake } fr
 import { isAutomaticRecoverySuppressedByPauseHold } from "../../../services/recovery/pause-hold-guard.js";
 import { classifyContinuationFailure } from "../../../services/recovery/service.js";
 import { issueService } from "../../../services/issues.js";
+import { isIssueChildReadyWakeEligibleAtAdmission } from "../../../services/issue-dependency-wakeups.js";
 import { issueRecoveryActionService } from "../../../services/issue-recovery-actions.js";
 import { readContinuationAttempt } from "../../../services/recovery/run-liveness-continuations.js";
 import { withRecoveryContext } from "../../../services/recovery/status-only-context.js";
@@ -206,6 +207,25 @@ function buildTransaction(tx: Db, deps: WakeQueuePostgresAdapterDeps, db: Db, ru
     : null;
 
   return {
+    async isChildReadyWakeEligible({ companyId, issueId, agentId, wakeId }) {
+      const [wake] = await tx.select({ payload: agentWakeupRequests.payload,
+        idempotencyKey: agentWakeupRequests.idempotencyKey })
+        .from(agentWakeupRequests).where(and(
+          eq(agentWakeupRequests.companyId, companyId),
+          eq(agentWakeupRequests.id, wakeId),
+          eq(agentWakeupRequests.agentId, agentId),
+          eq(agentWakeupRequests.status, DEFERRED_WAKE_STATUS),
+        ));
+      if (!wake) return false;
+      const payload = parseObject(wake.payload);
+      const context = parseObject(payload._paperclipWakeContext);
+      return isIssueChildReadyWakeEligibleAtAdmission(tx, {
+        companyId, parentIssueId: issueId, agentId,
+        childIssueId: readNonEmptyString(payload.readyChildIssueId) ?? readNonEmptyString(context.readyChildIssueId),
+        resolvedBlockerIssueId: readNonEmptyString(payload.resolvedBlockerIssueId) ?? readNonEmptyString(context.resolvedBlockerIssueId),
+        idempotencyKey: wake.idempotencyKey,
+      });
+    },
     async findInvokableAgent({ companyId, agentId }): Promise<InvokableAgentSnapshot | null> {
       const agent = await tx
         .select()

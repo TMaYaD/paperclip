@@ -310,6 +310,22 @@ async function runReleaseDrain(
     // Unreachable: decideWakeOutcome only returns "promote" when agentFound and invokable are both true.
     if (!deferredAgent) throw new Error("wake-queue: promoted a deferred wake with no invokable agent");
 
+    if (workingCandidate.wakeReason === "issue_child_ready_for_assignment" &&
+        !(await ports.transaction.isChildReadyWakeEligible({
+          companyId: run.companyId,
+          issueId: issue.id,
+          agentId: workingCandidate.agentId,
+          wakeId: workingCandidate.id,
+        }))) {
+      await ports.transaction.cancelDeferredWake({
+        companyId: run.companyId,
+        wakeId: workingCandidate.id,
+        reason: "Deferred child-ready wake is no longer eligible",
+        now: input.now,
+      });
+      continue;
+    }
+
     const promoted = await promoteDeferredWake(ports, run, issue, workingCandidate, deferredAgent, pauseHold, postCommitEffects, input);
     if (!promoted) continue;
     return promoted;

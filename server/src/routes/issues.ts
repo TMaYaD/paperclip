@@ -286,8 +286,11 @@ import {
 } from "../services/onboarding-first-task-assets.js";
 import {
   ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
+  ISSUE_CHILD_READY_FOR_ASSIGNMENT_WAKE_REASON,
   buildIssueBlockersResolvedWakeStateKey,
+  buildIssueChildReadyForAssignmentWake,
   findExistingIssueBlockersResolvedWakeForReadyState,
+  findExistingIssueChildReadyForAssignmentWakeForReadyState,
   buildCancelledDependencyHandoffWake,
   findExistingCancelledDependencyHandoffWake,
   shouldWakeOnRestoredBlockedDependency,
@@ -3449,6 +3452,11 @@ export function issueRoutes(
   const decisionTrainingSvc = decisionTrainingService(db);
   const issueReferencesSvc = issueReferenceService(db);
   const issueThreadInteractionsSvc = issueThreadInteractionService(db);
+  const hasPendingWakeInteraction = async (issueId: string) =>
+    (await issueThreadInteractionsSvc.listForIssue(issueId)).some((interaction) =>
+      interaction.status === "pending" &&
+      (interaction.continuationPolicy === "wake_assignee" ||
+        interaction.continuationPolicy === "wake_assignee_on_accept"));
   const questionResponseDeliveries = questionResponseDeliveryService(db, {
     heartbeat,
     resolveNativeQuestion: (interaction) =>
@@ -15570,7 +15578,12 @@ export function issueRoutes(
           if (wakeIssueId === issue.id && issue.externalConversationState && issue.identifier) {
             wakeup.contextSnapshot = { ...wakeup.contextSnapshot, taskKey: issue.identifier };
           }
-          wakeups.set(`${agentId}:${wakeIssueId}`, { agentId, wakeup });
+          const readyChildIssueId = wakeup.reason === ISSUE_CHILD_READY_FOR_ASSIGNMENT_WAKE_REASON &&
+            wakeup.payload && typeof wakeup.payload === "object" &&
+            typeof wakeup.payload.readyChildIssueId === "string"
+              ? wakeup.payload.readyChildIssueId
+              : "";
+          wakeups.set(`${agentId}:${wakeIssueId}:${readyChildIssueId}`, { agentId, wakeup });
         };
         const addDependencyResolvedWakeup = async (input: {
           agentId: string;
@@ -15795,6 +15808,42 @@ export function issueRoutes(
               mutation: "blocker_done",
             });
           }
+          try {
+            const readyChildren = typeof svc.listReadyUnassignedChildDependents === "function"
+              ? await svc.listReadyUnassignedChildDependents(issue.id)
+              : [];
+            for (const child of readyChildren) {
+              if (await treeControlSvc.getActivePauseHoldGate(issue.companyId, child.parentIssueId) ||
+                  await treeControlSvc.getActivePauseHoldGate(issue.companyId, child.id)) continue;
+              if (await hasPendingWakeInteraction(child.parentIssueId)) continue;
+              if (await findExistingIssueChildReadyForAssignmentWakeForReadyState(db, {
+                companyId: issue.companyId,
+                parentIssueId: child.parentIssueId,
+                childIssueId: child.id,
+                blockerIssueIds: child.blockerIssueIds,
+                blockerStatusVersions: child.blockerStatusVersions,
+                blockedTransitionAt: child.blockedTransitionAt,
+              })) continue;
+              const { agentId, ...wakeup } = buildIssueChildReadyForAssignmentWake({
+                parentIssueId: child.parentIssueId,
+                childIssueId: child.id,
+                parentAssigneeAgentId: child.parentAssigneeAgentId,
+                blockerIssueIds: child.blockerIssueIds,
+                blockerStatusVersions: child.blockerStatusVersions,
+                blockedTransitionAt: child.blockedTransitionAt,
+                resolvedBlockerIssueId: issue.id,
+                mutation: "blocker_done",
+                source: "issue.child_ready_for_assignment",
+              });
+              addWakeup(agentId, {
+                ...wakeup,
+                requestedByActorType: actor.actorType,
+                requestedByActorId: actor.actorId,
+              });
+            }
+          } catch (err) {
+            logger.warn({ err, blockerIssueId: issue.id }, "failed to project ready unassigned children after issue update");
+          }
         }
 
         if (existing.status !== "cancelled" && issue.status === "cancelled" &&
@@ -15964,7 +16013,8 @@ export function issueRoutes(
           heartbeat
             .wakeup(agentId, wakeup)
             .then((wakeRun) => {
-              if (wakeup.reason !== ISSUE_BLOCKERS_RESOLVED_WAKE_REASON) return;
+              if (wakeup.reason !== ISSUE_BLOCKERS_RESOLVED_WAKE_REASON &&
+                  wakeup.reason !== ISSUE_CHILD_READY_FOR_ASSIGNMENT_WAKE_REASON) return;
               const payload =
                 wakeup.payload && typeof wakeup.payload === "object"
                   ? wakeup.payload
@@ -15980,9 +16030,12 @@ export function issueRoutes(
                 agentId,
                 runId: actor.runId,
                 agentApiKeyId: actor.agentApiKeyId,
-                action: "issue.blockers_resolved_wake_emitted",
+                action: wakeup.reason === ISSUE_CHILD_READY_FOR_ASSIGNMENT_WAKE_REASON
+                  ? "issue.child_ready_for_assignment_wake_emitted"
+                  : "issue.blockers_resolved_wake_emitted",
                 entityType: "issue",
-                entityId: dependentIssueId,
+                entityId: typeof payload.readyChildIssueId === "string"
+                  ? payload.readyChildIssueId : dependentIssueId,
                 details: {
                   source: wakeup.contextSnapshot?.source ?? "issue.update",
                   wakeupRunId: wakeRun?.id ?? null,
@@ -15994,6 +16047,9 @@ export function issueRoutes(
                   blockerIssueIds: Array.isArray(payload.blockerIssueIds)
                     ? payload.blockerIssueIds
                     : [],
+                  ...(typeof payload.readyChildIssueId === "string"
+                    ? { parentIssueId: dependentIssueId, readyChildIssueId: payload.readyChildIssueId }
+                    : {}),
                 },
               });
             })
@@ -19123,7 +19179,12 @@ export function issueRoutes(
             typeof wakeup.payload.issueId === "string"
               ? wakeup.payload.issueId
               : currentIssue.id;
-          const key = `${agentId}:${wakeIssueId}`;
+          const readyChildIssueId = wakeup.reason === ISSUE_CHILD_READY_FOR_ASSIGNMENT_WAKE_REASON &&
+            wakeup.payload && typeof wakeup.payload === "object" &&
+            typeof wakeup.payload.readyChildIssueId === "string"
+              ? wakeup.payload.readyChildIssueId
+              : "";
+          const key = `${agentId}:${wakeIssueId}:${readyChildIssueId}`;
           if (wakeups.has(key)) return;
           if (wakeIssueId === currentIssue.id && issue.externalConversationState && currentIssue.identifier) {
             wakeup.contextSnapshot = { ...wakeup.contextSnapshot, taskKey: currentIssue.identifier };
@@ -19315,6 +19376,42 @@ export function issueRoutes(
               blockedTransitionAt: dependent.blockedTransitionAt,
             });
           }
+          try {
+            const readyChildren = typeof svc.listReadyUnassignedChildDependents === "function"
+              ? await svc.listReadyUnassignedChildDependents(currentIssue.id)
+              : [];
+            for (const child of readyChildren) {
+              if (await treeControlSvc.getActivePauseHoldGate(currentIssue.companyId, child.parentIssueId) ||
+                  await treeControlSvc.getActivePauseHoldGate(currentIssue.companyId, child.id)) continue;
+              if (await hasPendingWakeInteraction(child.parentIssueId)) continue;
+              if (await findExistingIssueChildReadyForAssignmentWakeForReadyState(db, {
+                companyId: currentIssue.companyId,
+                parentIssueId: child.parentIssueId,
+                childIssueId: child.id,
+                blockerIssueIds: child.blockerIssueIds,
+                blockerStatusVersions: child.blockerStatusVersions,
+                blockedTransitionAt: child.blockedTransitionAt,
+              })) continue;
+              const { agentId, ...wakeup } = buildIssueChildReadyForAssignmentWake({
+                parentIssueId: child.parentIssueId,
+                childIssueId: child.id,
+                parentAssigneeAgentId: child.parentAssigneeAgentId,
+                blockerIssueIds: child.blockerIssueIds,
+                blockerStatusVersions: child.blockerStatusVersions,
+                blockedTransitionAt: child.blockedTransitionAt,
+                resolvedBlockerIssueId: currentIssue.id,
+                mutation: "comment",
+                source: "issue.child_ready_for_assignment",
+              });
+              addWakeup(agentId, {
+                ...wakeup,
+                requestedByActorType: actor.actorType,
+                requestedByActorId: actor.actorId,
+              });
+            }
+          } catch (err) {
+            logger.warn({ err, blockerIssueId: currentIssue.id }, "failed to project ready unassigned children after issue comment");
+          }
         }
 
         const becameTerminal =
@@ -19373,7 +19470,8 @@ export function issueRoutes(
           heartbeat
             .wakeup(agentId, wakeup)
             .then((wakeRun) => {
-              if (wakeup.reason !== ISSUE_BLOCKERS_RESOLVED_WAKE_REASON) return;
+              if (wakeup.reason !== ISSUE_BLOCKERS_RESOLVED_WAKE_REASON &&
+                  wakeup.reason !== ISSUE_CHILD_READY_FOR_ASSIGNMENT_WAKE_REASON) return;
               const payload =
                 wakeup.payload && typeof wakeup.payload === "object"
                   ? wakeup.payload
@@ -19389,9 +19487,12 @@ export function issueRoutes(
                 agentId,
                 runId: actor.runId,
                 agentApiKeyId: actor.agentApiKeyId,
-                action: "issue.blockers_resolved_wake_emitted",
+                action: wakeup.reason === ISSUE_CHILD_READY_FOR_ASSIGNMENT_WAKE_REASON
+                  ? "issue.child_ready_for_assignment_wake_emitted"
+                  : "issue.blockers_resolved_wake_emitted",
                 entityType: "issue",
-                entityId: dependentIssueId,
+                entityId: typeof payload.readyChildIssueId === "string"
+                  ? payload.readyChildIssueId : dependentIssueId,
                 details: {
                   source: wakeup.contextSnapshot?.source ?? "issue.comment",
                   wakeupRunId: wakeRun?.id ?? null,
@@ -19403,6 +19504,9 @@ export function issueRoutes(
                   blockerIssueIds: Array.isArray(payload.blockerIssueIds)
                     ? payload.blockerIssueIds
                     : [],
+                  ...(typeof payload.readyChildIssueId === "string"
+                    ? { parentIssueId: dependentIssueId, readyChildIssueId: payload.readyChildIssueId }
+                    : {}),
                 },
               });
             })

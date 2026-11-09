@@ -91,6 +91,7 @@ import {
   issueComments,
   issueRecoveryActions,
   issueRelations,
+  issueThreadInteractions,
   issues,
 } from "@paperclipai/db";
 import {
@@ -132,7 +133,7 @@ import {
   isThrottleCandidateIssueRewake,
 } from "../issue-rewake-throttle.js";
 import { logActivity } from "../activity-log.js";
-import { ISSUE_BLOCKERS_RESOLVED_WAKE_REASON, findExistingCancelledDependencyHandoffWake } from "../issue-dependency-wakeups.js";
+import { ISSUE_BLOCKERS_RESOLVED_WAKE_REASON, ISSUE_CHILD_READY_FOR_ASSIGNMENT_WAKE_REASON, buildIssueChildReadyForAssignmentWakeStateKey, findExistingCancelledDependencyHandoffWake, isIssueChildReadyWakeEligibleAtAdmission } from "../issue-dependency-wakeups.js";
 import {
   ISSUE_TREE_CONTROL_INTERACTION_WAKE_REASONS,
   isVerifiedIssueTreeControlInteractionWake,
@@ -183,6 +184,19 @@ type HeartbeatRun = typeof heartbeatRuns.$inferSelect;
 type HeartbeatRunState = ReturnType<typeof createHeartbeatRunState>;
 type RunPreparation = ReturnType<typeof createHeartbeatRunPreparation>;
 
+function isChildReadyWakeClaimConflict(error: unknown): boolean {
+  let current = error;
+  const seen = new Set<unknown>();
+  while (current && typeof current === "object" && !seen.has(current)) {
+    seen.add(current);
+    const candidate = current as { code?: unknown; constraint?: unknown; constraint_name?: unknown; cause?: unknown };
+    if (candidate.code === "23505" &&
+        (candidate.constraint ?? candidate.constraint_name) === "agent_wakeup_requests_child_ready_delivery_uq") return true;
+    current = candidate.cause;
+  }
+  return false;
+}
+
 /** Queue policy uses the service's lifecycle effects and process-wide ownership sets. */
 export interface HeartbeatQueueDependencies extends Pick<HeartbeatRetryDependencies,
   "setWakeupStatus" | "appendRunEvent" | "finalizeAgentStatus" |
@@ -195,7 +209,7 @@ export interface HeartbeatQueueDependencies extends Pick<HeartbeatRetryDependenc
   Pick<HeartbeatRecoveryDependencies, "setRunStatus"> {
   sweepPendingCleanupLeases: ReturnType<typeof createHeartbeatRecovery>["sweepPendingCleanupLeases"];
   options: Pick<HeartbeatServiceOptions, "beforeChatControlRecoveryCheck">;
-  issuesSvc: Pick<ReturnType<typeof issueService>, "getDependencyReadiness" | "listDependencyReadiness">;
+  issuesSvc: Pick<ReturnType<typeof issueService>, "getDependencyReadiness" | "listDependencyReadiness" | "listReadyUnassignedChildDependents">;
   treeControlSvc: Pick<ReturnType<typeof issueTreeControlService>, "getActivePauseHoldGate">;
   budgets: Pick<ReturnType<typeof budgetService>, "getInvocationBlock">;
   subscriptionWindowGate: Pick<ReturnType<typeof subscriptionWindowGateService>, "evaluate">;
@@ -252,6 +266,7 @@ const RUNNING_ISSUE_WAKE_REASONS_REQUIRING_FOLLOWUP = new Set([
   CHAT_COMPLETION_WAKE_REASON,
   "approval_approved",
   ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
+  ISSUE_CHILD_READY_FOR_ASSIGNMENT_WAKE_REASON,
   "issue_recovery_action_restored",
 ]);
 
@@ -2317,6 +2332,18 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
   }
 
   async function enqueueWakeup(agentId: string, opts: WakeupOptions = {}, executionWaitRequestId?: string) {
+    const childReady = opts.reason === ISSUE_CHILD_READY_FOR_ASSIGNMENT_WAKE_REASON;
+    try {
+      return await enqueueWakeupUnchecked(agentId, childReady ? { ...opts, allowRunCoalescing: false } : opts, executionWaitRequestId);
+    } catch (error) {
+      // Another route, native intent, or reconciliation pass won the durable
+      // delivery claim. The losing transaction rolled back without a run.
+      if (childReady && isChildReadyWakeClaimConflict(error)) return null;
+      throw error;
+    }
+  }
+
+  async function enqueueWakeupUnchecked(agentId: string, opts: WakeupOptions = {}, executionWaitRequestId?: string) {
     const source = opts.source ?? "on_demand";
     const triggerDetail = opts.triggerDetail ?? null;
     const contextSnapshot: Record<string, unknown> = {
@@ -2978,6 +3005,16 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
           await tx.execute(
             sql`select id from issues where id = ${issueId} and company_id = ${agent.companyId} for update`,
           );
+
+          if (reason === ISSUE_CHILD_READY_FOR_ASSIGNMENT_WAKE_REASON &&
+              !(await isIssueChildReadyWakeEligibleAtAdmission(tx as unknown as Db, {
+                companyId: agent.companyId,
+                parentIssueId: issueId,
+                childIssueId: readNonEmptyString(enrichedContextSnapshot.readyChildIssueId),
+                resolvedBlockerIssueId: readNonEmptyString(enrichedContextSnapshot.resolvedBlockerIssueId),
+                agentId,
+                idempotencyKey: opts.idempotencyKey ?? null,
+              }))) return { kind: "skipped" as const };
 
           if (opts.transferCommentRequestId) {
             // The transfer's earlier read cannot establish that its source is
@@ -4875,6 +4912,15 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       string,
       { runId: string | null; status: string }
     >();
+    const findActiveChildReadyDelivery = async (candidate: typeof agentWakeupRequests.$inferSelect) => {
+      if (candidate.reason !== ISSUE_CHILD_READY_FOR_ASSIGNMENT_WAKE_REASON || !candidate.idempotencyKey) return null;
+      return db.select().from(agentWakeupRequests).where(and(
+        eq(agentWakeupRequests.companyId, candidate.companyId),
+        eq(agentWakeupRequests.idempotencyKey, candidate.idempotencyKey),
+        sql`${agentWakeupRequests.requestedByActorId} IS DISTINCT FROM 'native-status-committer'`,
+        notInArray(agentWakeupRequests.status, ["skipped", "failed", "cancelled"]),
+      )).orderBy(desc(agentWakeupRequests.requestedAt)).limit(1).then((rows) => rows[0] ?? null);
+    };
 
     for (const candidate of candidates) {
       const dispatchActorId = `native-status-wake-dispatch:${candidate.id}`;
@@ -4956,8 +5002,60 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
         readNonEmptyString(payload.taskId) ??
         readNonEmptyString(wakeContext.issueId) ??
         null;
+      const readyChildIssueId = candidate.reason === ISSUE_CHILD_READY_FOR_ASSIGNMENT_WAKE_REASON
+        ? readNonEmptyString(payload.readyChildIssueId) ?? readNonEmptyString(wakeContext.readyChildIssueId)
+        : null;
+      if (candidate.reason === ISSUE_CHILD_READY_FOR_ASSIGNMENT_WAKE_REASON) {
+        const resolvedBlockerIssueId = readNonEmptyString(payload.resolvedBlockerIssueId)
+          ?? readNonEmptyString(wakeContext.resolvedBlockerIssueId);
+        const currentChild = issueId && readyChildIssueId && resolvedBlockerIssueId
+          ? (await issuesSvc.listReadyUnassignedChildDependents(resolvedBlockerIssueId))
+            .find((child) => child.id === readyChildIssueId && child.parentIssueId === issueId &&
+              child.parentAssigneeAgentId === candidate.agentId)
+          : null;
+        const currentKey = currentChild && buildIssueChildReadyForAssignmentWakeStateKey({
+          parentIssueId: currentChild.parentIssueId,
+          childIssueId: currentChild.id,
+          blockerIssueIds: currentChild.blockerIssueIds,
+          blockerStatusVersions: currentChild.blockerStatusVersions,
+          blockedTransitionAt: currentChild.blockedTransitionAt,
+        });
+        const paused = currentChild && (
+          await treeControlSvc.getActivePauseHoldGate(candidate.companyId, currentChild.parentIssueId) ||
+          await treeControlSvc.getActivePauseHoldGate(candidate.companyId, currentChild.id)
+        );
+        const pendingParentInteraction = currentChild && await db.select({ id: issueThreadInteractions.id })
+          .from(issueThreadInteractions).where(and(
+            eq(issueThreadInteractions.companyId, candidate.companyId),
+            eq(issueThreadInteractions.issueId, currentChild.parentIssueId),
+            eq(issueThreadInteractions.status, "pending"),
+            inArray(issueThreadInteractions.continuationPolicy, ["wake_assignee", "wake_assignee_on_accept"]),
+          )).limit(1).then((rows) => rows[0] ?? null);
+        if (!currentChild || currentKey !== candidate.idempotencyKey || paused || pendingParentInteraction) {
+          await db.update(agentWakeupRequests).set({
+            status: "skipped",
+            finishedAt: new Date(),
+            error: "Native child-ready wake is no longer eligible",
+            updatedAt: new Date(),
+          }).where(eq(agentWakeupRequests.id, candidate.id));
+          recovered += 1;
+          continue;
+        }
+      }
+      const existingChildDelivery = await findActiveChildReadyDelivery(candidate);
+      if (existingChildDelivery) {
+        await db.update(agentWakeupRequests).set({
+          status: "coalesced",
+          runId: existingChildDelivery.runId,
+          finishedAt: new Date(),
+          error: null,
+          updatedAt: new Date(),
+        }).where(eq(agentWakeupRequests.id, candidate.id));
+        recovered += 1;
+        continue;
+      }
       const scopeKey = issueId
-        ? `${candidate.companyId}:${candidate.agentId}:${issueId}:${readNativeReviewAssignmentContext(wakeContext)?.nativeReviewInteractionId ?? ""}`
+        ? `${candidate.companyId}:${candidate.agentId}:${issueId}:${readNativeReviewAssignmentContext(wakeContext)?.nativeReviewInteractionId ?? ""}${readyChildIssueId ? `:ready-child:${readyChildIssueId}` : ""}`
         : null;
       const priorDelivery = scopeKey
         ? deliveredByIssueScope.get(scopeKey)
@@ -5051,7 +5149,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
           },
         });
 
-        const delivered = await db
+        const dispatchReceipt = await db
           .select()
           .from(agentWakeupRequests)
           .where(
@@ -5064,6 +5162,13 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
           .orderBy(desc(agentWakeupRequests.requestedAt))
           .limit(1)
           .then((rows) => rows[0] ?? null);
+        // A concurrent route/backstop caller can win the delivery index after
+        // the pre-dispatch lookup. The enqueue boundary returns null for that
+        // narrow conflict; settle this intent against the winner's receipt.
+        const competingChildDelivery = !wakeRun && !dispatchReceipt
+          ? await findActiveChildReadyDelivery(candidate)
+          : null;
+        const delivered = dispatchReceipt ?? competingChildDelivery;
 
         // The committer intent is the durable outbox entry. When admission is
         // blocked, enqueueWakeup creates a separate deferred dispatch receipt;
@@ -5074,12 +5179,12 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
         await db
           .update(agentWakeupRequests)
           .set({
-            status: wakeRun || deliveredStatus === "deferred_issue_execution"
+            status: competingChildDelivery || wakeRun || deliveredStatus === "deferred_issue_execution"
               ? "coalesced"
               : deliveredStatus,
             runId: wakeRun?.id ?? delivered?.runId ?? null,
             finishedAt:
-              wakeRun || delivered?.finishedAt
+              competingChildDelivery || wakeRun || delivered?.finishedAt
                 ? (delivered?.finishedAt ?? new Date())
                 : null,
             error: delivered?.error ?? null,
@@ -5095,6 +5200,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
         }
 
         if (wakeRun) dispatched += 1;
+        else if (competingChildDelivery) recovered += 1;
         else deferred += 1;
       } catch (error) {
         await db

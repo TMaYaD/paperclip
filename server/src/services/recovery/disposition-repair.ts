@@ -232,7 +232,7 @@ export async function collectDispositionRepairSourceState(
 
   return {
     fingerprint: `disposition_repair:v1:${digest}`,
-    dependencyIssueIds: [...new Set([...blockers.map((row) => row.id), ...children.map((row) => row.id)])],
+    dependencyIssueIds: blockers.map((row) => row.id),
     hasActiveExecutionPath: activeRuns.length > 0 || queuedWakes.length > 0,
     hasDurableWaitingPath: durablePathReason !== null,
     durablePathReason,

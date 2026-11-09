@@ -109,6 +109,8 @@ export type PromoteDeferredWakeInput = {
  * the deferred-wake queue.
  */
 export interface WakeQueueTransaction {
+  /** Rechecks a ready-child wake under the issue lock before deferred promotion. */
+  isChildReadyWakeEligible(input: { companyId: string; issueId: string; agentId: string; wakeId: string }): Promise<boolean>;
   findInvokableAgent(input: { companyId: string; agentId: string }): Promise<InvokableAgentSnapshot | null>;
   findNextDeferredWake(input: { companyId: string; issueId: string; excludedWakeIds?: string[] }): Promise<DeferredWakeCandidate | null>;
   getQueuedCommentLiveness(input: {
