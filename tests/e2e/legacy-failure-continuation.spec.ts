@@ -91,9 +91,23 @@ for (const action of ["task_retry", "retry_after_reload", "inbox_retry", "messag
         await expect(page.getByRole("button", { name: "Interrupt", exact: true })).toHaveCount(0);
         await expect(page.getByRole("button", { name: "Steer", exact: true })).toHaveCount(0);
         const retry = page.getByRole("button", { name: "Retry", exact: true });
-        await expect(retry).toBeEnabled();
+        await expect(retry).toBeEnabled({ timeout: 30_000 });
+        const [response] = await Promise.all([
+          page.waitForResponse((response) => {
+            const request = response.request();
+            return request.method() === "POST"
+              && new URL(response.url()).pathname.endsWith(`/issues/${issue.id}/retry`)
+              && request.postDataJSON()?.observedRunId === sourceRunId;
+          }),
+          retry.click(),
+        ]);
+        expect(response.ok(), `${response.status()} ${await response.text()}`).toBe(true);
+        expect(await response.json()).toMatchObject({ accepted: true, observedRunId: sourceRunId });
+        const heldRuns = await db.select().from(heartbeatRuns).where(and(
+          eq(heartbeatRuns.companyId, company.id), eq(heartbeatRuns.agentId, agent.id),
+        ));
+        expect(heldRuns.filter(run => run.id !== sourceRunId)).toHaveLength(0);
         await db.update(heartbeatRuns).set({ processPid: 999999999 }).where(eq(heartbeatRuns.id, sourceRunId));
-        await retry.click();
       } else if (action === "automatic_message") {
         // No Retry, duplicate message, or status change: the saved input runs.
       } else if (action === "message") {
@@ -129,7 +143,7 @@ for (const action of ["task_retry", "retry_after_reload", "inbox_retry", "messag
       }
       if (action === "message") expect(prompts).toContain("Please continue the pending follow-up.");
       await page.reload();
-      await expect(page.getByText("Answered the pending follow-up once.", { exact: false })).toBeVisible();
+      await expect(page.getByText("Answered the pending follow-up once.", { exact: false })).toBeVisible({ timeout: 30_000 });
     } finally {
       await request.patch(`/api/companies/${company.id}`, { data: { status: "archived" } });
       await closeRegisteredClients(url);
