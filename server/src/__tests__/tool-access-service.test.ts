@@ -8356,6 +8356,28 @@ describeEmbeddedPostgres("tool access service", () => {
       subjectAgentId: originalAgent.id, reconnectConnectionId: original.connectionId,
     }, actor);
     expect(reconnected.connectionId).toBe(original.connectionId);
+    expect(reconnected.connection.status).toBe("draft");
+    const app = createRouteApp(db, boardSessionActor(company.id, "owner", userId), undefined, {
+      paperclipCloudConnector: connector,
+    });
+    for (const connectionIdField of ["reconnectConnectionId", "resumeConnectionId"] as const) {
+      const response = await request(app)
+        .post(`/api/companies/${company.id}/tools/apps/connect`)
+        .send({ galleryKey: "github", connectionMethodKey: "managed", grantKind: "agent",
+          subjectAgentId: otherAgent.id, [connectionIdField]: original.connectionId });
+      expect(response.status).toBe(400);
+      expect(response.body.error).toMatch(/original dedicated agent/i);
+      await expect(service.getConnection(original.connectionId)).resolves.toMatchObject({
+        status: "draft", config: expect.objectContaining({ connectorSubjectAgentId: originalAgent.id }),
+      });
+      await expect(db.select().from(toolOauthStates).where(eq(toolOauthStates.connectionId, original.connectionId)))
+        .resolves.toHaveLength(0);
+    }
+    const resumed = await service.connectGalleryApp(company.id, {
+      galleryKey: "github", connectionMethodKey: "managed", grantKind: "agent",
+      subjectAgentId: originalAgent.id, resumeConnectionId: original.connectionId,
+    }, actor);
+    expect(resumed.connectionId).toBe(original.connectionId);
 
     await expect(service.startOAuth(company.id, reconnected.connectionId, {
       redirectUri: "https://paperclip.example/api/tools/oauth/cloud-connector/callback",

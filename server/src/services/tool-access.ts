@@ -1917,7 +1917,7 @@ export function toolAccessService(
         throw badRequest(
           "Dedicated GitHub identity requires an agent in this company",
         );
-      if (input.reconnectConnectionId && retainedConnection && retainedConnection.status !== "draft") {
+      if (retainedConnection) {
         const retainedGrants = await db
           .select({ subjectAgentId: connectionGrants.subjectAgentId })
           .from(connectionGrants)
@@ -1931,7 +1931,10 @@ export function toolAccessService(
         const originalSubject = typeof configuredSubject === "string"
           ? configuredSubject
           : grantSubjects.length === 1 ? grantSubjects[0] : null;
-        if (!originalSubject || originalSubject !== dedicatedAgentId || !grantSubjects.includes(originalSubject)) {
+        const grantHistoryMatches = grantSubjects.length > 0
+          ? grantSubjects.includes(originalSubject ?? "")
+          : retainedConnection.status === "draft";
+        if (!originalSubject || originalSubject !== dedicatedAgentId || !grantHistoryMatches) {
           throw badRequest("Reconnect this connection with its original dedicated agent");
         }
       }
