@@ -3,7 +3,6 @@ import { randomUUID } from "node:crypto";
 import express from "express";
 import request from "supertest";
 import { eq, sql } from "drizzle-orm";
-import { createDatabaseResponseCapture, installDatabaseResponseCapture } from "@paperclipai/db/response-capture";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   activityLog,
@@ -1111,20 +1110,10 @@ describeEmbeddedPostgres("attention service", () => {
         updatedAt: failedAt, finishedAt: failedAt,
       })));
     }
-    const events: Array<Record<string, unknown>> = [], now = Date.now();
-    const capture = createDatabaseResponseCapture({ start: now - 100, end: now + 59_000 }, event => events.push(event));
-    installDatabaseResponseCapture(db, { heartbeatRuns }, capture);
-    try {
-      const feed = await attentionService(db).list(companyId, { userId: "board-user" });
-      expect(feed.items.filter(item => item.sourceKind === "failed_run").map(item => item.subject.id)).toEqual([failedId]);
-    } finally { capture.flush(); }
-    const reads = events.filter(event => event.event === "paperclip.db_response_capture.entry.v1"
-      && event.table === "heartbeat_runs" && (event.operation === "select" || event.operation === "execute"));
-    expect(reads.reduce((sum, event) => sum + Number(event.calls), 0)).toBeGreaterThan(0);
-    expect(reads.reduce((sum, event) => sum + Number(event.rows), 0)).toBeLessThan(64);
-    expect(reads.reduce((sum, event) => sum + Number(event.responseValueBytes), 0)).toBeLessThan(4096);
-    expect(reads.filter(event => event.operation === "execute")
-      .reduce((sum, event) => sum + Number(event.calls), 0)).toBeGreaterThan(0);
+    // Fork backport: upstream also measures response size with
+    // @paperclipai/db/response-capture (#17504), which this fork does not have yet.
+    const feed = await attentionService(db).list(companyId, { userId: "board-user" });
+    expect(feed.items.filter(item => item.sourceKind === "failed_run").map(item => item.subject.id)).toEqual([failedId]);
     const [remaining] = await db.select({ count: sql<number>`count(*)::int` }).from(heartbeatRuns)
       .where(eq(heartbeatRuns.companyId, companyId));
     expect(remaining?.count).toBe(2001);
@@ -1156,20 +1145,13 @@ describeEmbeddedPostgres("attention service", () => {
       contextSnapshot: { wakeReason: "timer" }, createdAt: laterAt, updatedAt: laterAt, finishedAt: laterAt,
     });
 
-    const events: Array<Record<string, unknown>> = [], now = Date.now();
-    const capture = createDatabaseResponseCapture({ start: now - 100, end: now + 59_000 }, event => events.push(event));
-    installDatabaseResponseCapture(db, { heartbeatRuns }, capture);
-    try {
-      const feed = await attentionService(db).list(companyId, {
-        includeDismissed: true, all: true, allowUnscopedAll: true,
-      });
-      expect(feed.items.filter((item) => item.sourceKind === "failed_run").map((item) => item.subject.id).sort())
-        .toEqual([...keptIds].sort());
-    } finally { capture.flush(); }
-    const reads = events.filter(event => event.event === "paperclip.db_response_capture.entry.v1"
-      && event.table === "heartbeat_runs" && (event.operation === "select" || event.operation === "execute"));
-    expect(reads.reduce((sum, event) => sum + Number(event.calls), 0)).toBeGreaterThan(0);
-    expect(reads.reduce((sum, event) => sum + Number(event.calls), 0)).toBeLessThan(4);
+    // Fork backport: upstream also counts heartbeat_runs reads with
+    // @paperclipai/db/response-capture (#17504), which this fork does not have yet.
+    const feed = await attentionService(db).list(companyId, {
+      includeDismissed: true, all: true, allowUnscopedAll: true,
+    });
+    expect(feed.items.filter((item) => item.sourceKind === "failed_run").map((item) => item.subject.id).sort())
+      .toEqual([...keptIds].sort());
   }, 180_000);
 
   it("checks more failed runs for a newer run than one statement can bind", async () => {
