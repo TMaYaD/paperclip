@@ -279,6 +279,84 @@ const support = await getEmbeddedPostgresTestSupport();
         }),
       ).rejects.toThrow();
     });
+    it.each([
+      "disabled-connection",
+      "inactive-connection",
+      "revoked-grant",
+      "missing-ref",
+      "missing-secret",
+      "disabled-secret",
+      "wrong-owner",
+      "disabled-definition",
+      "no-repositories",
+    ])("ignores an unusable grant for another GitHub account (%s)", async (problem) => {
+      const input = await seed();
+      const usable = await grant(input, "A");
+      const unusable = await grant(input, "other-account");
+      await db.update(connectionGrants).set({
+        subjectUserId: "A",
+        createdAt: new Date(problem === "revoked-grant" ? "2026-01-01" : "2026-02-01"),
+      }).where(eq(connectionGrants.id, unusable.id));
+      await db.update(connectionGrants).set({
+        createdAt: new Date(problem === "revoked-grant" ? "2026-02-01" : "2026-01-01"),
+      }).where(eq(connectionGrants.id, usable.id));
+      await db.update(companySecrets).set({ ownerUserId: "A" }).where(eq(companySecrets.id, unusable.secretId));
+      if (problem === "disabled-connection")
+        await db.update(toolConnections).set({ enabled: false }).where(eq(toolConnections.id, unusable.connectionId));
+      if (problem === "inactive-connection")
+        await db.update(toolConnections).set({ status: "inactive" }).where(eq(toolConnections.id, unusable.connectionId));
+      if (problem === "revoked-grant")
+        await db.update(connectionGrants).set({ status: "revoked" }).where(eq(connectionGrants.id, unusable.id));
+      if (problem === "missing-ref")
+        await db.update(connectionGrants).set({ credentialSecretRefs: [] }).where(eq(connectionGrants.id, unusable.id));
+      if (problem === "missing-secret")
+        await db.delete(companySecrets).where(eq(companySecrets.id, unusable.secretId));
+      if (problem === "disabled-secret")
+        await db.update(companySecrets).set({ status: "disabled" }).where(eq(companySecrets.id, unusable.secretId));
+      if (problem === "wrong-owner")
+        await db.update(companySecrets).set({ ownerUserId: "B" }).where(eq(companySecrets.id, unusable.secretId));
+      if (problem === "disabled-definition")
+        await db.update(userSecretDefinitions).set({ status: "disabled" }).where(eq(userSecretDefinitions.id, unusable.definitionId));
+      if (problem === "no-repositories")
+        await db.update(connectionGrants).set({ providerTenant: {
+          github: {
+            userId: "other-account", login: "other-account",
+            installationCount: 0, repositoryCount: 0,
+            repositorySelection: "none", installationIds: [], installationOwnerLogins: [],
+          },
+        } }).where(eq(connectionGrants.id, unusable.id));
+
+      expect(await resolveGitHubOperationCredentials(db, input)).toMatchObject({
+        status: "available",
+        grantId: usable.id,
+        connectionId: usable.connectionId,
+      });
+      const connections = [usable, unusable].map((row) => ({
+        id: row.connectionId,
+        config: { sourceTemplateKey: "github" },
+      }));
+      expect(await filterResolvedGitHubConnectionsForRun({
+        db,
+        ...input,
+        responsibleUserId: "A",
+        connections,
+      })).toEqual([connections[0]]);
+    });
+    it("keeps managed access unavailable when every installed grant is unusable", async () => {
+      const input = await seed();
+      const first = await grant(input, "A");
+      const second = await grant(input, "other-account");
+      await db.update(connectionGrants).set({ subjectUserId: "A" }).where(eq(connectionGrants.id, second.id));
+      await db.update(toolConnections).set({ enabled: false }).where(eq(toolConnections.id, first.connectionId));
+      await db.update(connectionGrants).set({ status: "revoked" }).where(eq(connectionGrants.id, second.id));
+      expect(await resolveGitHubOperationCredentials(db, input)).toMatchObject({
+        status: "unavailable", env: {},
+      });
+      expect(await filterResolvedGitHubConnectionsForRun({
+        db, ...input, responsibleUserId: "A",
+        connections: [first, second].map((row) => ({ id: row.connectionId, config: { sourceTemplateKey: "github" } })),
+      })).toEqual([]);
+    });
     it.each([true, false])(
       "prefers the healthy duplicate regardless of grant age (%s)",
       async (healthyNewer) => {
@@ -423,7 +501,13 @@ const support = await getEmbeddedPostgresTestSupport();
       const duplicate = await grant(input, "A");
       await db
         .update(connectionGrants)
-        .set({ providerTenant: null })
+        .set({ providerTenant: {
+          github: {
+            userId: "", login: "A", installationCount: 1,
+            repositoryCount: 1, repositorySelection: "selected",
+            installationIds: ["1"], installationOwnerLogins: ["A"],
+          },
+        } })
         .where(eq(connectionGrants.id, duplicate.id));
       expect(await resolveGitHubOperationCredentials(db, input)).toMatchObject({
         status: "unavailable",
