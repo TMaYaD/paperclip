@@ -1,7 +1,10 @@
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { createHash } from "node:crypto";
 import type { Db } from "@paperclipai/db";
-import { agentWakeupRequests } from "@paperclipai/db";
+import { agentWakeupRequests, issueRelations, issueThreadInteractions } from "@paperclipai/db";
+import { isUuidLike } from "@paperclipai/shared";
+import { issueService } from "./issues.js";
+import { issueTreeControlService } from "./issue-tree-control.js";
 
 export const ISSUE_BLOCKERS_RESOLVED_WAKE_REASON = "issue_blockers_resolved";
 export const ISSUE_CHILD_READY_FOR_ASSIGNMENT_WAKE_REASON = "issue_child_ready_for_assignment";
@@ -331,6 +334,52 @@ export function buildIssueChildReadyForAssignmentWakeStateKey(
     String(blockerIssueIds.length),
     hashBlockerReadyStateDigest(blockerIssueIds, `${cycle}\n${blockerVersions}`),
   ].join(":");
+}
+
+/** Recheck a saved child-ready wake while queue admission owns the parent issue lock. */
+export async function isIssueChildReadyWakeEligibleAtAdmission(db: Db, input: {
+  companyId: string;
+  parentIssueId: string;
+  childIssueId: string | null;
+  resolvedBlockerIssueId: string | null;
+  agentId: string;
+  idempotencyKey: string | null;
+}): Promise<boolean> {
+  const { companyId, parentIssueId, childIssueId, resolvedBlockerIssueId, agentId, idempotencyKey } = input;
+  if (!childIssueId || !resolvedBlockerIssueId || !idempotencyKey ||
+      !isUuidLike(childIssueId) || !isUuidLike(resolvedBlockerIssueId)) return false;
+
+  // Relation and issue mutations take the affected issue lock. Hold the child
+  // and its blockers until the wake row and run have been admitted together.
+  const blockerEdges = await db.select({ blockerIssueId: issueRelations.issueId })
+    .from(issueRelations).where(and(
+      eq(issueRelations.companyId, companyId), eq(issueRelations.relatedIssueId, childIssueId),
+      eq(issueRelations.type, "blocks"),
+    ));
+  const lockIds = [...new Set([childIssueId, ...blockerEdges.map((edge) => edge.blockerIssueId)])].sort();
+  await db.execute(sql`select id from issues where company_id = ${companyId}
+    and id in ${sql`(${sql.join(lockIds.map((id) => sql`${id}`), sql`, `)})`}
+    order by id for update`);
+
+  const currentChild = (await issueService(db).listReadyUnassignedChildDependents(resolvedBlockerIssueId))
+    .find((child) => child.id === childIssueId && child.parentIssueId === parentIssueId &&
+      child.parentAssigneeAgentId === agentId);
+  if (!currentChild || buildIssueChildReadyForAssignmentWakeStateKey({
+    parentIssueId, childIssueId, blockerIssueIds: currentChild.blockerIssueIds,
+    blockerStatusVersions: currentChild.blockerStatusVersions,
+    blockedTransitionAt: currentChild.blockedTransitionAt,
+  }) !== idempotencyKey) return false;
+
+  const treeControl = issueTreeControlService(db);
+  if (await treeControl.getActivePauseHoldGate(companyId, parentIssueId) ||
+      await treeControl.getActivePauseHoldGate(companyId, childIssueId)) return false;
+  const pendingInteraction = await db.select({ id: issueThreadInteractions.id })
+    .from(issueThreadInteractions).where(and(
+      eq(issueThreadInteractions.companyId, companyId), eq(issueThreadInteractions.issueId, parentIssueId),
+      eq(issueThreadInteractions.status, "pending"),
+      inArray(issueThreadInteractions.continuationPolicy, ["wake_assignee", "wake_assignee_on_accept"]),
+    )).limit(1);
+  return pendingInteraction.length === 0;
 }
 
 /** Any delivered or in-flight wake for this exact child ready state suppresses a repeat. */

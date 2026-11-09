@@ -133,7 +133,7 @@ import {
   isThrottleCandidateIssueRewake,
 } from "../issue-rewake-throttle.js";
 import { logActivity } from "../activity-log.js";
-import { ISSUE_BLOCKERS_RESOLVED_WAKE_REASON, ISSUE_CHILD_READY_FOR_ASSIGNMENT_WAKE_REASON, buildIssueChildReadyForAssignmentWakeStateKey, findExistingCancelledDependencyHandoffWake } from "../issue-dependency-wakeups.js";
+import { ISSUE_BLOCKERS_RESOLVED_WAKE_REASON, ISSUE_CHILD_READY_FOR_ASSIGNMENT_WAKE_REASON, buildIssueChildReadyForAssignmentWakeStateKey, findExistingCancelledDependencyHandoffWake, isIssueChildReadyWakeEligibleAtAdmission } from "../issue-dependency-wakeups.js";
 import {
   ISSUE_TREE_CONTROL_INTERACTION_WAKE_REASONS,
   isVerifiedIssueTreeControlInteractionWake,
@@ -3005,6 +3005,16 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
           await tx.execute(
             sql`select id from issues where id = ${issueId} and company_id = ${agent.companyId} for update`,
           );
+
+          if (reason === ISSUE_CHILD_READY_FOR_ASSIGNMENT_WAKE_REASON &&
+              !(await isIssueChildReadyWakeEligibleAtAdmission(tx as unknown as Db, {
+                companyId: agent.companyId,
+                parentIssueId: issueId,
+                childIssueId: readNonEmptyString(enrichedContextSnapshot.readyChildIssueId),
+                resolvedBlockerIssueId: readNonEmptyString(enrichedContextSnapshot.resolvedBlockerIssueId),
+                agentId,
+                idempotencyKey: opts.idempotencyKey ?? null,
+              }))) return { kind: "skipped" as const };
 
           if (opts.transferCommentRequestId) {
             // The transfer's earlier read cannot establish that its source is
