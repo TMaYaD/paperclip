@@ -9375,16 +9375,33 @@ export function issueService(db: Db) {
       const candidates = children.filter((child) => child.parentIssueId && parentsById.has(child.parentIssueId));
       if (candidates.length === 0) return [];
       const readinessMap = await listIssueDependencyReadinessMap(db, blocker.companyId, candidates.map((child) => child.id));
+      const readyChildren = candidates.filter((child) => {
+        const readiness = readinessMap.get(child.id);
+        return readiness?.isDependencyReady && readiness.blockerIssueIds.length > 0;
+      });
+      if (readyChildren.length === 0) return [];
+      const blockerIds = [...new Set(readyChildren.flatMap((child) => readinessMap.get(child.id)!.blockerIssueIds))];
+      const blockerRows = await db.select({ id: issues.id, status: issues.status, statusVersion: issues.statusVersion })
+        .from(issues).where(and(eq(issues.companyId, blocker.companyId), inArray(issues.id, blockerIds)));
+      const blockerVersionsById = new Map(blockerRows
+        .filter((row) => row.status === "done")
+        .map((row) => [row.id, row.statusVersion]));
 
-      return candidates.flatMap((child) => {
+      return readyChildren.flatMap((child) => {
         const parent = parentsById.get(child.parentIssueId!);
         const readiness = readinessMap.get(child.id);
         if (!parent?.assigneeAgentId || !readiness?.isDependencyReady || readiness.blockerIssueIds.length === 0) return [];
+        const blockerStatusVersions = readiness.blockerIssueIds.flatMap((id) => {
+          const statusVersion = blockerVersionsById.get(id);
+          return statusVersion === undefined ? [] : [{ id, statusVersion }];
+        }).sort((a, b) => a.id.localeCompare(b.id));
+        if (blockerStatusVersions.length !== readiness.blockerIssueIds.length) return [];
         return [{
           id: child.id,
           parentIssueId: child.parentIssueId!,
           parentAssigneeAgentId: parent.assigneeAgentId,
           blockerIssueIds: readiness.blockerIssueIds,
+          blockerStatusVersions,
           blockedTransitionAt: child.blockedTransitionAt,
         }];
       });

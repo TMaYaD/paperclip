@@ -6066,7 +6066,8 @@ export function recoveryService(
       const child = readyChildren.find((row) => row.id === candidate.id);
       if (!child) { result.notReadySkipped += 1; continue; }
       const readyState = { companyId: candidate.companyId, parentIssueId: child.parentIssueId,
-        childIssueId: child.id, blockerIssueIds: child.blockerIssueIds, blockedTransitionAt: child.blockedTransitionAt };
+        childIssueId: child.id, blockerIssueIds: child.blockerIssueIds,
+        blockerStatusVersions: child.blockerStatusVersions, blockedTransitionAt: child.blockedTransitionAt };
       if (await findExistingIssueChildReadyForAssignmentWakeForReadyState(db, readyState)) {
         result.existingWakeSkipped += 1;
         continue;

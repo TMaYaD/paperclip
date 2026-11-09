@@ -341,6 +341,7 @@ describe("issue dependency wakeups in issue routes", () => {
         parentIssueId: "parent-1",
         parentAssigneeAgentId: "coordinator-1",
         blockerIssueIds: ["issue-1", "other-blocker"],
+        blockerStatusVersions: [{ id: "issue-1", statusVersion: 1 }, { id: "other-blocker", statusVersion: 1 }],
         blockedTransitionAt: null,
       },
       {
@@ -348,6 +349,7 @@ describe("issue dependency wakeups in issue routes", () => {
         parentIssueId: "parent-1",
         parentAssigneeAgentId: "coordinator-1",
         blockerIssueIds: ["issue-1"],
+        blockerStatusVersions: [{ id: "issue-1", statusVersion: 1 }],
         blockedTransitionAt: null,
       },
     ]);
@@ -379,7 +381,7 @@ describe("issue dependency wakeups in issue routes", () => {
     mockIssueService.update.mockResolvedValue(issueRecord({ status: "done" }));
     mockIssueService.listReadyUnassignedChildDependents.mockResolvedValue([{
       id: "child-1", parentIssueId: "parent-1", parentAssigneeAgentId: "coordinator-1",
-      blockerIssueIds: ["issue-1"], blockedTransitionAt: null,
+      blockerIssueIds: ["issue-1"], blockerStatusVersions: [{ id: "issue-1", statusVersion: 1 }], blockedTransitionAt: null,
     }]);
     mockListIssueInteractions.mockResolvedValue([{ status: "pending", continuationPolicy: "wake_assignee" }]);
 

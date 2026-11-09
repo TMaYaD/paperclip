@@ -846,7 +846,8 @@ describeEmbeddedPostgres("heartbeat resolved dependency wake reconciliation", ()
     const parentIssueId = randomUUID();
     await db.insert(issues).values({ id: parentIssueId, companyId, title: "Parent owner", status: "in_progress", assigneeAgentId: agentId });
     await db.update(issues).set({ status: "todo", parentId: parentIssueId }).where(eq(issues.id, childIssueId));
-    const key = buildIssueChildReadyForAssignmentWakeStateKey({ parentIssueId, childIssueId, blockerIssueIds: [blockerIssueId] });
+    const key = buildIssueChildReadyForAssignmentWakeStateKey({ parentIssueId, childIssueId, blockerIssueIds: [blockerIssueId],
+      blockerStatusVersions: [{ id: blockerIssueId, statusVersion: 0 }] });
 
     const service = heartbeatService(db);
     await service.reconcileResolvedDependencyWakes();
@@ -857,13 +858,30 @@ describeEmbeddedPostgres("heartbeat resolved dependency wake reconciliation", ()
     expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.idempotencyKey, key))).toHaveLength(1);
   });
 
+  it("claims one ready-child wake key when two emitters insert concurrently", async () => {
+    const { companyId, agentId } = await seedResolvedDependencyBackstopFixture({ workspaceState: "none" });
+    const idempotencyKey = `issue_child_ready_for_assignment:state:${randomUUID()}`;
+    const insert = () => db.insert(agentWakeupRequests).values({
+      companyId, agentId, source: "automation", triggerDetail: "system",
+      reason: "issue_child_ready_for_assignment", idempotencyKey,
+      status: "queued", payload: { issueId: randomUUID() },
+    });
+
+    const attempts = await Promise.allSettled([insert(), insert()]);
+    expect(attempts.filter((attempt) => attempt.status === "fulfilled")).toHaveLength(1);
+    const receipts = await db.select({ id: agentWakeupRequests.id })
+      .from(agentWakeupRequests).where(eq(agentWakeupRequests.idempotencyKey, idempotencyKey));
+    expect(receipts).toHaveLength(1);
+  });
+
   it("waits for workspace finalize before waking a parent about its unassigned child", async () => {
     const { companyId, agentId, blockedIssueId: childIssueId, blockerIssueId, executionWorkspaceId } =
       await seedResolvedDependencyBackstopFixture({ workspaceState: "not_finalized", assignee: null });
     const parentIssueId = randomUUID();
     await db.insert(issues).values({ id: parentIssueId, companyId, title: "Parent owner", status: "in_progress", assigneeAgentId: agentId });
     await db.update(issues).set({ status: "todo", parentId: parentIssueId }).where(eq(issues.id, childIssueId));
-    const key = buildIssueChildReadyForAssignmentWakeStateKey({ parentIssueId, childIssueId, blockerIssueIds: [blockerIssueId] });
+    const key = buildIssueChildReadyForAssignmentWakeStateKey({ parentIssueId, childIssueId, blockerIssueIds: [blockerIssueId],
+      blockerStatusVersions: [{ id: blockerIssueId, statusVersion: 0 }] });
     const service = heartbeatService(db);
 
     await service.reconcileResolvedDependencyWakes();

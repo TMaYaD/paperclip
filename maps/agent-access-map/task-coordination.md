@@ -55,7 +55,11 @@ Agent access: `available` — Native set_dependencies for the current task; agen
 / native `call_api` under mutation and checkout policy.
 
 Policy: Task visibility/mutation, task-assignment and ownership policy; review audience
-independent; tree controls board-only.
+independent; tree controls board-only. Completing the last explicit blocker can
+wake the assigned direct parent for an unassigned child. The server checks company,
+current blocker state, parent ownership, visibility, workspace finalization,
+tree holds, and pending parent decisions before delivery. Parent/child structure
+alone does not create a blocker or grant a wake.
 
 Evidence: `source-only` —
 [implementation](../../server/src/routes/issue-tree-control.ts#L95) at the reviewed
@@ -65,6 +69,11 @@ Verification: `not-run` — exercise a listed permitted operation with actual ag
 credentials/run context; inspect its result and applicable persistence/attribution.
 Assert the relevant denied actor, owner, company or mode from Policy. Review the
 remaining operations before qualifying the whole capability.
+
+Source checks: [ready-child projection](../../server/src/__tests__/issues-service.test.ts),
+[route wake](../../server/src/__tests__/issue-dependency-wakeups-routes.test.ts),
+and [native dispatch](../../server/src/__tests__/heartbeat-dependency-scheduling.test.ts)
+cover readiness and delivery. They do not prove a live agent turn.
 
 Gaps: Dedicated set_dependencies is current-task scoped. Generic `call_api`
 forwards blockedByIssueIds to the REST route and retains its ownership checks.

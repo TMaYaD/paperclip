@@ -275,6 +275,7 @@ export type IssueChildReadyForAssignmentWakeStateInput = {
   parentIssueId: string;
   childIssueId: string;
   blockerIssueIds: string[];
+  blockerStatusVersions: Array<{ id: string; statusVersion: number }>;
   blockedTransitionAt?: IssueBlockersResolvedWakeCycleInput;
 };
 
@@ -310,19 +311,25 @@ export function buildIssueChildReadyForAssignmentWake(input: IssueChildReadyForA
   };
 }
 
-/** A distinct state key for an unassigned child that its parent can now route. */
+/**
+ * A distinct state key for an unassigned child that its parent can now route.
+ * Blocker status versions advance when a blocker reopens and completes, even
+ * when the child's blocker edges and blocked-cycle stamp remain unchanged.
+ */
 export function buildIssueChildReadyForAssignmentWakeStateKey(
   input: IssueChildReadyForAssignmentWakeStateInput,
 ): string {
   const blockerIssueIds = uniqueSortedBlockerIssueIds(input.blockerIssueIds);
   const cycle = formatIssueBlockersResolvedWakeCycle(input.blockedTransitionAt);
+  const blockerVersionsById = new Map(input.blockerStatusVersions.map((blocker) => [blocker.id, blocker.statusVersion]));
+  const blockerVersions = blockerIssueIds.map((id) => `${id}:${blockerVersionsById.get(id) ?? "missing"}`).join(",");
   return [
     ISSUE_CHILD_READY_FOR_ASSIGNMENT_WAKE_REASON,
     "state",
     input.parentIssueId,
     input.childIssueId,
     String(blockerIssueIds.length),
-    hashBlockerReadyStateDigest(blockerIssueIds, cycle),
+    hashBlockerReadyStateDigest(blockerIssueIds, `${cycle}\n${blockerVersions}`),
   ].join(":");
 }
 

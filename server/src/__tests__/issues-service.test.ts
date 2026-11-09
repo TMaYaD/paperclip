@@ -48,6 +48,7 @@ import {
   readIssueCommentRunLogText,
 } from "../services/issues.ts";
 import { getRunLogStore } from "../services/run-log-store.js";
+import { buildIssueChildReadyForAssignmentWakeStateKey } from "../services/issue-dependency-wakeups.js";
 import { terminalizeLegacyExecution } from "../services/legacy-execution-recovery.js";
 import { settleUnrecoverableExecutions } from "../services/execution-recovery-resolution.js";
 import {
@@ -4543,8 +4544,20 @@ describeEmbeddedPostgres("issueService blockers and dependency wake readiness", 
 
     await svc.update(blockerB, { status: "done" });
     expect(await svc.listReadyUnassignedChildDependents(blockerA)).toEqual([
-      { id: childIssueId, parentIssueId, parentAssigneeAgentId, blockerIssueIds: expect.arrayContaining([blockerA, blockerB]), blockedTransitionAt: cycle },
+      { id: childIssueId, parentIssueId, parentAssigneeAgentId, blockerIssueIds: expect.arrayContaining([blockerA, blockerB]), blockerStatusVersions: expect.arrayContaining([
+        expect.objectContaining({ id: blockerA, statusVersion: expect.any(Number) }),
+        expect.objectContaining({ id: blockerB, statusVersion: expect.any(Number) }),
+      ]), blockedTransitionAt: cycle },
     ]);
+    const firstReadyState = (await svc.listReadyUnassignedChildDependents(blockerA))[0]!;
+    const firstKey = buildIssueChildReadyForAssignmentWakeStateKey({ ...firstReadyState, childIssueId: firstReadyState.id });
+    await svc.update(blockerB, { status: "todo" });
+    expect(await svc.listReadyUnassignedChildDependents(blockerA)).toEqual([]);
+    await svc.update(blockerB, { status: "done" });
+    const secondReadyState = (await svc.listReadyUnassignedChildDependents(blockerA))[0]!;
+    expect(secondReadyState.blockedTransitionAt).toEqual(firstReadyState.blockedTransitionAt);
+    expect(secondReadyState.blockerIssueIds).toEqual(firstReadyState.blockerIssueIds);
+    expect(buildIssueChildReadyForAssignmentWakeStateKey({ ...secondReadyState, childIssueId: secondReadyState.id })).not.toBe(firstKey);
     expect(await svc.listReadyUnassignedChildDependents(foreignIssueId)).toEqual([]);
     await svc.update(parentIssueId, { blockedByIssueIds: [childIssueId] });
     expect(await svc.listReadyUnassignedChildDependents(blockerA)).toEqual([]);

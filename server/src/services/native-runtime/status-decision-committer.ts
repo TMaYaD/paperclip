@@ -49,7 +49,7 @@ import { issueService } from "../issues.js";
 import { issueTreeControlService } from "../issue-tree-control.js";
 import { issueThreadInteractionService } from "../issue-thread-interactions.js";
 import { issueRecoveryActionService } from "../issue-recovery-actions.js";
-import { buildIssueBlockersResolvedWakeIdempotencyKey, buildIssueChildReadyForAssignmentWake, findExistingIssueChildReadyForAssignmentWakeForReadyState } from "../issue-dependency-wakeups.js";
+import { buildIssueBlockersResolvedWakeIdempotencyKey, buildIssueChildReadyForAssignmentWake, findExistingIssueChildReadyForAssignmentWakeForReadyState, ISSUE_CHILD_READY_FOR_ASSIGNMENT_WAKE_REASON } from "../issue-dependency-wakeups.js";
 import {
   persistActivity,
   publishActivity,
@@ -430,15 +430,14 @@ async function enqueueWake(input: {
           "deferred_issue_execution",
           "claimed",
           "completed",
+          "coalesced",
         ]),
       ),
     )
     .limit(1)
     .then((rows) => rows[0] ?? null);
   if (existing) return existing.id;
-  const inserted = await input.tx
-    .insert(agentWakeupRequests)
-    .values({
+  const insert = input.tx.insert(agentWakeupRequests).values({
       companyId: input.companyId,
       agentId: input.agentId,
       source: "automation",
@@ -460,9 +459,20 @@ async function enqueueWake(input: {
       requestedByActorType: "system",
       requestedByActorId: "native-status-committer",
       idempotencyKey: input.idempotencyKey,
-    })
-    .returning({ id: agentWakeupRequests.id })
+    });
+  const inserted = await (input.reason === ISSUE_CHILD_READY_FOR_ASSIGNMENT_WAKE_REASON
+    ? insert.onConflictDoNothing().returning({ id: agentWakeupRequests.id })
+    : insert.returning({ id: agentWakeupRequests.id }))
     .then((rows) => rows[0] ?? null);
+  if (!inserted && input.reason === ISSUE_CHILD_READY_FOR_ASSIGNMENT_WAKE_REASON) {
+    const winner = await input.tx.select({ id: agentWakeupRequests.id })
+      .from(agentWakeupRequests).where(and(
+        eq(agentWakeupRequests.companyId, input.companyId),
+        eq(agentWakeupRequests.idempotencyKey, input.idempotencyKey),
+        inArray(agentWakeupRequests.status, ["queued", "deferred_issue_execution", "claimed", "completed", "coalesced"]),
+      )).limit(1).then((rows) => rows[0] ?? null);
+    if (winner) return winner.id;
+  }
   if (!inserted) throw new Error("native_status_wake_not_persisted");
   return inserted.id;
 }
@@ -2072,7 +2082,8 @@ export async function commitNativeStatusDecision(input: {
           )).limit(1).then((rows) => rows[0] ?? null);
         if (pendingParentInteraction) continue;
         const readyState = { companyId: input.companyId, parentIssueId: child.parentIssueId,
-          childIssueId: child.id, blockerIssueIds: child.blockerIssueIds, blockedTransitionAt: child.blockedTransitionAt };
+          childIssueId: child.id, blockerIssueIds: child.blockerIssueIds,
+          blockerStatusVersions: child.blockerStatusVersions, blockedTransitionAt: child.blockedTransitionAt };
         const wake = buildIssueChildReadyForAssignmentWake({
           ...readyState,
           parentAssigneeAgentId: child.parentAssigneeAgentId,

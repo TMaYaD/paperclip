@@ -15821,6 +15821,7 @@ export function issueRoutes(
                 parentIssueId: child.parentIssueId,
                 childIssueId: child.id,
                 blockerIssueIds: child.blockerIssueIds,
+                blockerStatusVersions: child.blockerStatusVersions,
                 blockedTransitionAt: child.blockedTransitionAt,
               })) continue;
               const { agentId, ...wakeup } = buildIssueChildReadyForAssignmentWake({
@@ -15828,6 +15829,7 @@ export function issueRoutes(
                 childIssueId: child.id,
                 parentAssigneeAgentId: child.parentAssigneeAgentId,
                 blockerIssueIds: child.blockerIssueIds,
+                blockerStatusVersions: child.blockerStatusVersions,
                 blockedTransitionAt: child.blockedTransitionAt,
                 resolvedBlockerIssueId: issue.id,
                 mutation: "blocker_done",
@@ -19387,6 +19389,7 @@ export function issueRoutes(
                 parentIssueId: child.parentIssueId,
                 childIssueId: child.id,
                 blockerIssueIds: child.blockerIssueIds,
+                blockerStatusVersions: child.blockerStatusVersions,
                 blockedTransitionAt: child.blockedTransitionAt,
               })) continue;
               const { agentId, ...wakeup } = buildIssueChildReadyForAssignmentWake({
@@ -19394,6 +19397,7 @@ export function issueRoutes(
                 childIssueId: child.id,
                 parentAssigneeAgentId: child.parentAssigneeAgentId,
                 blockerIssueIds: child.blockerIssueIds,
+                blockerStatusVersions: child.blockerStatusVersions,
                 blockedTransitionAt: child.blockedTransitionAt,
                 resolvedBlockerIssueId: currentIssue.id,
                 mutation: "comment",

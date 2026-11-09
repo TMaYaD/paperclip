@@ -11,6 +11,7 @@ const readyState = {
   parentIssueId: "parent-a",
   childIssueId: "child-a",
   blockerIssueIds: ["blocker-b", "blocker-a"],
+  blockerStatusVersions: [{ id: "blocker-b", statusVersion: 4 }, { id: "blocker-a", statusVersion: 2 }],
   blockedTransitionAt: new Date("2026-11-09T12:00:00.000Z"),
 };
 
@@ -51,6 +52,14 @@ describe("child ready for assignment wake", () => {
     expect(buildIssueChildReadyForAssignmentWakeStateKey({ ...readyState, childIssueId: "child-b" })).not.toBe(key);
     expect(buildIssueChildReadyForAssignmentWakeStateKey({ ...readyState, blockerIssueIds: ["blocker-a"] })).not.toBe(key);
     expect(buildIssueChildReadyForAssignmentWakeStateKey({ ...readyState, blockedTransitionAt: new Date("2026-11-09T12:01:00.000Z") })).not.toBe(key);
+    expect(buildIssueChildReadyForAssignmentWakeStateKey({
+      ...readyState,
+      blockerStatusVersions: [{ id: "blocker-a", statusVersion: 2 }, { id: "blocker-b", statusVersion: 4 }],
+    })).toBe(key);
+    expect(buildIssueChildReadyForAssignmentWakeStateKey({
+      ...readyState,
+      blockerStatusVersions: [{ id: "blocker-b", statusVersion: 6 }, { id: "blocker-a", statusVersion: 2 }],
+    })).not.toBe(key);
   });
 
   it.each(["queued", "deferred_issue_execution", "claimed", "completed", "coalesced"])(
@@ -71,4 +80,19 @@ describe("child ready for assignment wake", () => {
       )).toBeNull();
     },
   );
+
+  it("does not let a completed wake suppress a later blocker completion cycle", async () => {
+    const previousWake = {
+      id: "wake-a",
+      status: "completed",
+      idempotencyKey: buildIssueChildReadyForAssignmentWakeStateKey(readyState),
+    };
+    const nextReadyState = {
+      ...readyState,
+      blockerStatusVersions: [{ id: "blocker-a", statusVersion: 2 }, { id: "blocker-b", statusVersion: 6 }],
+    };
+    expect(await findExistingIssueChildReadyForAssignmentWakeForReadyState(
+      dbWithWakeRows([previousWake]), nextReadyState,
+    )).toBeNull();
+  });
 });

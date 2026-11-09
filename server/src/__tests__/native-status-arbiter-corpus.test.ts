@@ -2093,8 +2093,11 @@ describe("P6-31 Section 18.13 executable status-authority corpus", () => {
 
     await reconcileNativeFinalizations(db, [seeded.runId]);
 
+    const [completedBlocker] = await db.select({ statusVersion: issues.statusVersion })
+      .from(issues).where(eq(issues.id, seeded.issueId));
     const key = buildIssueChildReadyForAssignmentWakeStateKey({
       parentIssueId, childIssueId, blockerIssueIds: [seeded.issueId],
+      blockerStatusVersions: [{ id: seeded.issueId, statusVersion: completedBlocker!.statusVersion }],
     });
     const wakes = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.idempotencyKey, key));
     expect(wakes).toHaveLength(1);
@@ -2122,7 +2125,10 @@ describe("P6-31 Section 18.13 executable status-authority corpus", () => {
 
       await reconcileNativeFinalizations(db, [seeded.runId]);
 
-      const key = buildIssueChildReadyForAssignmentWakeStateKey({ parentIssueId, childIssueId, blockerIssueIds: [seeded.issueId] });
+      const [completedBlocker] = await db.select({ statusVersion: issues.statusVersion })
+        .from(issues).where(eq(issues.id, seeded.issueId));
+      const key = buildIssueChildReadyForAssignmentWakeStateKey({ parentIssueId, childIssueId, blockerIssueIds: [seeded.issueId],
+        blockerStatusVersions: [{ id: seeded.issueId, statusVersion: completedBlocker!.statusVersion }] });
       expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.idempotencyKey, key))).toHaveLength(0);
       expect((await issueService(db).getById(seeded.issueId))?.status).toBe("done");
     }, 30_000,
