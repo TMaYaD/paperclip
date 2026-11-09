@@ -8,6 +8,7 @@ import { toolAccessAuditEvents, toolConnectionInstalls, toolConnections, toolPro
 import type { ToolConnection, ToolConnectionInstall, ToolConnectionInstallSnapshot, PutToolConnectionInstalls } from "@paperclipai/shared";
 import { unprocessable } from "../../../errors.js";
 import { logActivity } from "../../activity-log.js";
+import { assertDedicatedAgentTargets } from "./dedicated-agent-access.js";
 
 type InstallDependencies = {
   now: () => Date;
@@ -154,6 +155,7 @@ export function createConnectionInstalls(db: Db, { now, getConnectionRow, assert
           install,
         ]),
       );
+      await assertDedicatedAgentTargets(db, connection, input.installs);
       for (const install of requested.values()) {
         if (install.targetType === "company") {
           if (install.targetId !== connection.companyId)

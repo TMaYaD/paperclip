@@ -1,6 +1,7 @@
 import { createConnectionCredentialValidation } from "./tool-access/connections/credential-validation.js";
 import { createConnectionGrants } from "./tool-access/connections/grants.js";
 import { createConnectionInstalls } from "./tool-access/connections/installs.js";
+import { assertDedicatedAgentTargets } from "./tool-access/connections/dedicated-agent-access.js";
 import { createConnectionRemoval } from "./tool-access/connections/removal.js";
 import { createToolRemoteHttp } from "./tool-access/remote-http.js";
 import { classifyRisk, normalizeToolDescriptor, type McpToolDescriptor } from "./tool-access/catalog/descriptors.js";
@@ -3113,6 +3114,13 @@ export function toolAccessService(
     actor?: ActorInfo,
   ): Promise<FinishToolAppResult> {
     const connection = await getConnectionRow(connectionId, companyId);
+    await assertDedicatedAgentTargets(
+      db,
+      connection,
+      input.access === "all_agents"
+        ? [{ targetType: "company", targetId: companyId }]
+        : input.access.agentIds.map((targetId) => ({ targetType: "agent" as const, targetId })),
+    );
     await assertConnectorConnectionSetupEnabled(connection);
     if (connection.status === "archived")
       throw conflict("Archived app connections cannot be finished");
