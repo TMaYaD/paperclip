@@ -1769,13 +1769,52 @@ export async function prepareGitHubOperationLaunchers(input: {
   const clearEmptyGitIdentity = ["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"]
     .map((key) => `if [ -z "\${${key}-}" ]; then unset ${key}; fi\n`)
     .join("");
-  const profile = `export PATH=${shellQuote(managedPath)}\n${clearEmptyGitIdentity}`;
+  const prependLauncher = `__pc_launcher=${shellQuote(directory)}
+__pc_remaining=$PATH
+__pc_kept=
+__pc_has_kept=0
+while :; do
+  case $__pc_remaining in
+    *:*) __pc_entry=\${__pc_remaining%%:*}; __pc_remaining=\${__pc_remaining#*:}; __pc_more=1 ;;
+    *) __pc_entry=$__pc_remaining; __pc_more=0 ;;
+  esac
+  if [ "$__pc_entry" != "$__pc_launcher" ]; then
+    if [ "$__pc_has_kept" = 1 ]; then __pc_kept=$__pc_kept:$__pc_entry
+    else __pc_kept=$__pc_entry; __pc_has_kept=1; fi
+  fi
+  [ "$__pc_more" = 0 ] && break
+done
+if [ "$__pc_has_kept" = 1 ]; then PATH=$__pc_launcher:$__pc_kept
+else PATH=$__pc_launcher; fi
+export PATH
+unset __pc_launcher __pc_remaining __pc_kept __pc_has_kept __pc_entry __pc_more
+`;
+  // Login startup can replace or reorder the configured toolchain. Restore only
+  // entries it dropped, then put the managed launchers first in the current PATH.
+  const restoreBasePath = basePath ? `for __pc_base_entry in ${basePath.split(":").map(shellQuote).join(" ")}; do
+  __pc_remaining=$PATH
+  __pc_found=0
+  while :; do
+    case $__pc_remaining in
+      *:*) __pc_entry=\${__pc_remaining%%:*}; __pc_remaining=\${__pc_remaining#*:}; __pc_more=1 ;;
+      *) __pc_entry=$__pc_remaining; __pc_more=0 ;;
+    esac
+    if [ "$__pc_entry" = "$__pc_base_entry" ]; then __pc_found=1; break; fi
+    [ "$__pc_more" = 0 ] && break
+  done
+  if [ "$__pc_found" = 0 ]; then PATH=$PATH:$__pc_base_entry; fi
+done
+unset __pc_base_entry __pc_remaining __pc_found __pc_entry __pc_more
+` : "";
+  const profile = `${prependLauncher}${clearEmptyGitIdentity}`;
+  const loginProfile = `${restoreBasePath}${profile}`;
   const files: Record<string, string> = Object.fromEntries([
     // Remote launchers live beneath the checkout. Pin their own package scope
     // so an enclosing project's "type": "module" cannot reinterpret require().
     ["package.json", '{"type":"commonjs"}\n'],
     ...["git", "gh"].map((name) => [name, githubLauncherSource()] as const),
-    ...[".zshenv", ".zprofile", ".zshrc", ".bash_profile", ".bashrc", ".profile"].map((name) => [name, profile] as const),
+    ...[".zshenv", ".zprofile", ".zshrc", ".bash_profile", ".bashrc", ".profile"].map((name) =>
+      [name, [".zprofile", ".bash_profile", ".profile"].includes(name) ? loginProfile : profile] as const),
   ]);
   if (remote) {
     const runner = adapterExecutionTargetCommandRunner(remote);

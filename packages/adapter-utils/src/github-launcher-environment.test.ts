@@ -70,6 +70,78 @@ async function sandbox(layout: string, concurrent?: boolean) {
 }
 
 describe("managed GitHub launcher environment", () => {
+  it("keeps a parent-added libexec path in nested bash scripts without duplicating launchers", async () => {
+    const fixture = await sandbox("tools with 'quotes'/bin");
+    const env = await prepareGitHubOperationLaunchers({
+      runId: "nested-bash-path", target: fixture.target, cwd: fixture.root, env: { PATH: fixture.remotePath },
+    });
+    const libexec = path.join(fixture.root, "libexec with 'quotes'");
+    await mkdir(libexec);
+    await writeFile(path.join(libexec, "rbenv-exec"), "#!/bin/bash\nset -e\nrbenv-version-name\n", { mode: 0o700 });
+    await writeFile(path.join(libexec, "rbenv-version-name"), "#!/bin/bash\nprintf 'version-name-found\\n'\n", { mode: 0o700 });
+    await writeFile(path.join(libexec, "inspect-path"), "#!/bin/bash\nprintf '%s\\n' \"$PATH\"\n", { mode: 0o700 });
+    const result = await fixture.runner.execute({
+      command: "bash", args: ["--noprofile", "--norc", "-c",
+        `export PATH=${ssh.shellQuote(libexec)}:"$PATH"; bash --noprofile --norc -c 'set -e; rbenv-exec; command -v git; command -v gh; inspect-path'`],
+      env,
+    });
+    expect(result.exitCode, result.stderr).toBe(0);
+    const [version, git, gh, nestedPath] = result.stdout.split("\n");
+    expect(version).toBe("version-name-found");
+    expect(git).toBe(path.join(env.PAPERCLIP_GITHUB_LAUNCHER_DIR, "git"));
+    expect(gh).toBe(path.join(env.PAPERCLIP_GITHUB_LAUNCHER_DIR, "gh"));
+    expect(nestedPath?.split(":")).toEqual([env.PAPERCLIP_GITHUB_LAUNCHER_DIR, libexec, ...fixture.remotePath.split(":")]);
+  });
+
+  it("restores missing configured entries after login reorders PATH", async () => {
+    const fixture = await sandbox("tools with 'quotes'/bin");
+    const env = await prepareGitHubOperationLaunchers({
+      runId: "login-path-merge", target: fixture.target, cwd: fixture.root, env: { PATH: fixture.remotePath },
+    });
+    const launcher = env.PAPERCLIP_GITHUB_LAUNCHER_DIR;
+    const inherited = path.join(fixture.root, "inherited tools");
+    const currentPath = `${inherited}:/usr/bin:/bin:${launcher}`;
+    const result = await fixture.runner.execute({
+      command: "sh", args: ["-c", '. "$ZDOTDIR/.zprofile"; printf "%s\\n" "$PATH"'],
+      env: { ...env, PATH: currentPath },
+    });
+    expect(result.exitCode, result.stderr).toBe(0);
+    const entries = result.stdout.trimEnd().split(":");
+    expect(entries[0]).toBe(launcher);
+    expect(entries.filter((entry) => entry === launcher)).toHaveLength(1);
+    expect(entries).toContain(inherited);
+    expect(entries).toContain(fixture.bin);
+    expect(entries).toContain(path.dirname(process.execPath));
+    const zshAvailable = await fixture.runner.execute({
+      command: "sh", args: ["-c", "command -v zsh"], env: { ...env, PATH: currentPath },
+    });
+    if (zshAvailable.exitCode !== 0) return;
+    const zsh = await fixture.runner.execute({
+      command: "zsh", args: ["-l", "-c", 'printf "%s\\n" "$PATH"'],
+      env: { ...env, PATH: currentPath },
+    });
+    expect(zsh.exitCode, zsh.stderr).toBe(0);
+    const zshEntries = zsh.stdout.trimEnd().split(":");
+    expect(zshEntries[0]).toBe(launcher);
+    expect(zshEntries).toContain(inherited);
+    expect(zshEntries).toContain(fixture.bin);
+  });
+
+  it("removes only exact launcher entries and preserves empty PATH components", async () => {
+    const fixture = await sandbox("tools with 'quotes'/bin");
+    const env = await prepareGitHubOperationLaunchers({
+      runId: "exact-path-entry", target: fixture.target, cwd: fixture.root, env: { PATH: fixture.remotePath },
+    });
+    const launcher = env.PAPERCLIP_GITHUB_LAUNCHER_DIR;
+    const currentPath = `:${launcher}x:${launcher}::${launcher}:/usr/bin:`;
+    const result = await fixture.runner.execute({
+      command: "/bin/sh", args: ["-c", '. "$BASH_ENV"; printf "%s\\n" "$PATH"'],
+      env: { ...env, PATH: currentPath },
+    });
+    expect(result.exitCode, result.stderr).toBe(0);
+    expect(result.stdout).toBe(`${launcher}::${launcher}x::/usr/bin:\n`);
+  });
+
   it("stages the complete remote launcher set in one control command", async () => {
     const fixture = await sandbox("tools with 'quotes'/bin", true);
     const env = await prepareGitHubOperationLaunchers({
