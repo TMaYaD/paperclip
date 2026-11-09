@@ -125,6 +125,12 @@ export function createOAuthAuthorizationStart(db: Db, dependencies: Dependencies
     const authorizationSubjectUserId =
       fixedPersonalIdentity?.subjectUserId ?? input.subjectUserId;
     const authorizationSubjectAgentId = input.subjectAgentId;
+    if (connection.credentialPolicy === "per_agent" && !authorizationSubjectAgentId) {
+      throw badRequest("Choose the dedicated agent for this connection before authorization");
+    }
+    if (connection.credentialPolicy === "per_agent" && authorizationSubjectUserId) {
+      throw badRequest("A dedicated agent connection cannot authorize a personal identity");
+    }
     if (authorizationSubjectAgentId) {
       const [subjectAgent] = await db
         .select({ id: agents.id })
@@ -144,6 +150,24 @@ export function createOAuthAuthorizationStart(db: Db, dependencies: Dependencies
         throw badRequest(
           "This connection is not configured for a dedicated agent identity",
         );
+      }
+      const configuredAgentId = connection.config.connectorSubjectAgentId;
+      if (typeof configuredAgentId === "string" && configuredAgentId !== authorizationSubjectAgentId) {
+        throw badRequest("Authorize this connection with its dedicated agent");
+      }
+      if (typeof configuredAgentId !== "string") {
+        const retainedGrants = await db
+          .select({ subjectAgentId: connectionGrants.subjectAgentId })
+          .from(connectionGrants)
+          .where(and(
+            eq(connectionGrants.companyId, companyId),
+            eq(connectionGrants.connectionId, connection.id),
+            eq(connectionGrants.kind, "agent"),
+          ));
+        const subjects = [...new Set(retainedGrants.map((grant) => grant.subjectAgentId).filter((id): id is string => Boolean(id)))];
+        if (subjects.length > 0 && (subjects.length !== 1 || subjects[0] !== authorizationSubjectAgentId)) {
+          throw badRequest("Authorize this connection with its dedicated agent");
+        }
       }
     }
     const intentLink = input.interactionId

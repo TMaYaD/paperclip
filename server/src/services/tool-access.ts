@@ -1668,12 +1668,9 @@ export function toolAccessService(
       if (!row) throw notFound("App not found");
       existingApplication = row;
     } else {
-      // Removal and interrupted setup intentionally retain their
-      // application/connection rows. A fresh gallery click has no
-      // applicationId, so recover that retained identity by its company-unique
-      // name and source instead of inserting a duplicate application that the
-      // unique index rejects. Active applications are excluded: connecting a
-      // second account still requires its own name/application identity.
+      // Removal and interrupted setup retain their application rows. Reuse a
+      // matching application to satisfy the company-unique name constraint,
+      // while giving a fresh connection its own identity.
       const requestedName =
         input.name ?? galleryEntry?.name ?? defaultLinkName(input.link ?? "");
       const recoverableApplicationStatuses = galleryEntry
@@ -1775,21 +1772,16 @@ export function toolAccessService(
         );
       }
     }
-    // Reconnect is not a second identity decision. Removed connections retain
-    // their row precisely so the next credential can be attached to the same
-    // identity and history. Resolve that retained row before interpreting the
-    // request so a client default cannot silently turn a personal connection
-    // into an organization connection (or vice versa).
+    // Only an exact reconnect preserves an archived connection identity. A
+    // fresh connect may reuse an application, but must not select one of its
+    // archived connections by recency.
     const canResumeInterruptedDraft =
-      Boolean(requestedResumeConnection) ||
-      (!input.applicationId &&
-        Boolean(galleryEntry) &&
-        existingApplication?.status === "draft");
-    const retainedConnectionStatuses = canResumeInterruptedDraft
-      ? (["draft", "archived"] as const)
-      : (["archived"] as const);
+      !requestedResumeConnection &&
+      !input.applicationId &&
+      Boolean(galleryEntry) &&
+      existingApplication?.status === "draft";
     const [recoveredConnection] =
-      !requestedResumeConnection && existingApplication
+      canResumeInterruptedDraft && existingApplication
         ? await db
             .select()
             .from(toolConnections)
@@ -1797,7 +1789,7 @@ export function toolAccessService(
               and(
                 eq(toolConnections.companyId, companyId),
                 eq(toolConnections.applicationId, existingApplication.id),
-                inArray(toolConnections.status, retainedConnectionStatuses),
+                eq(toolConnections.status, "draft"),
               ),
             )
             .orderBy(desc(toolConnections.updatedAt))
@@ -1838,20 +1830,7 @@ export function toolAccessService(
           ? "agent"
           : "organization"
       : null;
-    // An explicit resume/application reconnect continues the retained identity.
-    // A fresh gallery connect may still reuse an archived row for stable history
-    // and company-unique naming, but an explicit Access choice is a new identity
-    // decision and must replace the archived policy. Without this distinction,
-    // removing a dedicated-agent connection and reconnecting the default personal
-    // account leaves `per_agent` behind and the OAuth callback cannot persist its
-    // user grant.
-    const retainsIdentity = Boolean(
-      retainedConnection &&
-      (retainedConnection.status === "draft" ||
-        requestedResumeConnection ||
-        input.applicationId),
-    );
-    const retainedGrantKind = retainsIdentity ? previousGrantKind : null;
+    const retainedGrantKind = previousGrantKind;
     // The route can authorize an explicit resume before entering the service,
     // but name/source recovery happens here. Do not let a caller submit a
     // personal grant choice to pass the route and then inherit an implicitly
@@ -1911,6 +1890,9 @@ export function toolAccessService(
         );
       }
     }
+    if (previousGrantKind && input.grantKind && previousGrantKind !== input.grantKind) {
+      throw badRequest("This connection keeps its existing access choice. Start a new connection to choose different access.");
+    }
     const requestedGrantKind =
       retainedGrantKind ?? input.grantKind ?? (method?.grantKinds?.length === 1 ? method.grantKinds[0]! : "organization");
     if (method?.grantKinds && !method.grantKinds.includes(requestedGrantKind)) {
@@ -1920,6 +1902,9 @@ export function toolAccessService(
     }
     const dedicatedAgentId =
       requestedGrantKind === "agent" ? (input.subjectAgentId ?? null) : null;
+    if (requestedGrantKind === "agent" && !dedicatedAgentId) {
+      throw badRequest("Choose the dedicated agent for this connection before authorization");
+    }
     if (dedicatedAgentId) {
       const [subjectAgent] = await db
         .select({ id: agents.id })
@@ -1932,6 +1917,24 @@ export function toolAccessService(
         throw badRequest(
           "Dedicated GitHub identity requires an agent in this company",
         );
+      if (input.reconnectConnectionId && retainedConnection && retainedConnection.status !== "draft") {
+        const retainedGrants = await db
+          .select({ subjectAgentId: connectionGrants.subjectAgentId })
+          .from(connectionGrants)
+          .where(and(
+            eq(connectionGrants.companyId, companyId),
+            eq(connectionGrants.connectionId, retainedConnection.id),
+            eq(connectionGrants.kind, "agent"),
+          ));
+        const grantSubjects = [...new Set(retainedGrants.map((grant) => grant.subjectAgentId).filter((id): id is string => Boolean(id)))];
+        const configuredSubject = asRecord(retainedConnection.config).connectorSubjectAgentId;
+        const originalSubject = typeof configuredSubject === "string"
+          ? configuredSubject
+          : grantSubjects.length === 1 ? grantSubjects[0] : null;
+        if (!originalSubject || originalSubject !== dedicatedAgentId || !grantSubjects.includes(originalSubject)) {
+          throw badRequest("Reconnect this connection with its original dedicated agent");
+        }
+      }
     }
     const transport = method?.transport ?? "mcp_remote";
     const credentialSource: ToolConnectionCredentialSource =
@@ -2106,6 +2109,7 @@ export function toolAccessService(
             : {}),
         }
       : { ...baseConfig, quarantineNewEntries: false, unverifiedServer: true };
+    if (dedicatedAgentId) config.connectorSubjectAgentId = dedicatedAgentId;
     if (method && isPaperclipCloudConnectorStrategy(method.oauthStrategy)) {
       const connectorProfile = method.connectorProfile;
       const profile = managedConnectorProfile(connectorProfile);
@@ -2450,9 +2454,8 @@ export function toolAccessService(
         ...credentialRefs,
         ...credentialSecretRefs,
       ]);
-      // Reconnecting an app revives its most recent archived connection instead
-      // of inserting a fresh row: keeps the connection id (and its activity
-      // history) stable and avoids the unique (company, name) constraint.
+      // A named reconnect or draft resume updates its exact connection. Fresh
+      // setup inserts a new row and uses the allocated name above.
       // A personal credential never becomes the connection's shared secret: the
       // row carries the header shape only, and the secret refs go to the user
       // grant below. `ensureDefaultOrganizationGrant` copies this list, so

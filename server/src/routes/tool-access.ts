@@ -921,8 +921,8 @@ function connectorEnrollmentPrincipal(req: Request): string {
           // caller's personal grant instead of an organization grant
           // (PAP-17835). The service refuses any subject other than the actor,
           // so this cannot start consent on someone else's behalf.
-          const personalSubjectUserId = req.body.grantKind === "user" ? req.actor.userId ?? null : null;
-          const dedicatedSubjectAgentId = req.body.grantKind === "agent" ? req.body.subjectAgentId ?? null : null;
+          const personalSubjectUserId = result.connection.credentialPolicy === "per_user" ? req.actor.userId ?? null : null;
+          const dedicatedSubjectAgentId = result.connection.credentialPolicy === "per_agent" ? req.body.subjectAgentId ?? null : null;
           const start = await svc.startOAuth(companyId, result.connectionId, {
             workspaceServices: req.body.workspaceServices,
             redirectUri: oauthRedirectUri(req),
