@@ -78,6 +78,13 @@ Automated: [app detail tests](../../ui/src/pages/apps/AppDetail.test.tsx) cover 
 
 Manual: Run a read-only action with explicit inputs and inspect returned data and activity. Refresh discovery and review new actions. Revoke or disconnect only the disposable credential, then verify subsequent use fails with an actionable reconnect state.
 
+For a dedicated-agent connection, refresh actions as a connection manager with
+one active agent authorization. Verify the request uses that grant, including
+after an OAuth 401 retry. With no active grant or several active grants, verify
+that refresh stops before provider I/O and leaves the saved catalog intact. A
+creator without manager permission can read saved actions but cannot refresh
+using an agent credential; an empty cache must show an error.
+
 For Daytona, opening an older saved catalog discovers the current native
 contract. Removed diagnostic actions disappear from Permissions and agent
 discovery; new or changed actions require review. Existing Off/Allowed choices

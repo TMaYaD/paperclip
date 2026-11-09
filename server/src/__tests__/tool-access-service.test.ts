@@ -961,6 +961,184 @@ describeEmbeddedPostgres("tool access service", () => {
     await tempDb?.cleanup();
   });
 
+  it("refreshes a dedicated agent catalog with its stored grant credential", async () => {
+    const company = await createCompany(db);
+    const agent = await createAgent(db, company.id);
+    const service = createTestToolAccessService(db);
+    const fixture = await createRemoteToolFixture(db, company.id);
+    const access = await secretService(db).create(company.id, {
+      name: `Dedicated catalog token ${randomUUID()}`,
+      key: `dedicated_catalog_${randomUUID()}`,
+      provider: "local_encrypted",
+      value: "agent-catalog-token",
+    });
+    await db.delete(connectionGrants).where(eq(connectionGrants.connectionId, fixture.connection.id));
+    await db.update(toolConnections).set({
+      credentialPolicy: "per_agent",
+      credentialSource: "paperclip_vault",
+      authKind: "oauth",
+      credentialRefs: [],
+    }).where(eq(toolConnections.id, fixture.connection.id));
+    await db.insert(connectionGrants).values({
+      companyId: company.id,
+      connectionId: fixture.connection.id,
+      kind: "agent",
+      subjectAgentId: agent.id,
+      status: "active",
+      credentialSecretRefs: [{ secretId: access.id, versionSelector: "latest", configPath: "oauth.access_token", required: true, label: "OAuth access token" }],
+    });
+    const requests: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+      requests.push(new Headers(init?.headers).get("authorization") ?? "");
+      return mcpHttpResponse(catalogResponse([{ name: "agent_read", annotations: { readOnlyHint: true } }]));
+    });
+
+    const result = await service.refreshCatalog(fixture.connection.id, { actorType: "user", actorId: "manager" });
+    expect(requests).toEqual(["Bearer agent-catalog-token"]);
+    expect(result.discoveredCount).toBe(1);
+    expect((await service.listCatalog(fixture.connection.id)).map((entry) => entry.toolName)).toContain("agent_read");
+    const manager = `manager-${randomUUID()}`;
+    await grantBoardUser(db, company.id, manager, ["tools:manage_connections"]);
+    const refresh = await request(createRouteApp(db, boardSessionActor(company.id, "operator", manager)))
+      .post(`/api/tool-connections/${fixture.connection.id}/catalog/refresh`);
+    expect(refresh.status).toBe(200);
+    const grants = await request(createRouteApp(db, boardSessionActor(company.id, "operator", manager)))
+      .get(`/api/tool-connections/${fixture.connection.id}/grants`);
+    expect(grants.body.capabilities).toMatchObject({ canRefreshActions: true });
+    expect(requests).toEqual(["Bearer agent-catalog-token", "Bearer agent-catalog-token"]);
+    await db.update(toolConnections).set({ lastCatalogRefreshAt: null })
+      .where(eq(toolConnections.id, fixture.connection.id));
+    await service.listCatalog(fixture.connection.id, company.id, { actorType: "system", actorId: "cache" });
+    expect(requests).toEqual(Array(3).fill("Bearer agent-catalog-token"));
+  });
+
+  it("denies a creator's dedicated catalog refresh and reads the saved catalog without discovery", async () => {
+    const company = await createCompany(db);
+    const creator = `creator-${randomUUID()}`;
+    await grantBoardUser(db, company.id, creator, []);
+    const fixture = await createRemoteToolFixture(db, company.id);
+    await db.update(toolConnections).set({
+      credentialPolicy: "per_agent",
+      createdByUserId: creator,
+      lastCatalogRefreshAt: null,
+    }).where(eq(toolConnections.id, fixture.connection.id));
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    const app = createRouteApp(db, boardSessionActor(company.id, "operator", creator));
+
+    const refresh = await request(app).post(`/api/tool-connections/${fixture.connection.id}/catalog/refresh`);
+    expect(refresh.status).toBe(403);
+    const viewer = await request(createRouteApp(db, boardSessionActor(company.id, "viewer")))
+      .post(`/api/tool-connections/${fixture.connection.id}/catalog/refresh`);
+    expect(viewer.status).toBe(403);
+    const agent = await request(createRouteApp(db, agentJwtActor(company.id, randomUUID(), randomUUID())))
+      .post(`/api/tool-connections/${fixture.connection.id}/catalog/refresh`);
+    expect(agent.status).toBe(403);
+    const otherCompany = await createCompany(db);
+    const crossCompany = await request(createRouteApp(db, boardSessionActor(otherCompany.id, "owner")))
+      .post(`/api/tool-connections/${fixture.connection.id}/catalog/refresh`);
+    expect(crossCompany.status).toBe(404);
+    const saved = await request(app).get(`/api/tool-connections/${fixture.connection.id}/catalog`);
+    expect(saved.status).toBe(200);
+    expect(saved.body.catalog).toEqual([expect.objectContaining({ toolName: "send_email" })]);
+    expect(fetchMock).not.toHaveBeenCalled();
+    const grants = await request(app).get(`/api/tool-connections/${fixture.connection.id}/grants`);
+    expect(grants.body.capabilities).toMatchObject({ canConfigure: true, canRefreshActions: false });
+    await db.delete(toolCatalogEntries).where(eq(toolCatalogEntries.connectionId, fixture.connection.id));
+    const empty = await request(app).get(`/api/tool-connections/${fixture.connection.id}/catalog`);
+    expect(empty.status).toBe(403);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each(["missing", "revoked", "ambiguous"])("rejects %s dedicated catalog grants before provider I/O", async (caseName) => {
+    const company = await createCompany(db);
+    const fixture = await createRemoteToolFixture(db, company.id);
+    await db.delete(connectionGrants).where(eq(connectionGrants.connectionId, fixture.connection.id));
+    await db.update(toolConnections).set({ credentialPolicy: "per_agent", authKind: "oauth" })
+      .where(eq(toolConnections.id, fixture.connection.id));
+    if (caseName !== "missing") {
+      const first = await createAgent(db, company.id);
+      await db.insert(connectionGrants).values({
+        companyId: company.id, connectionId: fixture.connection.id, kind: "agent",
+        subjectAgentId: first.id, status: caseName === "revoked" ? "revoked" : "active",
+      });
+    }
+    if (caseName === "ambiguous") {
+      const second = await createAgent(db, company.id);
+      await db.insert(connectionGrants).values({
+        companyId: company.id, connectionId: fixture.connection.id, kind: "agent",
+        subjectAgentId: second.id, status: "active",
+      });
+    }
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    await expect(createTestToolAccessService(db).refreshCatalog(fixture.connection.id)).rejects.toMatchObject({
+      status: 422,
+      details: { code: caseName === "ambiguous" ? "agent_catalog_grant_ambiguous" : "agent_catalog_authorization_required" },
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+    const [connection] = await db.select().from(toolConnections).where(eq(toolConnections.id, fixture.connection.id));
+    expect(connection.healthStatus).toBe("ok");
+    expect(connection.status).toBe("active");
+    expect(await db.select().from(toolCatalogEntries).where(eq(toolCatalogEntries.connectionId, fixture.connection.id))).toHaveLength(1);
+    const audits = await db.select().from(toolAccessAuditEvents).where(and(
+      eq(toolAccessAuditEvents.connectionId, fixture.connection.id),
+      eq(toolAccessAuditEvents.action, "tool_connection.catalog_refresh"),
+    ));
+    expect(audits).toContainEqual(expect.objectContaining({
+      outcome: "failure",
+      reasonCode: caseName === "ambiguous" ? "agent_catalog_grant_ambiguous" : "agent_catalog_authorization_required",
+    }));
+  });
+
+  it("retries a dedicated agent catalog 401 with the same stored grant", async () => {
+    const company = await createCompany(db);
+    const agent = await createAgent(db, company.id);
+    const fixture = await createRemoteToolFixture(db, company.id);
+    const access = await secretService(db).create(company.id, {
+      name: `Catalog access ${randomUUID()}`, key: `catalog_access_${randomUUID()}`,
+      provider: "local_encrypted", value: "old-agent-token",
+    });
+    const refresh = await secretService(db).create(company.id, {
+      name: `Catalog refresh ${randomUUID()}`, key: `catalog_refresh_${randomUUID()}`,
+      provider: "local_encrypted", value: "agent-refresh-token",
+    });
+    await db.delete(connectionGrants).where(eq(connectionGrants.connectionId, fixture.connection.id));
+    await db.update(toolConnections).set({
+      credentialPolicy: "per_agent", credentialSource: "paperclip_vault", authKind: "oauth",
+      credentialRefs: [],
+      config: { ...fixture.connection.config, oauth: {
+        provider: "example", tokenUrl: "https://auth.example.test/token", clientId: "catalog-client",
+      } },
+    }).where(eq(toolConnections.id, fixture.connection.id));
+    const [grant] = await db.insert(connectionGrants).values({
+      companyId: company.id, connectionId: fixture.connection.id, kind: "agent",
+      subjectAgentId: agent.id, status: "active",
+      providerTenant: { oauth: { accessTokenExpiresAt: new Date(Date.now() + 7_200_000).toISOString() } },
+      credentialSecretRefs: [
+        { secretId: access.id, versionSelector: "latest", configPath: "oauth.access_token", required: true, label: "OAuth access token" },
+        { secretId: refresh.id, versionSelector: "latest", configPath: "oauth.refresh_token", required: false, label: "OAuth refresh token" },
+      ],
+    }).returning();
+    const mcpHeaders: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+      if (String(url) === "https://auth.example.test/token") {
+        expect(String(init?.body)).toContain("agent-refresh-token");
+        return new Response(JSON.stringify({ access_token: "rotated-agent-token", refresh_token: "new-refresh-token", expires_in: 3600, token_type: "Bearer" }), {
+          status: 200, headers: { "content-type": "application/json" },
+        });
+      }
+      mcpHeaders.push(new Headers(init?.headers).get("authorization") ?? "");
+      return mcpHeaders.length === 1
+        ? new Response("", { status: 401 })
+        : mcpHttpResponse(catalogResponse([{ name: "rotated_read", annotations: { readOnlyHint: true } }]));
+    });
+
+    const result = await createTestToolAccessService(db).refreshCatalog(fixture.connection.id);
+    expect(mcpHeaders).toEqual(["Bearer old-agent-token", "Bearer rotated-agent-token"]);
+    expect(result.discoveredCount).toBe(1);
+    const [retained] = await db.select().from(connectionGrants).where(eq(connectionGrants.id, grant!.id));
+    expect(retained).toMatchObject({ id: grant!.id, status: "active" });
+  });
+
   async function waitForBlockedMembershipUpdate() {
     for (let attempt = 0; attempt < 80; attempt += 1) {
       const [waiting] = await db.execute<{ waiting: boolean }>(sql`

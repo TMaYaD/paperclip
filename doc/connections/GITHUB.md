@@ -96,6 +96,13 @@ unavailable; an unusable dedicated tier does not select a personal grant.
 Agent grants are company-scoped, have exactly one `subjectAgentId`, cannot be
 organization defaults, and are installed only for that agent.
 
+For a dedicated-agent connection, **Refresh actions** uses its one active agent
+authorization. A connection manager can run it without signing in again. An
+automatic catalog refresh can use the same grant. If no agent authorization is
+active, reconnect one. If several are active, keep one active authorization and
+retry. Refresh stops before contacting GitHub in either case. Other company
+members can read the saved action catalog without using the agent credential.
+
 The connection installation is the credential owner's consent boundary. A
 personal setup may target every agent or a selected set, and runtime resolution
 considers only an enabled, active connection installed for the current agent.

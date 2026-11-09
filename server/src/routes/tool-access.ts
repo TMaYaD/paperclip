@@ -650,7 +650,7 @@ function connectorEnrollmentPrincipal(req: Request): string {
    */
   async function describeConnectionCapabilities(
     req: Request,
-    connection: { id: string; companyId: string; createdByUserId?: string | null },
+    connection: { id: string; companyId: string; credentialPolicy: string; createdByUserId?: string | null },
   ) {
     const membership = toolMembershipRole(req, connection.companyId);
     const isManager = await isToolConnectionManagerQuiet(req, connection.companyId);
@@ -674,6 +674,7 @@ function connectorEnrollmentPrincipal(req: Request): string {
     }
     return {
       canConfigure,
+      canRefreshActions: canConfigure && (connection.credentialPolicy !== "per_agent" || isManager),
       canCreateOrganizationGrant: canConfigure,
       canSetCompanyInstall: canConfigure,
       // Personal consent belongs to the person: it needs a named board user, and
@@ -2265,6 +2266,9 @@ function connectorEnrollmentPrincipal(req: Request): string {
     const existing = await getAccessibleResource(req, res, svc.getConnection(req.params.connectionId as string), "Tool connection not found");
     if (!existing) return;
     await assertToolConnectionConfigureAccess(req, existing);
+    if (existing.credentialPolicy === "per_agent" && !(await isToolConnectionManager(req, existing.companyId))) {
+      throw forbidden("Only a connection manager can refresh actions with an agent authorization");
+    }
     const result = await svc.refreshCatalog(existing.id, getActorInfo(req));
     await logActivity(db, {
       companyId: existing.companyId,
@@ -2285,7 +2289,9 @@ function connectorEnrollmentPrincipal(req: Request): string {
     assertBoard(req);
     const existing = await getAccessibleResource(req, res, svc.getConnection(req.params.connectionId as string), "Tool connection not found");
     if (!existing) return;
-    res.json({ catalog: await svc.listCatalog(existing.id, existing.companyId, getActorInfo(req)) });
+    const allowAgentCredentialRefresh = existing.credentialPolicy !== "per_agent"
+      || await isToolConnectionManagerQuiet(req, existing.companyId);
+    res.json({ catalog: await svc.listCatalog(existing.id, existing.companyId, getActorInfo(req), allowAgentCredentialRefresh) });
   });
 
   router.get("/tool-connections/:connectionId/activity", async (req, res) => {

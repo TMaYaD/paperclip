@@ -40,11 +40,12 @@ type PublicationDependencies = {
   assertConnectorConnectionSetupEnabled: ConnectionSetupPolicy["assertConnectorConnectionSetupEnabled"];
   updateConnectionHealth: ConnectionHealth["updateConnectionHealth"];
   vaultGrantForConnection: ConnectionCredentialAccess["vaultGrantForConnection"];
+  agentCatalogGrantForConnection: ConnectionCredentialAccess["agentCatalogGrantForConnection"];
   ensureRuntimeSlot: ReturnType<typeof createToolRuntimeSlots>["ensureRuntimeSlot"];
   enableCatalogEntriesByDefault: CatalogDefaultAccess["enableCatalogEntriesByDefault"];
 };
 
-export function createToolCatalogPublication(db: Db, { now, audit, getConnectionRow, discoverTools, assertConnectorConnectionSetupEnabled, updateConnectionHealth, vaultGrantForConnection, ensureRuntimeSlot, enableCatalogEntriesByDefault }: PublicationDependencies) {
+export function createToolCatalogPublication(db: Db, { now, audit, getConnectionRow, discoverTools, assertConnectorConnectionSetupEnabled, updateConnectionHealth, vaultGrantForConnection, agentCatalogGrantForConnection, ensureRuntimeSlot, enableCatalogEntriesByDefault }: PublicationDependencies) {
   async function refreshCatalog(
     connectionId: string,
     actor?: ActorInfo,
@@ -60,6 +61,24 @@ export function createToolCatalogPublication(db: Db, { now, audit, getConnection
     const connection = await getConnectionRow(connectionId);
     if (connection.connectionPurpose === "ai") throw unprocessable("AI connections do not have a tool catalog");
     await assertConnectorConnectionSetupEnabled(connection);
+    let catalogGrantId: string | undefined;
+    if (connection.credentialPolicy === "per_agent" && !refreshOptions.credentialHeaders) {
+      try {
+        catalogGrantId = (await agentCatalogGrantForConnection(connection)).id;
+      } catch (error) {
+        await audit({
+          companyId: connection.companyId,
+          connectionId: connection.id,
+          action: "tool_connection.catalog_refresh",
+          outcome: "failure",
+          reasonCode: error instanceof HttpError
+            ? String(asRecord(error.details).code ?? "agent_catalog_grant_selection_failed")
+            : "agent_catalog_grant_selection_failed",
+          actor,
+        });
+        throw error;
+      }
+    }
     const refreshedAt = now();
     const unavailableServices: string[] = [];
     let descriptors: McpToolDescriptor[];
@@ -69,6 +88,7 @@ export function createToolCatalogPublication(db: Db, { now, audit, getConnection
         refreshOptions.credentialHeaders,
         actor,
         unavailableServices,
+        catalogGrantId,
       );
     } catch (error) {
       if (
