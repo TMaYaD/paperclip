@@ -9334,6 +9334,62 @@ export function issueService(db: Db) {
         }));
     },
 
+    listReadyUnassignedChildDependents: async (blockerIssueId: string) => {
+      const blocker = await db.select({ companyId: issues.companyId, status: issues.status })
+        .from(issues).where(eq(issues.id, blockerIssueId)).then((rows) => rows[0] ?? null);
+      if (!blocker || blocker.status !== "done") return [];
+
+      const children = await db.select({
+        id: issues.id,
+        parentIssueId: issues.parentId,
+        blockedTransitionAt: issues.blockedTransitionAt,
+      }).from(issueRelations)
+        .innerJoin(issues, eq(issueRelations.relatedIssueId, issues.id))
+        .where(and(
+          eq(issueRelations.companyId, blocker.companyId),
+          eq(issueRelations.type, "blocks"),
+          eq(issueRelations.issueId, blockerIssueId),
+          eq(issues.companyId, blocker.companyId),
+          inArray(issues.status, ["backlog", "todo"]),
+          isNull(issues.assigneeAgentId),
+          isNull(issues.assigneeUserId),
+          isNotNull(issues.parentId),
+          visibleIssueCondition(),
+        ));
+      if (children.length === 0) return [];
+
+      const parentIds = [...new Set(children.flatMap((child) => child.parentIssueId ? [child.parentIssueId] : []))];
+      const parents = await db.select({ id: issues.id, assigneeAgentId: issues.assigneeAgentId })
+        .from(issues).where(and(
+          eq(issues.companyId, blocker.companyId),
+          inArray(issues.id, parentIds),
+          isNotNull(issues.assigneeAgentId),
+          isNull(issues.conversationAgentId),
+          inArray(issues.status, ["todo", "in_progress", "blocked"]),
+          visibleIssueCondition(),
+        ));
+      const parentReadinessMap = await listIssueDependencyReadinessMap(db, blocker.companyId, parents.map((parent) => parent.id));
+      const parentsById = new Map(parents
+        .filter((parent) => parentReadinessMap.get(parent.id)?.isDependencyReady)
+        .map((parent) => [parent.id, parent]));
+      const candidates = children.filter((child) => child.parentIssueId && parentsById.has(child.parentIssueId));
+      if (candidates.length === 0) return [];
+      const readinessMap = await listIssueDependencyReadinessMap(db, blocker.companyId, candidates.map((child) => child.id));
+
+      return candidates.flatMap((child) => {
+        const parent = parentsById.get(child.parentIssueId!);
+        const readiness = readinessMap.get(child.id);
+        if (!parent?.assigneeAgentId || !readiness?.isDependencyReady || readiness.blockerIssueIds.length === 0) return [];
+        return [{
+          id: child.id,
+          parentIssueId: child.parentIssueId!,
+          parentAssigneeAgentId: parent.assigneeAgentId,
+          blockerIssueIds: readiness.blockerIssueIds,
+          blockedTransitionAt: child.blockedTransitionAt,
+        }];
+      });
+    },
+
     getWakeableParentAfterChildCompletion: async (
       parentIssueId: string,
       completedChildResult?: { issueId: string; summary: string | null } | null,

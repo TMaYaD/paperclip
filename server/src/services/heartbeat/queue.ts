@@ -132,7 +132,7 @@ import {
   isThrottleCandidateIssueRewake,
 } from "../issue-rewake-throttle.js";
 import { logActivity } from "../activity-log.js";
-import { ISSUE_BLOCKERS_RESOLVED_WAKE_REASON, findExistingCancelledDependencyHandoffWake } from "../issue-dependency-wakeups.js";
+import { ISSUE_BLOCKERS_RESOLVED_WAKE_REASON, ISSUE_CHILD_READY_FOR_ASSIGNMENT_WAKE_REASON, findExistingCancelledDependencyHandoffWake } from "../issue-dependency-wakeups.js";
 import {
   ISSUE_TREE_CONTROL_INTERACTION_WAKE_REASONS,
   isVerifiedIssueTreeControlInteractionWake,
@@ -252,6 +252,7 @@ const RUNNING_ISSUE_WAKE_REASONS_REQUIRING_FOLLOWUP = new Set([
   CHAT_COMPLETION_WAKE_REASON,
   "approval_approved",
   ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
+  ISSUE_CHILD_READY_FOR_ASSIGNMENT_WAKE_REASON,
   "issue_recovery_action_restored",
 ]);
 
@@ -4956,8 +4957,11 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
         readNonEmptyString(payload.taskId) ??
         readNonEmptyString(wakeContext.issueId) ??
         null;
+      const readyChildIssueId = candidate.reason === ISSUE_CHILD_READY_FOR_ASSIGNMENT_WAKE_REASON
+        ? readNonEmptyString(payload.readyChildIssueId) ?? readNonEmptyString(wakeContext.readyChildIssueId)
+        : null;
       const scopeKey = issueId
-        ? `${candidate.companyId}:${candidate.agentId}:${issueId}:${readNativeReviewAssignmentContext(wakeContext)?.nativeReviewInteractionId ?? ""}`
+        ? `${candidate.companyId}:${candidate.agentId}:${issueId}:${readNativeReviewAssignmentContext(wakeContext)?.nativeReviewInteractionId ?? ""}${readyChildIssueId ? `:ready-child:${readyChildIssueId}` : ""}`
         : null;
       const priorDelivery = scopeKey
         ? deliveredByIssueScope.get(scopeKey)

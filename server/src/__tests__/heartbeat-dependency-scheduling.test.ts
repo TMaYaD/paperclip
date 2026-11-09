@@ -439,6 +439,35 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
     expect(dispatchedRequests[0]).toMatchObject({ runId: dispatchedRun!.id });
   });
 
+  it("preserves separate native child-ready intents for siblings under one parent", async () => {
+    const companyId = randomUUID(), agentId = randomUUID(), parentId = randomUUID();
+    const childIds = [randomUUID(), randomUUID()];
+    await db.insert(companies).values({ id: companyId, name: "Child routing", issuePrefix: "CR", defaultResponsibleUserId: "responsible-user" });
+    await db.insert(companyMemberships).values({ companyId, principalType: "user", principalId: "responsible-user", status: "active", membershipRole: "member" });
+    await db.insert(agents).values({ id: agentId, companyId, name: "Coordinator", role: "engineer", status: "active",
+      adapterType: "codex_local", adapterConfig: {}, permissions: {}, runtimeConfig: { heartbeat: { wakeOnDemand: true, maxConcurrentRuns: 1 } } });
+    await db.insert(issues).values({ id: parentId, companyId, title: "Route ready children", status: "blocked",
+      assigneeAgentId: agentId, responsibleUserId: "responsible-user" });
+    const intents = await db.insert(agentWakeupRequests).values(childIds.map((readyChildIssueId) => ({
+      companyId, agentId, source: "automation" as const, triggerDetail: "system" as const,
+      reason: "issue_child_ready_for_assignment", requestedByActorType: "system" as const,
+      requestedByActorId: "native-status-committer", idempotencyKey: `child-ready:${readyChildIssueId}`,
+      payload: { issueId: parentId, taskId: parentId, readyChildIssueId,
+        _paperclipWakeContext: { issueId: parentId, taskId: parentId, readyChildIssueId } },
+    }))).returning({ id: agentWakeupRequests.id });
+
+    const result = await heartbeat.dispatchPendingNativeStatusWakeups({ companyId });
+    expect(result.scanned).toBe(2);
+    const dispatches = await db.select().from(agentWakeupRequests).where(
+      sql`${agentWakeupRequests.requestedByActorId} like 'native-status-wake-dispatch:%'`,
+    );
+    expect(dispatches).toHaveLength(2);
+    expect(dispatches.map((row) => row.payload?.readyChildIssueId).sort()).toEqual([...childIds].sort());
+    expect(dispatches.map((row) => row.requestedByActorId).sort()).toEqual(
+      intents.map((intent) => `native-status-wake-dispatch:${intent.id}`).sort(),
+    );
+  });
+
   it.each(["onboarding", "ordinary", "cancelled"])("dispatches only a verified completed onboarding report: %s", async kind => {
     const companyId = randomUUID(), agentId = randomUUID(), issueId = randomUUID(), childId = randomUUID();
     await db.insert(companies).values({ id: companyId, name: "Completion", issuePrefix: `R${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}` });

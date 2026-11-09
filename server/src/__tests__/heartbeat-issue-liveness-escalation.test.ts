@@ -77,6 +77,7 @@ import { runningProcesses } from "../adapters/index.ts";
 import {
   buildIssueBlockersResolvedWakeStateKey,
   buildIssueBlockersResolvedWakeStateKeyWithoutCycle,
+  buildIssueChildReadyForAssignmentWakeStateKey,
   buildCancelledDependencyHandoffWake,
   findExistingCancelledDependencyHandoffWake,
 } from "../services/issue-dependency-wakeups.ts";
@@ -837,6 +838,41 @@ describeEmbeddedPostgres("heartbeat resolved dependency wake reconciliation", ()
       .where(and(eq(activityLog.companyId, companyId), eq(activityLog.action, "issue.blockers_resolved_wake_emitted")));
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({ entityId: blockedIssueId });
+  });
+
+  it("heals an unassigned child made ready by a completed blocker and deduplicates later sweeps", async () => {
+    const { companyId, agentId, blockedIssueId: childIssueId, blockerIssueId } =
+      await seedResolvedDependencyBackstopFixture({ workspaceState: "none", assignee: null });
+    const parentIssueId = randomUUID();
+    await db.insert(issues).values({ id: parentIssueId, companyId, title: "Parent owner", status: "in_progress", assigneeAgentId: agentId });
+    await db.update(issues).set({ status: "todo", parentId: parentIssueId }).where(eq(issues.id, childIssueId));
+    const key = buildIssueChildReadyForAssignmentWakeStateKey({ parentIssueId, childIssueId, blockerIssueIds: [blockerIssueId] });
+
+    const service = heartbeatService(db);
+    await service.reconcileResolvedDependencyWakes();
+    const wakes = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.idempotencyKey, key));
+    expect(wakes).toHaveLength(1);
+    expect(wakes[0]).toMatchObject({ agentId, reason: "issue_child_ready_for_assignment" });
+    await service.reconcileResolvedDependencyWakes();
+    expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.idempotencyKey, key))).toHaveLength(1);
+  });
+
+  it("waits for workspace finalize before waking a parent about its unassigned child", async () => {
+    const { companyId, agentId, blockedIssueId: childIssueId, blockerIssueId, executionWorkspaceId } =
+      await seedResolvedDependencyBackstopFixture({ workspaceState: "not_finalized", assignee: null });
+    const parentIssueId = randomUUID();
+    await db.insert(issues).values({ id: parentIssueId, companyId, title: "Parent owner", status: "in_progress", assigneeAgentId: agentId });
+    await db.update(issues).set({ status: "todo", parentId: parentIssueId }).where(eq(issues.id, childIssueId));
+    const key = buildIssueChildReadyForAssignmentWakeStateKey({ parentIssueId, childIssueId, blockerIssueIds: [blockerIssueId] });
+    const service = heartbeatService(db);
+
+    await service.reconcileResolvedDependencyWakes();
+    expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.idempotencyKey, key))).toHaveLength(0);
+
+    await db.insert(workspaceOperations).values({ companyId, executionWorkspaceId, issueId: blockerIssueId,
+      phase: "workspace_finalize", status: "succeeded", startedAt: new Date(Date.now() + 60_000), finishedAt: new Date() });
+    await service.reconcileResolvedDependencyWakes({ companyId });
+    expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.idempotencyKey, key))).toHaveLength(1);
   });
 
   it("reconciles a resolved blocked dependency after the assignee-null window closes", async () => {

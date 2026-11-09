@@ -17,7 +17,9 @@ vi.setConfig({ testTimeout: 180000 });
 
 const mockWakeup = vi.hoisted(() => vi.fn(async () => undefined));
 const mockFindExistingIssueBlockersResolvedWakeForReadyState = vi.hoisted(() => vi.fn(async () => null));
+const mockFindExistingIssueChildReadyForAssignmentWakeForReadyState = vi.hoisted(() => vi.fn(async () => null));
 const mockFindExistingCancelledDependencyHandoffWake = vi.hoisted(() => vi.fn<() => Promise<{ id: string } | null>>(async () => null));
+const mockListIssueInteractions = vi.hoisted(() => vi.fn(async () => [] as Array<{ status: string; continuationPolicy: string }>));
 const mockIssueService = vi.hoisted(() => ({
   getAncestors: vi.fn(),
   getById: vi.fn(),
@@ -30,6 +32,7 @@ const mockIssueService = vi.hoisted(() => ({
   getDependencyReadiness: vi.fn(),
   getCancelledDependencyHandoff: vi.fn<() => Promise<CancelledDependencyHandoff | null>>(async () => null),
   listWakeableBlockedDependents: vi.fn(),
+  listReadyUnassignedChildDependents: vi.fn(),
   getWakeableParentAfterChildCompletion: vi.fn(),
   findMentionedAgents: vi.fn(async () => []),
 }));
@@ -95,7 +98,7 @@ vi.mock("../services/index.js", () => ({
     listActiveForIssues: vi.fn(async () => new Map()),
   }),
   issueThreadInteractionService: () => ({
-    listForIssue: vi.fn(async () => []),
+    listForIssue: mockListIssueInteractions,
     expirePendingInteractionsForTerminalIssue: vi.fn(async () => []),
     expireRequestConfirmationsSupersededByComment: vi.fn(async () => []),
     expireStaleRequestConfirmationsForIssueDocument: vi.fn(async () => []),
@@ -123,6 +126,8 @@ vi.mock("../services/issue-dependency-wakeups.js", async () => {
     findExistingCancelledDependencyHandoffWake: mockFindExistingCancelledDependencyHandoffWake,
     findExistingIssueBlockersResolvedWakeForReadyState:
       mockFindExistingIssueBlockersResolvedWakeForReadyState,
+    findExistingIssueChildReadyForAssignmentWakeForReadyState:
+      mockFindExistingIssueChildReadyForAssignmentWakeForReadyState,
   };
 });
 
@@ -170,6 +175,7 @@ describe("issue dependency wakeups in issue routes", () => {
     vi.doUnmock("../middleware/index.js");
     vi.clearAllMocks();
     mockFindExistingIssueBlockersResolvedWakeForReadyState.mockResolvedValue(null);
+    mockFindExistingIssueChildReadyForAssignmentWakeForReadyState.mockResolvedValue(null);
     mockFindExistingCancelledDependencyHandoffWake.mockResolvedValue(null);
     mockIssueService.getCancelledDependencyHandoff.mockResolvedValue(null);
     mockIssueService.getAncestors.mockResolvedValue([]);
@@ -191,6 +197,8 @@ describe("issue dependency wakeups in issue routes", () => {
       isDependencyReady: true,
     });
     mockIssueService.listWakeableBlockedDependents.mockResolvedValue([]);
+    mockIssueService.listReadyUnassignedChildDependents.mockResolvedValue([]);
+    mockListIssueInteractions.mockResolvedValue([]);
     mockIssueService.getWakeableParentAfterChildCompletion.mockResolvedValue(null);
   });
 
@@ -322,6 +330,65 @@ describe("issue dependency wakeups in issue routes", () => {
         }),
       );
     });
+  });
+
+  it("wakes a coordinator when its unassigned child becomes ready while a sibling remains open", async () => {
+    mockIssueService.getById.mockResolvedValue(issueRecord({ status: "in_progress" }));
+    mockIssueService.update.mockResolvedValue(issueRecord({ status: "done" }));
+    mockIssueService.listReadyUnassignedChildDependents.mockResolvedValue([
+      {
+        id: "child-1",
+        parentIssueId: "parent-1",
+        parentAssigneeAgentId: "coordinator-1",
+        blockerIssueIds: ["issue-1", "other-blocker"],
+        blockedTransitionAt: null,
+      },
+      {
+        id: "child-2",
+        parentIssueId: "parent-1",
+        parentAssigneeAgentId: "coordinator-1",
+        blockerIssueIds: ["issue-1"],
+        blockedTransitionAt: null,
+      },
+    ]);
+
+    const response = await request(await createApp()).patch("/api/issues/issue-1").send({ status: "done" });
+    expect(response.status).toBe(200);
+    await vi.waitFor(() => expect(mockWakeup).toHaveBeenCalledWith(
+      "coordinator-1",
+      expect.objectContaining({
+        reason: "issue_child_ready_for_assignment",
+        payload: expect.objectContaining({
+          issueId: "parent-1",
+          readyChildIssueId: "child-1",
+          blockerIssueIds: ["issue-1", "other-blocker"],
+        }),
+      }),
+    ));
+    await vi.waitFor(() => expect(mockWakeup).toHaveBeenCalledWith(
+      "coordinator-1",
+      expect.objectContaining({
+        reason: "issue_child_ready_for_assignment",
+        payload: expect.objectContaining({ issueId: "parent-1", readyChildIssueId: "child-2" }),
+      }),
+    ));
+  });
+
+  it("holds a ready-child coordinator wake while the parent has a pending wake interaction", async () => {
+    mockIssueService.getById.mockResolvedValue(issueRecord({ status: "in_progress" }));
+    mockIssueService.update.mockResolvedValue(issueRecord({ status: "done" }));
+    mockIssueService.listReadyUnassignedChildDependents.mockResolvedValue([{
+      id: "child-1", parentIssueId: "parent-1", parentAssigneeAgentId: "coordinator-1",
+      blockerIssueIds: ["issue-1"], blockedTransitionAt: null,
+    }]);
+    mockListIssueInteractions.mockResolvedValue([{ status: "pending", continuationPolicy: "wake_assignee" }]);
+
+    const response = await request(await createApp()).patch("/api/issues/issue-1").send({ status: "done" });
+    expect(response.status).toBe(200);
+    await vi.waitFor(() => expect(mockIssueService.listReadyUnassignedChildDependents).toHaveBeenCalledWith("issue-1"));
+    expect(mockWakeup).not.toHaveBeenCalledWith("coordinator-1", expect.objectContaining({
+      reason: "issue_child_ready_for_assignment",
+    }));
   });
 
   it("wakes an assigned blocked issue when blockers are applied after the blocker is already done", async () => {

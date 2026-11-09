@@ -46,9 +46,10 @@ import {
   resolveExternalChatResponseWaitAuthorizationInTransaction,
 } from "./chat-attachment-reuse.js";
 import { issueService } from "../issues.js";
+import { issueTreeControlService } from "../issue-tree-control.js";
 import { issueThreadInteractionService } from "../issue-thread-interactions.js";
 import { issueRecoveryActionService } from "../issue-recovery-actions.js";
-import { buildIssueBlockersResolvedWakeIdempotencyKey } from "../issue-dependency-wakeups.js";
+import { buildIssueBlockersResolvedWakeIdempotencyKey, buildIssueChildReadyForAssignmentWake, findExistingIssueChildReadyForAssignmentWakeForReadyState } from "../issue-dependency-wakeups.js";
 import {
   persistActivity,
   publishActivity,
@@ -2057,6 +2058,45 @@ export async function commitNativeStatusDecision(input: {
       const dependents = await issueSvc.listWakeableBlockedDependents(
         input.issueId,
       );
+      const readyUnassignedChildren = await issueSvc.listReadyUnassignedChildDependents(input.issueId);
+      const treeControlSvc = issueTreeControlService(tx as unknown as Db);
+      for (const child of readyUnassignedChildren) {
+        if (await treeControlSvc.getActivePauseHoldGate(input.companyId, child.parentIssueId) ||
+            await treeControlSvc.getActivePauseHoldGate(input.companyId, child.id)) continue;
+        const pendingParentInteraction = await tx.select({ id: issueThreadInteractions.id })
+          .from(issueThreadInteractions).where(and(
+            eq(issueThreadInteractions.companyId, input.companyId),
+            eq(issueThreadInteractions.issueId, child.parentIssueId),
+            eq(issueThreadInteractions.status, "pending"),
+            inArray(issueThreadInteractions.continuationPolicy, ["wake_assignee", "wake_assignee_on_accept"]),
+          )).limit(1).then((rows) => rows[0] ?? null);
+        if (pendingParentInteraction) continue;
+        const readyState = { companyId: input.companyId, parentIssueId: child.parentIssueId,
+          childIssueId: child.id, blockerIssueIds: child.blockerIssueIds, blockedTransitionAt: child.blockedTransitionAt };
+        const wake = buildIssueChildReadyForAssignmentWake({
+          ...readyState,
+          parentAssigneeAgentId: child.parentAssigneeAgentId,
+          resolvedBlockerIssueId: input.issueId,
+          source: "native_status_decision",
+        });
+        const existing = await findExistingIssueChildReadyForAssignmentWakeForReadyState(tx as unknown as Db, readyState);
+        const wakeId = existing?.id ?? await enqueueWake({
+          tx: tx as unknown as Db,
+          companyId: input.companyId,
+          issueId: child.parentIssueId,
+          agentId: wake.agentId,
+          reason: wake.reason,
+          idempotencyKey: wake.idempotencyKey,
+          payload: wake.payload,
+          contextSnapshot: wake.contextSnapshot,
+        });
+        materialized.push({
+          effectKind: "child_ready_for_assignment_wake",
+          targetType: "agent_wakeup_request",
+          targetId: wakeId,
+          payload: { childIssueId: child.id, parentIssueId: child.parentIssueId, resolvedBlockerIssueId: input.issueId },
+        });
+      }
       const completedResultSummary = await tx
         .select({ resultJson: nativeRunResults.resultJson })
         .from(nativeRunResults)

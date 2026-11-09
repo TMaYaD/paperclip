@@ -4,6 +4,7 @@ import type { Db } from "@paperclipai/db";
 import { agentWakeupRequests } from "@paperclipai/db";
 
 export const ISSUE_BLOCKERS_RESOLVED_WAKE_REASON = "issue_blockers_resolved";
+export const ISSUE_CHILD_READY_FOR_ASSIGNMENT_WAKE_REASON = "issue_child_ready_for_assignment";
 
 /**
  * Whether moving an issue into `blocked` should immediately wake its assignee
@@ -268,6 +269,82 @@ export async function findExistingIssueBlockersResolvedWakeForReadyState(
     }),
   );
   return covering ?? null;
+}
+
+export type IssueChildReadyForAssignmentWakeStateInput = {
+  parentIssueId: string;
+  childIssueId: string;
+  blockerIssueIds: string[];
+  blockedTransitionAt?: IssueBlockersResolvedWakeCycleInput;
+};
+
+export function buildIssueChildReadyForAssignmentWake(input: IssueChildReadyForAssignmentWakeStateInput & {
+  parentAssigneeAgentId: string;
+  resolvedBlockerIssueId?: string;
+  source?: string;
+  mutation?: string;
+}) {
+  const blockerIssueIds = uniqueSortedBlockerIssueIds(input.blockerIssueIds);
+  return {
+    agentId: input.parentAssigneeAgentId,
+    source: "automation" as const,
+    triggerDetail: "system" as const,
+    reason: ISSUE_CHILD_READY_FOR_ASSIGNMENT_WAKE_REASON,
+    idempotencyKey: buildIssueChildReadyForAssignmentWakeStateKey(input),
+    payload: {
+      issueId: input.parentIssueId,
+      readyChildIssueId: input.childIssueId,
+      blockerIssueIds,
+      ...(input.resolvedBlockerIssueId ? { resolvedBlockerIssueId: input.resolvedBlockerIssueId } : {}),
+      ...(input.mutation ? { mutation: input.mutation } : {}),
+    },
+    contextSnapshot: {
+      issueId: input.parentIssueId,
+      taskId: input.parentIssueId,
+      wakeReason: ISSUE_CHILD_READY_FOR_ASSIGNMENT_WAKE_REASON,
+      readyChildIssueId: input.childIssueId,
+      blockerIssueIds,
+      ...(input.resolvedBlockerIssueId ? { resolvedBlockerIssueId: input.resolvedBlockerIssueId } : {}),
+      ...(input.source ? { source: input.source } : {}),
+    },
+  };
+}
+
+/** A distinct state key for an unassigned child that its parent can now route. */
+export function buildIssueChildReadyForAssignmentWakeStateKey(
+  input: IssueChildReadyForAssignmentWakeStateInput,
+): string {
+  const blockerIssueIds = uniqueSortedBlockerIssueIds(input.blockerIssueIds);
+  const cycle = formatIssueBlockersResolvedWakeCycle(input.blockedTransitionAt);
+  return [
+    ISSUE_CHILD_READY_FOR_ASSIGNMENT_WAKE_REASON,
+    "state",
+    input.parentIssueId,
+    input.childIssueId,
+    String(blockerIssueIds.length),
+    hashBlockerReadyStateDigest(blockerIssueIds, cycle),
+  ].join(":");
+}
+
+/** Any delivered or in-flight wake for this exact child ready state suppresses a repeat. */
+export async function findExistingIssueChildReadyForAssignmentWakeForReadyState(
+  db: Db,
+  input: IssueChildReadyForAssignmentWakeStateInput & { companyId: string },
+) {
+  const idempotencyKey = buildIssueChildReadyForAssignmentWakeStateKey(input);
+  const rows = await db.select({
+    id: agentWakeupRequests.id,
+    status: agentWakeupRequests.status,
+    idempotencyKey: agentWakeupRequests.idempotencyKey,
+  }).from(agentWakeupRequests).where(and(
+    eq(agentWakeupRequests.companyId, input.companyId),
+    eq(agentWakeupRequests.idempotencyKey, idempotencyKey),
+    inArray(agentWakeupRequests.status, [...IDEMPOTENT_DEPENDENCY_WAKE_STATUSES, "coalesced"]),
+  ));
+  return rows.find((row) =>
+    row.idempotencyKey === idempotencyKey &&
+    (IDEMPOTENT_DEPENDENCY_WAKE_STATUS_SET.has(row.status) || row.status === "coalesced"),
+  ) ?? null;
 }
 
 

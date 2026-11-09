@@ -7409,7 +7409,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect((await db.select().from(issues).where(eq(issues.id, issueId)))[0]).toMatchObject({ status: "blocked", assigneeAgentId: agentId });
   });
 
-  it.each([false, "receipt", "launch", "provider", "cleanup"])("converts a continuation parked for review into a dependency wait on its open sub-tasks (dispatch receipt: %s)", async dispatchReceipt => {
+  it.each([false, "receipt", "launch", "provider", "cleanup"])("does not infer a dependency wait from open children when a continuation is parked for review (dispatch receipt: %s)", async dispatchReceipt => {
     const { companyId, agentId, issueId, runId } = await seedStrandedIssueFixture({
       status: "in_progress",
       runStatus: "cancelled",
@@ -7480,70 +7480,35 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       });
       return;
     }
-    expect(result.waitingOnReviewResolved).toBe(1);
+    expect(result.waitingOnReviewResolved).toBe(0);
     expect(result.escalated).toBe(0);
     expect(result.issueIds).toEqual([issueId]);
 
     const umbrella = await selectRecoveryIssueById(issueId);
-    expect(umbrella?.status).toBe("blocked");
+    expect(umbrella?.status).toBe("in_progress");
     // Original assignee is preserved — no reassignment to a recovery owner.
     expect(umbrella?.assigneeAgentId).toBe(agentId);
 
-    // Only the open children become first-class blockers; the done child is excluded.
     const blockers = await sourceBlockerIssueIds(companyId, issueId);
-    expect(blockers.sort()).toEqual(
-      [openChildTodoId, openChildInProgressId].sort(),
-    );
+    expect(blockers).toEqual([]);
 
-    // No stranded-recovery action/issue is opened for a deliberate wait.
-    const recoveryIssues = await selectStrandedRecoveryIssuesForCompany(companyId);
-    expect(recoveryIssues).toHaveLength(0);
+    expect(await selectRecoveryActionForIssue(companyId, issueId)).toMatchObject({
+      kind: "deliberate_wait_without_target",
+      status: "active",
+      ownerAgentId: agentId,
+    });
 
     const comments = await selectRecoveryCommentsForIssue(issueId);
-    expect(comments).toHaveLength(1);
-    expect(comments[0]?.authorType).toBe("system");
-    expect(comments[0]?.body).toContain("This task is waiting on");
-    expect(comments[0]?.body).toContain("continue automatically");
-    expect(comments[0]?.body).toContain(`${issuePrefix}-10`);
-    expect(comments[0]?.body).toContain(`${issuePrefix}-11`);
-    expect(comments[0]?.body).not.toContain(`${issuePrefix}-12`);
-    // Plain language — the raw machine error code never leaks into the thread.
-    expect(comments[0]?.body).not.toContain(
-      "issue_continuation_waiting_on_review",
-    );
-    expect(comments[0]?.presentation).toMatchObject({
-      kind: "system_notice",
-      tone: "warning",
-      title: "Recovery: waiting on dependencies — moved to blocked",
-      density: "compact",
-    });
-    expect(comments[0]?.metadata).toMatchObject({
-      version: 1,
-      sections: [
-        expect.objectContaining({
-          rows: expect.arrayContaining([
-            expect.objectContaining({
-              type: "key_value",
-              label: "Cause",
-              value: "continuation_waiting_on_review",
-            }),
-          ]),
-        }),
-      ],
-    });
+    expect(comments.some((comment) => comment.body.includes("This task is waiting on"))).toBe(false);
 
     const activity = await db
       .select()
       .from(activityLog)
       .where(eq(activityLog.entityId, issueId));
-    expect(
-      activity.some(
-        (event) =>
-          event.action === "issue.updated" &&
-          (event.details as { source?: string } | null)?.source ===
-            "recovery.reconcile_continuation_waiting_on_review",
-      ),
-    ).toBe(true);
+    expect(activity.some((event) =>
+      (event.details as { source?: string } | null)?.source ===
+        "recovery.reconcile_continuation_waiting_on_review",
+    )).toBe(false);
   });
 
   it("converts a continuation parked for review into a dependency wait on its existing blockers", async () => {
@@ -7767,6 +7732,81 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       attemptCount: 1,
       maxAttempts: 5,
     });
+  });
+
+  it("keeps child issues out of disposition-repair dependency IDs unless they explicitly block the source", async () => {
+    const { companyId, issueId } = await seedStrandedIssueFixture({
+      status: "in_progress",
+      runStatus: "cancelled",
+      retryReason: "issue_continuation_needed",
+      runErrorCode: "issue_continuation_waiting_on_review",
+    });
+    const childId = randomUUID();
+    await db.insert(issues).values({
+      id: childId,
+      companyId,
+      parentId: issueId,
+      title: "Open child without a blocker relation",
+      status: "in_progress",
+      priority: "medium",
+    });
+    const source = (await db.select().from(issues).where(eq(issues.id, issueId)))[0]!;
+    const before = await collectDispositionRepairSourceState(db, { issue: source });
+    expect(before.dependencyIssueIds).toEqual([]);
+
+    await db.insert(issueRelations).values({
+      companyId,
+      issueId: childId,
+      relatedIssueId: issueId,
+      type: "blocks",
+    });
+    const after = await collectDispositionRepairSourceState(db, { issue: source });
+    expect(after.dependencyIssueIds).toEqual([childId]);
+  });
+
+  it("keeps an active recovery action when only a healthy child exists across repeated sweeps", async () => {
+    const { companyId, agentId, issueId } = await seedStrandedIssueFixture({
+      status: "blocked",
+      runStatus: "failed",
+    });
+    const childId = randomUUID();
+    await db.insert(issues).values({
+      id: childId,
+      companyId,
+      parentId: issueId,
+      title: "Child with its own durable owner",
+      status: "in_progress",
+      priority: "medium",
+      assigneeUserId: "child-owner",
+    });
+    const [action] = await db.insert(issueRecoveryActions).values({
+      companyId,
+      sourceIssueId: issueId,
+      kind: "deliberate_wait_without_target",
+      status: "active",
+      ownerType: "board",
+      ownerAgentId: null,
+      previousOwnerAgentId: agentId,
+      returnOwnerAgentId: agentId,
+      cause: "deliberate_wait_without_target",
+      fingerprint: `child-only:${issueId}`,
+      evidence: {},
+      nextAction: "Review the source issue",
+      wakePolicy: { type: "board_escalation" },
+      attemptCount: 1,
+    }).returning();
+
+    const heartbeat = heartbeatService(db);
+    await heartbeat.reconcileStrandedAssignedIssues();
+    await heartbeat.reconcileStrandedAssignedIssues();
+
+    const [persisted] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action!.id));
+    expect(persisted).toMatchObject({ status: "active", ownerType: "board" });
+    expect((await selectRecoveryIssueById(issueId))?.status).toBe("blocked");
+    expect(await sourceBlockerIssueIds(companyId, issueId)).toEqual([]);
+    expect((await selectRecoveryCommentsForIssue(issueId)).some((comment) =>
+      comment.body.includes("This task is waiting on"),
+    )).toBe(false);
   });
 
   it("reschedules an expired persisted disposition repair without duplicating the retry", async () => {
