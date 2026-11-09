@@ -93,12 +93,21 @@ Review: `baseline`.
 API: `present` — representative operation IDs:
 
 - `POST /api/tool-profiles/{profileId}/new-tools/review`.
+- `POST /api/tool-connections/{connectionId}/catalog/refresh`.
+- `GET /api/tool-connections/{connectionId}/catalog`.
 
 Agent access: `restricted` — Board catalog-review API; agents can discover authorized
 tools.
 
 Policy: Connection/profile/policy management routes require a board user; tool use
 separately evaluates agent grants and action policies.
+
+For a `per_agent` connection, only a same-company connection manager can start
+catalog discovery with an agent credential. Refresh uses the sole active agent
+grant; zero or several active grants fail before provider I/O. A non-manager
+board member can read the saved catalog but cannot cause a stale-cache refresh.
+An empty cache returns an error. Agent and cross-company callers cannot use the
+board refresh route.
 
 Evidence: `source-only` — [implementation](../../server/src/routes/tool-access.ts#L517)
 at the reviewed commit above.

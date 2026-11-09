@@ -109,10 +109,42 @@ export function createConnectionCredentialAccess(db: Db, { secrets, audit, verce
     return null;
   }
 
+  async function agentCatalogGrantForConnection(connection: typeof toolConnections.$inferSelect) {
+    const grants = await db.select().from(connectionGrants).where(and(
+      eq(connectionGrants.companyId, connection.companyId),
+      eq(connectionGrants.connectionId, connection.id),
+      eq(connectionGrants.kind, "agent"),
+      eq(connectionGrants.status, "active"),
+    )).limit(2);
+    if (grants.length === 0) throw unprocessable("Reconnect an agent authorization before refreshing actions.", {
+      code: "agent_catalog_authorization_required",
+      reconnectUrl: connectionReconnectUrl(connection),
+    });
+    if (grants.length > 1) throw unprocessable("More than one agent authorization is active. Keep one active authorization, then refresh actions.", {
+      code: "agent_catalog_grant_ambiguous",
+    });
+    return grants[0]!;
+  }
+
+  async function selectedAgentCatalogGrant(connection: typeof toolConnections.$inferSelect, grantId: string) {
+    const [grant] = await db.select().from(connectionGrants).where(and(
+      eq(connectionGrants.id, grantId),
+      eq(connectionGrants.companyId, connection.companyId),
+      eq(connectionGrants.connectionId, connection.id),
+      eq(connectionGrants.kind, "agent"),
+      eq(connectionGrants.status, "active"),
+    )).limit(1);
+    if (connection.credentialPolicy !== "per_agent" || !grant) throw unprocessable("Reconnect an agent authorization before refreshing actions.", {
+      code: "agent_catalog_authorization_required",
+      reconnectUrl: connectionReconnectUrl(connection),
+    });
+    return grant;
+  }
+
   async function resolveCredentialHeaders(
     connection: typeof toolConnections.$inferSelect,
     actor?: ActorInfo,
-    options: { forceRefresh?: boolean } = {},
+    options: { forceRefresh?: boolean; catalogGrantId?: string } = {},
   ): Promise<Record<string, string>> {
     if (connection.credentialSource === "vercel_connect") {
       const grant = await vercelGrantForConnection(connection, actor);
@@ -124,7 +156,9 @@ export function createConnectionCredentialAccess(db: Db, { secrets, audit, verce
         connection.authKind === "oauth" ||
         connection.credentialPolicy !== "shared"
       ) {
-        grant = await vaultGrantForConnection(connection, actor);
+        grant = options.catalogGrantId
+          ? await selectedAgentCatalogGrant(connection, options.catalogGrantId)
+          : await vaultGrantForConnection(connection, actor);
       }
       if (connection.authKind === "oauth" && grant) {
         grant = await refreshOAuthGrantCredentials({
@@ -134,6 +168,7 @@ export function createConnectionCredentialAccess(db: Db, { secrets, audit, verce
           forceRefresh: options.forceRefresh,
           actor,
         });
+        if (options.catalogGrantId) grant = await selectedAgentCatalogGrant(connection, options.catalogGrantId);
       } else {
         connection = await maybeRefreshOAuthCredentials(connection, actor);
       }
@@ -256,6 +291,7 @@ export function createConnectionCredentialAccess(db: Db, { secrets, audit, verce
   async function resolvedRemoteEndpoint(
     connection: typeof toolConnections.$inferSelect,
     actor?: ActorInfo,
+    catalogGrantId?: string,
   ): Promise<string> {
     const publicEndpoint = remoteEndpoint(connection.config);
     const ref = connection.credentialRefs.find(
@@ -264,7 +300,9 @@ export function createConnectionCredentialAccess(db: Db, { secrets, audit, verce
     if (!ref) return publicEndpoint;
     let value: string;
     try {
-      const grant = await vaultGrantForConnection(connection, actor);
+      const grant = catalogGrantId
+        ? await selectedAgentCatalogGrant(connection, catalogGrantId)
+        : await vaultGrantForConnection(connection, actor);
       const grantRef = grant ? connectionGrantCredentialRef(grant, ref) : undefined;
       if (grant && !grantRef) throw unprocessable("Your MCP URL credential is missing. Reconnect this connection.", {
         code: "grant_credential_invalid", connectionId: connection.id, grantId: grant.id,
@@ -295,7 +333,7 @@ export function createConnectionCredentialAccess(db: Db, { secrets, audit, verce
       badRequest(message, { code }),
     ).toString();
   }
-  return { vaultGrantForConnection, resolveCredentialHeaders, resolvedRemoteEndpoint };
+  return { vaultGrantForConnection, agentCatalogGrantForConnection, selectedAgentCatalogGrant, resolveCredentialHeaders, resolvedRemoteEndpoint };
 }
 
 export type ConnectionCredentialAccess = ReturnType<typeof createConnectionCredentialAccess>;

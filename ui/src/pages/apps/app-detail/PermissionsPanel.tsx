@@ -90,6 +90,7 @@ export function PermissionsPanel({
         refreshPending={refreshPending}
         focusId={searchParams.get("focus")}
         canConfigure={capabilities?.canConfigure ?? false}
+        canRefreshActions={capabilities?.canRefreshActions ?? false}
         permissionChangeWarning={permissionChangeWarning}
         onSetPermission={onSetActionPermission}
         onReviewQuarantined={onReviewQuarantined}
@@ -209,6 +210,7 @@ export function ActionsSection({
   refreshPending,
   focusId,
   canConfigure,
+  canRefreshActions,
   permissionChangeWarning,
   onSetPermission,
   onReviewQuarantined,
@@ -225,6 +227,7 @@ export function ActionsSection({
   refreshPending: boolean;
   focusId?: string | null;
   canConfigure: boolean;
+  canRefreshActions?: boolean;
   permissionChangeWarning?: string;
   onSetPermission: (ids: string[], next: ActionPermission) => void;
   onReviewQuarantined: (enabledIds: string[]) => void;
@@ -251,7 +254,7 @@ export function ActionsSection({
     <section className="space-y-6 border-t border-border pt-8">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h2 className="text-lg font-semibold text-foreground">Actions</h2>
-        {canConfigure ? (
+        {(canRefreshActions ?? canConfigure) ? (
           <div className="flex items-center gap-2">
             {disabled ? <span className="text-xs text-muted-foreground">Saving…</span> : null}
             <Button

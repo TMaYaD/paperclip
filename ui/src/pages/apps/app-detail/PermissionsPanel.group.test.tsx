@@ -47,6 +47,7 @@ describe("Permissions group control", () => {
               disabled={false}
               refreshPending={false}
               canConfigure
+              canRefreshActions
               onSetPermission={onSetPermission}
               onReviewQuarantined={vi.fn()}
               onRefreshActions={vi.fn()}
@@ -68,5 +69,35 @@ describe("Permissions group control", () => {
     const [ids, next] = onSetPermission.mock.calls[0]!;
     expect([...ids].sort()).toEqual(["delete", "label", "send"]);
     expect(next).toBe("ask");
+  });
+
+  it("hides refresh while retaining creator action controls", () => {
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    flushSync(() => root.render(
+      <QueryClientProvider client={new QueryClient()}>
+        <MemoryRouter>
+          <ActionsSection
+            connectionId="conn-1"
+            appName="GitHub"
+            readOnly={[]}
+            canChange={[entry("write", "write")]}
+            quarantined={[]}
+            enabledIds={new Set()}
+            askFirstIds={new Set()}
+            disabled={false}
+            refreshPending={false}
+            canConfigure
+            canRefreshActions={false}
+            onSetPermission={vi.fn()}
+            onReviewQuarantined={vi.fn()}
+            onRefreshActions={vi.fn()}
+          />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    ));
+    expect(container.textContent).not.toContain("Refresh actions");
+    expect(container.querySelector('select[aria-label="Set every action in Write (1)"]')).toBeTruthy();
   });
 });

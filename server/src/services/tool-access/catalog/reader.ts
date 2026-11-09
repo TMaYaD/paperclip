@@ -6,6 +6,7 @@ import { desc, eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { toolCatalogEntries, toolConnections } from "@paperclipai/db";
 import type { ToolCatalogEntry } from "@paperclipai/shared";
+import { forbidden } from "../../../errors.js";
 
 import type { RefreshConnectionCatalog } from "./contracts.js";
 export function createToolCatalogReader(db: Db, options: { catalogCacheTtlMs?: number }, now: () => Date, getConnectionRow: (idOrUid: string, companyId?: string) => Promise<typeof toolConnections.$inferSelect>, refreshCatalog: RefreshConnectionCatalog, toCatalogEntryForConnection: (row: typeof toolCatalogEntries.$inferSelect, connection: typeof toolConnections.$inferSelect) => ToolCatalogEntry) {
@@ -19,6 +20,7 @@ export function createToolCatalogReader(db: Db, options: { catalogCacheTtlMs?: n
       connectionId: string,
       companyId?: string,
       actor?: ActorInfo,
+      allowAgentCredentialRefresh = true,
     ): Promise<ToolCatalogEntry[]> => {
       const connection = await getConnectionRow(connectionId, companyId);
       let rows = await db
@@ -45,7 +47,10 @@ export function createToolCatalogReader(db: Db, options: { catalogCacheTtlMs?: n
           !connection.lastCatalogRefreshAt ||
           connection.lastCatalogRefreshAt.getTime() <=
             now().getTime() - catalogCacheTtlMs));
-      if (cacheExpired) {
+      if (cacheExpired && connection.credentialPolicy === "per_agent" && !allowAgentCredentialRefresh && rows.length === 0) {
+        throw forbidden("Only a connection manager can refresh actions with an agent authorization");
+      }
+      if (cacheExpired && (connection.credentialPolicy !== "per_agent" || allowAgentCredentialRefresh)) {
         try {
           await singleFlight(catalogRefreshFlights, connection.id, () =>
             refreshCatalog(connection.id, nativeProvider && actor ? actor : {
