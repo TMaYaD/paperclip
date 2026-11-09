@@ -8332,6 +8332,40 @@ describeEmbeddedPostgres("tool access service", () => {
       .resolves.toHaveLength(0);
   });
 
+  it("does not start OAuth for a different agent after a named reconnect", async () => {
+    const company = await createCompany(db);
+    const userId = `github-agent-owner-${randomUUID()}`;
+    await grantBoardUser(db, company.id, userId, [], "owner");
+    const originalAgent = await createAgent(db, company.id);
+    const otherAgent = await createAgent(db, company.id);
+    const connector = fakeGitHubConnector(company.id, `agent:${originalAgent.id}`);
+    const service = createTestToolAccessService(db, { paperclipCloudConnector: connector });
+    const actor = { actorType: "user" as const, actorId: userId };
+    const original = await service.connectGalleryApp(company.id, {
+      galleryKey: "github", connectionMethodKey: "managed", grantKind: "agent",
+      subjectAgentId: originalAgent.id, name: "Agent GitHub subject",
+    }, actor);
+    await db.insert(connectionGrants).values({
+      companyId: company.id, connectionId: original.connectionId,
+      kind: "agent", subjectAgentId: originalAgent.id, status: "active",
+      isDefault: false, credentialSecretRefs: [],
+    });
+    await service.archiveConnection(original.connectionId, company.id, actor);
+    const reconnected = await service.connectGalleryApp(company.id, {
+      galleryKey: "github", connectionMethodKey: "managed", grantKind: "agent",
+      subjectAgentId: originalAgent.id, reconnectConnectionId: original.connectionId,
+    }, actor);
+    expect(reconnected.connectionId).toBe(original.connectionId);
+
+    await expect(service.startOAuth(company.id, reconnected.connectionId, {
+      redirectUri: "https://paperclip.example/api/tools/oauth/cloud-connector/callback",
+      actor, subjectAgentId: otherAgent.id,
+    })).rejects.toMatchObject({ status: 400 });
+    expect(connector.startAuthorization).not.toHaveBeenCalled();
+    await expect(db.select().from(toolOauthStates).where(eq(toolOauthStates.connectionId, original.connectionId)))
+      .resolves.toHaveLength(0);
+  });
+
   it.each(["user", "organization"] as const)("builds one Workspace catalog from actual partial consent for a %s grant", async (grantKind) => {
     const company = await createCompany(db);
     const userId = `workspace-member-${randomUUID()}`;
