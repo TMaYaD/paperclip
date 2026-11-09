@@ -883,6 +883,12 @@ async function startServerWithDatabaseTeardown(
         filenamePrefix: "paperclip",
         verifyBeforePrune: verifyCheckpoint ? verifyIdleDatabaseBackup : undefined,
       });
+      if (result.engineFallbackReason) {
+        logger.warn(
+          { trigger, engine: result.engine, reason: result.engineFallbackReason },
+          `${label} database backup could not run pg_dump and used the slower JavaScript engine; put pg_dump on the server PATH or set PAPERCLIP_PG_DUMP_PATH`,
+        );
+      }
       if (verifyCheckpoint) {
         if (trigger !== "idle") await clearIdleBackupWakeRequired(config.databaseBackupDir);
       }

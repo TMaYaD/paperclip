@@ -11,6 +11,12 @@ paths, network addresses, and generated plists outside the Git checkout.
 3. Copy `config.example.json` to a private directory outside the checkout. Replace
    every placeholder. Set `api_base` to the actual address on which the server
    listens; a server bound to a specific interface may not accept loopback requests.
+   Include the directory that holds a `pg_dump` with the same major version as
+   the embedded PostgreSQL in `path`. The embedded server does not ship
+   `pg_dump`. Without it, every backup silently uses the JavaScript engine, which
+   is many times slower on a large database. Set the same `PATH` (or
+   `PAPERCLIP_PG_DUMP_PATH`) in the Paperclip server's own LaunchDaemon, because
+   the server takes the hourly backups.
 4. Optionally set `git_exec_path` if the Git installation needs it under launchd.
    `paperclip_home` defaults to `.paperclip` under the configured home directory.
    `daemon_label` defaults to `ing.paperclip.paperclipai`.

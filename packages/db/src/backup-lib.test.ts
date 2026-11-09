@@ -4,7 +4,7 @@ import path from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
 import { afterEach, describe, expect, it } from "vitest";
 import postgres from "postgres";
-import { createBufferedTextFileWriter, runDatabaseBackup, runDatabaseRestore } from "./backup-lib.js";
+import { createBufferedTextFileWriter, formatDatabaseBackupResult, runDatabaseBackup, runDatabaseRestore } from "./backup-lib.js";
 import { ensurePostgresDatabase } from "./client.js";
 import {
   EMBEDDED_POSTGRES_TEST_TIMEOUT_MS,
@@ -102,6 +102,41 @@ describeEmbeddedPostgres("runDatabaseBackup", () => {
       expect(verified).toBe(1);
       expect(fs.readFileSync(history)).toEqual(historyBytes);
       expect(fs.readdirSync(backupDir).filter(name => name.endsWith(".sql.gz"))).toEqual(["paperclip-history.sql.gz"]);
+    } finally {
+      if (previous === undefined) delete process.env.PAPERCLIP_PG_DUMP_PATH;
+      else process.env.PAPERCLIP_PG_DUMP_PATH = previous;
+    }
+  }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
+
+  it("reports the engine and why auto fell back from pg_dump", async () => {
+    const connectionString = await createTempDatabase();
+    const backupDir = createTempDir("engine-report-");
+    const leaky = path.join(backupDir, "pg-dump-leaky");
+    // A failing pg_dump that echoes its --dbname argument, credentials included.
+    fs.writeFileSync(leaky, "#!/bin/sh\necho \"connection to $1 failed\" >&2\nexit 1\n", { mode: 0o700 });
+    const working = path.join(backupDir, "pg-dump-working");
+    fs.writeFileSync(working, "#!/bin/sh\nprintf 'SELECT 1;\\n'\n", { mode: 0o700 });
+    const retention = { dailyDays: 7, weeklyWeeks: 4, monthlyMonths: 1 };
+    const previous = process.env.PAPERCLIP_PG_DUMP_PATH;
+    try {
+      process.env.PAPERCLIP_PG_DUMP_PATH = path.join(backupDir, "missing-pg-dump");
+      const missing = await runDatabaseBackup({ connectionString, backupDir, retention, filenamePrefix: "missing" });
+      expect(missing.engine).toBe("javascript");
+      expect(missing.engineFallbackReason).toMatch(/ENOENT/);
+      expect(formatDatabaseBackupResult(missing)).toContain("slower JavaScript engine");
+
+      process.env.PAPERCLIP_PG_DUMP_PATH = leaky;
+      const failed = await runDatabaseBackup({ connectionString, backupDir, retention, filenamePrefix: "leaky" });
+      expect(failed.engine).toBe("javascript");
+      expect(failed.engineFallbackReason).toMatch(/exit code 1/);
+      const password = new URL(connectionString).password;
+      if (password) expect(failed.engineFallbackReason).not.toContain(`:${password}@`);
+
+      process.env.PAPERCLIP_PG_DUMP_PATH = working;
+      const dumped = await runDatabaseBackup({ connectionString, backupDir, retention, filenamePrefix: "working" });
+      expect(dumped.engine).toBe("pg_dump");
+      expect(dumped.engineFallbackReason).toBeUndefined();
+      expect(formatDatabaseBackupResult(dumped)).not.toContain("JavaScript");
     } finally {
       if (previous === undefined) delete process.env.PAPERCLIP_PG_DUMP_PATH;
       else process.env.PAPERCLIP_PG_DUMP_PATH = previous;

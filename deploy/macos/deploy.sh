@@ -124,7 +124,9 @@ if [ "$BUILD_WHEN" = idle ]; then
 fi
 
 log "database backup"
-"$PAPERCLIPAI" db:backup --json 2>/dev/null | grep -E '"backupFile"' || log "warning: backup did not report a file"
+backup_started=$(date +%s)
+"$PAPERCLIPAI" db:backup --json 2>/dev/null | grep -E '"(backupFile|engine|engineFallbackReason)"' || log "warning: backup did not report a file"
+log "database backup took $(( $(date +%s) - backup_started ))s"
 
 attempt=1
 until "$PAPERCLIPAI" install --ref "$target_sha" --repo "$DEPLOY_REPO" --yes; do
