@@ -2157,6 +2157,10 @@ command. Each file retains its content-hash check, process lock, upload check,
 and atomic rename. The command runs outside the persistent agent session and
 stops at the first failed file. Earlier files can remain after a later failure;
 the launcher environment is returned only after the whole command succeeds.
+Shell profiles keep the managed launchers first while preserving entries added
+to the current `PATH`. Login profiles also restore missing configured entries
+after shell startup changes the path. Noninteractive bash children use the
+current path, so a parent-added tool directory remains available.
 The batch permits at most 16 files and 1 MiB of shell input. Launcher staging
 keeps its 15-second deadline. Run `packages/adapter-utils/src/github-launcher-environment.test.ts`
 and `packages/adapter-utils/src/sandbox-callback-bridge.test.ts` for these contracts.
