@@ -548,6 +548,57 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
     }
   });
 
+  it("retries a paused deferred child-ready wake after the child hold is released", async () => {
+    const { companyId, agentId, parentId, childIds, blockerId, intents } = await createNativeChildReadyIntents();
+    const childId = childIds[0]!;
+    const [blockerBefore] = await db.select({ statusVersion: issues.statusVersion }).from(issues).where(eq(issues.id, blockerId));
+    let finishParent!: () => void;
+    const parentFinished = new Promise<void>((resolve) => { finishParent = resolve; });
+    mockAdapterExecute.mockImplementationOnce(async () => {
+      await parentFinished;
+      return { exitCode: 0, signal: null, timedOut: false, errorMessage: null,
+        summary: "Coordinator finished.", provider: "test", model: "test-model" };
+    });
+    try {
+      const parentRun = await heartbeat.wakeup(agentId, { source: "assignment", triggerDetail: "system",
+        reason: "issue_assigned", payload: { issueId: parentId }, contextSnapshot: { issueId: parentId } });
+      expect(parentRun).not.toBeNull();
+      expect(await waitForCondition(async () => mockAdapterExecute.mock.calls.length === 1, 10_000)).toBe(true);
+      await heartbeat.dispatchPendingNativeStatusWakeups({ companyId });
+      const [deferred] = await db.select().from(agentWakeupRequests).where(and(
+        eq(agentWakeupRequests.companyId, companyId), eq(agentWakeupRequests.status, "deferred_issue_execution"),
+      ));
+      expect(deferred?.payload?.readyChildIssueId).toBe(childId);
+      const [hold] = await db.insert(issueTreeHolds).values({ companyId, rootIssueId: childId, mode: "pause", status: "active",
+        reason: "Child must wait", releasePolicy: { strategy: "manual" } }).returning({ id: issueTreeHolds.id });
+      finishParent();
+      await heartbeat.waitForRunExecutionDrain(parentRun!.id);
+      expect((await db.select({ status: agentWakeupRequests.status }).from(agentWakeupRequests)
+        .where(eq(agentWakeupRequests.id, deferred!.id)))[0]?.status).toBe("cancelled");
+      expect(await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
+        eq(heartbeatRuns.companyId, companyId), sql`${heartbeatRuns.contextSnapshot}->>'readyChildIssueId' = ${childId}`,
+      ))).toHaveLength(0);
+      await db.update(issueTreeHolds).set({ status: "released", releasedAt: new Date() }).where(eq(issueTreeHolds.id, hold!.id));
+      await heartbeat.reconcileResolvedDependencyWakes({ companyId });
+      await heartbeat.drainActiveRunExecutions();
+      const [blockerAfter] = await db.select({ statusVersion: issues.statusVersion }).from(issues).where(eq(issues.id, blockerId));
+      expect(blockerAfter?.statusVersion).toBe(blockerBefore?.statusVersion);
+      const resumedRuns = await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
+        eq(heartbeatRuns.companyId, companyId), sql`${heartbeatRuns.contextSnapshot}->>'readyChildIssueId' = ${childId}`,
+      ));
+      expect(resumedRuns).toHaveLength(1);
+      await heartbeat.reconcileResolvedDependencyWakes({ companyId });
+      await heartbeat.drainActiveRunExecutions();
+      expect(await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
+        eq(heartbeatRuns.companyId, companyId), sql`${heartbeatRuns.contextSnapshot}->>'readyChildIssueId' = ${childId}`,
+      ))).toHaveLength(1);
+      expect((await db.select({ status: agentWakeupRequests.status }).from(agentWakeupRequests)
+        .where(eq(agentWakeupRequests.id, intents[0]!.id)))[0]?.status).toBe("coalesced");
+    } finally {
+      finishParent();
+    }
+  }, 30_000);
+
   it("does not replace a child-ready intent when another emitter has claimed its key", async () => {
     const { companyId, agentId, parentId, blockerId, childIds, intents } = await createNativeChildReadyIntents();
     const childId = childIds[0]!;

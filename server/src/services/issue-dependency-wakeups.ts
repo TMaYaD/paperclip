@@ -392,6 +392,7 @@ export async function findExistingIssueChildReadyForAssignmentWakeForReadyState(
     id: agentWakeupRequests.id,
     status: agentWakeupRequests.status,
     idempotencyKey: agentWakeupRequests.idempotencyKey,
+    requestedByActorId: agentWakeupRequests.requestedByActorId,
   }).from(agentWakeupRequests).where(and(
     eq(agentWakeupRequests.companyId, input.companyId),
     eq(agentWakeupRequests.idempotencyKey, idempotencyKey),
@@ -399,7 +400,11 @@ export async function findExistingIssueChildReadyForAssignmentWakeForReadyState(
   ));
   return rows.find((row) =>
     row.idempotencyKey === idempotencyKey &&
-    (IDEMPOTENT_DEPENDENCY_WAKE_STATUS_SET.has(row.status) || row.status === "coalesced"),
+    // A coalesced native intent only records that dispatch created a separate
+    // delivery receipt. If that receipt was later cancelled by a temporary
+    // gate, reconciliation must be able to create a new delivery for this state.
+    (IDEMPOTENT_DEPENDENCY_WAKE_STATUS_SET.has(row.status) ||
+      (row.status === "coalesced" && row.requestedByActorId !== "native-status-committer")),
   ) ?? null;
 }
 

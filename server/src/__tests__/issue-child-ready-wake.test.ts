@@ -15,7 +15,7 @@ const readyState = {
   blockedTransitionAt: new Date("2026-11-09T12:00:00.000Z"),
 };
 
-function dbWithWakeRows(rows: Array<{ id: string; status: string; idempotencyKey: string }>): Db {
+function dbWithWakeRows(rows: Array<{ id: string; status: string; idempotencyKey: string; requestedByActorId?: string }>): Db {
   return {
     select: () => ({
       from: () => ({
@@ -80,6 +80,14 @@ describe("child ready for assignment wake", () => {
       )).toBeNull();
     },
   );
+
+  it("retries when a coalesced native intent has only a cancelled delivery", async () => {
+    const idempotencyKey = buildIssueChildReadyForAssignmentWakeStateKey(readyState);
+    expect(await findExistingIssueChildReadyForAssignmentWakeForReadyState(dbWithWakeRows([
+      { id: "intent", status: "coalesced", idempotencyKey, requestedByActorId: "native-status-committer" },
+      { id: "delivery", status: "cancelled", idempotencyKey, requestedByActorId: "native-status-wake-dispatch:intent" },
+    ]), readyState)).toBeNull();
+  });
 
   it("does not let a completed wake suppress a later blocker completion cycle", async () => {
     const previousWake = {
