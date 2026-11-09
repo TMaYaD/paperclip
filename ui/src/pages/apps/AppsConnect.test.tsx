@@ -1965,6 +1965,28 @@ describe("AppsConnect — Connect with a link (M4 frame)", () => {
     expect(startOAuthMock).toHaveBeenCalledWith("conn-dedicated", { asCurrentUser: false, asAgentId: "agent-1" });
   });
 
+  it("retries a dedicated GitHub draft with its saved agent", async () => {
+    const draft = {
+      id: "conn-dedicated", applicationId: "app-github", status: "draft", authKind: "oauth",
+      credentialPolicy: "per_agent", config: {
+        sourceTemplateKey: "github", connectionMethodKey: "managed", connectorSubjectAgentId: "agent-2",
+      }, transportConfig: {},
+    };
+    mockSearch.value = "source=github&resume=conn-dedicated&oauth=failed&code=oauth_callback_failed";
+    listGalleryMock.mockResolvedValue({ apps: [GITHUB_MANAGED] });
+    listApplicationsMock.mockResolvedValue({ applications: [{ id: "app-github", applicationKey: "github", name: "GitHub", status: "draft" }] });
+    listConnectionsMock.mockResolvedValue({ connections: [draft] });
+    getConnectionMock.mockResolvedValue(draft);
+
+    await render();
+    expect(buttonByText("Try again")).toBeTruthy();
+    await act(async () => buttonByText("Try again")?.click());
+    await vi.waitFor(() => expect(startOAuthMock).toHaveBeenCalledWith("conn-dedicated", {
+      asCurrentUser: false, asAgentId: "agent-2",
+    }));
+    expect(connectAppMock).not.toHaveBeenCalled();
+  });
+
   it.each([...new Set(Object.values(GOOGLE_WORKSPACE_CONNECTOR_PROFILES).map((profile) => profile.appSlug))]
     .flatMap((slug) => [false, true].map((enrollmentReturn) => ({ slug, enrollmentReturn }))))(
     "preserves personal Workspace access for $slug when changing method (enrollment return: $enrollmentReturn)",

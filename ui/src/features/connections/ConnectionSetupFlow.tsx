@@ -382,6 +382,8 @@ function defaultInstallChoiceFor(method: ConnectionMethodDef | null, requestedAg
 }
 
 function configuredAgentIdentity(connection: ToolConnection): string | undefined {
+  const savedSubject = connection.config?.connectorSubjectAgentId;
+  if (typeof savedSubject === "string") return savedSubject;
   const oauth = connection.config?.oauth;
   if (!oauth || typeof oauth !== "object" || Array.isArray(oauth)) return undefined;
   const value = (oauth as Record<string, unknown>).connectorSubjectAgentId;

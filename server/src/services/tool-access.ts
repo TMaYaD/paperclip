@@ -3114,13 +3114,6 @@ export function toolAccessService(
     actor?: ActorInfo,
   ): Promise<FinishToolAppResult> {
     const connection = await getConnectionRow(connectionId, companyId);
-    await assertDedicatedAgentTargets(
-      db,
-      connection,
-      input.access === "all_agents"
-        ? [{ targetType: "company", targetId: companyId }]
-        : input.access.agentIds.map((targetId) => ({ targetType: "agent" as const, targetId })),
-    );
     await assertConnectorConnectionSetupEnabled(connection);
     if (connection.status === "archived")
       throw conflict("Archived app connections cannot be finished");
@@ -3144,6 +3137,13 @@ export function toolAccessService(
       const policies = (await db.select().from(toolPolicies).where(eq(toolPolicies.companyId, companyId))).filter((policy) => asRecord(policy.config).connectionId === connection.id);
       return { connection: toConnection(updated), profile: toProfile(profile), profileEntries: details.entries, profileBindings: details.bindings, policies: policies.map(toPolicy) };
     }
+    await assertDedicatedAgentTargets(
+      db,
+      connection,
+      input.access === "all_agents"
+        ? [{ targetType: "company", targetId: companyId }]
+        : input.access.agentIds.map((targetId) => ({ targetType: "agent" as const, targetId })),
+    );
     const enabledIds = [
       ...new Set([
         ...input.enabledCatalogEntryIds,

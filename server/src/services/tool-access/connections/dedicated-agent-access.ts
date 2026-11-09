@@ -32,7 +32,11 @@ export async function assertDedicatedAgentTargets(
       isNotNull(toolOauthStates.subjectAgentId),
     )),
   ]);
-  const subjects = new Set([...grants, ...pendingAuthorizations].map((row) => row.subjectAgentId));
+  const configuredSubject = (connection.config as Record<string, unknown>).connectorSubjectAgentId;
+  const subjects = new Set([
+    ...(typeof configuredSubject === "string" ? [configuredSubject] : []),
+    ...[...grants, ...pendingAuthorizations].map((row) => row.subjectAgentId).filter((id): id is string => Boolean(id)),
+  ]);
   if (subjects.size > 1 || (subjects.size === 1 && !subjects.has(targets[0]!.targetId))) {
     throw unprocessable("A dedicated account can be installed only for its authorized agent");
   }

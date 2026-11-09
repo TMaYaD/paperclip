@@ -8115,6 +8115,8 @@ describeEmbeddedPostgres("tool access service", () => {
       enabledCatalogEntryIds: [], askFirstCatalogEntryIds: [], access: { agentIds: [subject.id, other.id] },
     }, actor)).rejects.toMatchObject({ status: 422 });
     expect(await service.listConnectionInstalls(connected.connectionId)).toEqual([]);
+    await expect(service.putConnectionInstalls(connected.connectionId, installs([other.id]), actor))
+      .rejects.toMatchObject({ status: 422 });
 
     const started = await service.startOAuth(company.id, connected.connectionId, {
       redirectUri: "https://paperclip.example/api/tools/oauth/cloud-connector/callback", actor, subjectAgentId: subject.id,
