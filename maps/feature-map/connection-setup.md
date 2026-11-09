@@ -29,7 +29,8 @@ does not activate the service. See [service configuration](../../doc/prompt-inje
 - `handoff`: `connection-setup/handoff` — provider popup/full-page callback returns to the correct setup
   host with the original task intent and identity choice intact.
 - `draft-recovery`: `connection-setup/draft-recovery` — cancel, Back, Save & exit, reload, Finish setup, and reconnect
-  preserve the exact draft rather than creating duplicate connections.
+  preserve the exact draft rather than creating duplicate connections. A fresh connect after removal creates a new
+  connection identity; only a reconnect that names the removed connection restores that identity.
 - `task-request`: `connection-setup/task-request` — only the addressed person resolves the requested connection;
   usable access releases the pending task request through normal continuation.
 - `channel-setup`: `connection-setup/channel-setup` — provider endpoint, represented agent, linked sender, and

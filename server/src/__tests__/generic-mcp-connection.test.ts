@@ -600,8 +600,8 @@ describeEmbeddedPostgres("generic remote MCP connections", () => {
     const service = toolAccessService(serviceDb, { paperclipCloudConnector: null });
     const actor = { actorType: "user" as const, actorId: "board-user" };
     const connected = await service.connectGalleryApp(company.id, { galleryKey: "paperclip-notebook" }, actor);
-    const authorize = async () => {
-      const start = await service.startOAuth(company.id, connected.connectionId, { redirectUri: REDIRECT_URI, actor });
+    const authorize = async (connectionId = connected.connectionId) => {
+      const start = await service.startOAuth(company.id, connectionId, { redirectUri: REDIRECT_URI, actor });
       expect(start.registrationSource).toBe("dcr");
       const authorization = new URL(start.authorizationUrl);
       expect(authorization.searchParams.get("resource")).toBe(MCP_URL);
@@ -702,8 +702,10 @@ describeEmbeddedPostgres("generic remote MCP connections", () => {
     expect(await db.select().from(companySecrets).where(inArray(companySecrets.id, currentGrant!.credentialSecretRefs.map(ref => ref.secretId)))).toEqual([]);
     expect(fixture.requestsTo("/oauth/revoke")).toEqual([]);
     await instanceSettingsService(db).updateExperimental({ enablePaperclipNotebook: true });
-    await service.connectGalleryApp(company.id, { galleryKey: "paperclip-notebook", applicationId: connected.application.id }, actor);
-    await authorize();
+    const fresh = await service.connectGalleryApp(company.id, { galleryKey: "paperclip-notebook", applicationId: connected.application.id }, actor);
+    expect(fresh.connectionId).not.toBe(connected.connectionId);
+    await authorize(fresh.connectionId);
+    await expect(service.getConnection(connected.connectionId)).resolves.toMatchObject({ status: "archived" });
     expect(fixture.requestsTo("/oauth/revoke")).toEqual([]);
     expect(fixture.requests.every(call => call.headers["idempotency-key"] === undefined)).toBe(true);
   });
@@ -1447,7 +1449,7 @@ describeEmbeddedPostgres("generic remote MCP connections", () => {
     ]);
   });
 
-  it("does not let another user take over an archived personal URL connection", async () => {
+  it("keeps an archived personal URL connection separate from another user's fresh setup", async () => {
     const fixture = installMcpOAuthFixture({ auth: "oauth" });
     const company = await createCompany(db);
     const service = toolAccessService(db);
@@ -1460,16 +1462,17 @@ describeEmbeddedPostgres("generic remote MCP connections", () => {
     });
     fixture.fetchMock.mockClear();
 
-    await expect(service.connectGalleryApp(company.id, input, {
+    await expect(service.connectGalleryApp(company.id, { ...input, reconnectConnectionId: first.connectionId }, {
       actorType: "user", actorId: "other-user",
     })).rejects.toMatchObject({ status: 403, message: "Only the existing personal identity can reconnect this connection" });
-
     expect(fixture.fetchMock).not.toHaveBeenCalled();
-    await expect(db.select().from(connectionGrants)).resolves.toHaveLength(0);
+    const fresh = await service.connectGalleryApp(company.id, input, { actorType: "user", actorId: "other-user" });
+    expect(fresh.connectionId).not.toBe(first.connectionId);
+    await expect(db.select().from(connectionGrants).where(eq(connectionGrants.connectionId, first.connectionId))).resolves.toHaveLength(0);
     await expect(service.getConnection(first.connectionId)).resolves.toMatchObject({
       status: "archived", createdByUserId: "board-user",
     });
-    const resumed = await service.connectGalleryApp(company.id, input, { actorType: "user", actorId: "board-user" });
+    const resumed = await service.connectGalleryApp(company.id, { ...input, reconnectConnectionId: first.connectionId }, { actorType: "user", actorId: "board-user" });
     expect(resumed.connectionId).toBe(first.connectionId);
     expect(resumed.auth).toMatchObject({ kind: "oauth" });
   });
@@ -1546,7 +1549,7 @@ describeEmbeddedPostgres("generic remote MCP connections", () => {
       return jsonResponse({ jsonrpc: "2.0", id: "paperclip-catalog-refresh", result: { tools: FIXTURE_TOOLS } });
     });
     const failure = service.connectGalleryApp(company.id, {
-      link: MCP_URL, name: "Personal retry rollback", grantKind: "user",
+      link: MCP_URL, name: "Personal retry rollback", grantKind: "user", reconnectConnectionId: first.connectionId,
     }, actor).then(() => null, (error: unknown) => error);
     await Promise.race([catalogPending, failure.then((error) => { throw error ?? new Error("Retry finished before the catalog probe"); })]);
     try {
@@ -1589,7 +1592,7 @@ describeEmbeddedPostgres("generic remote MCP connections", () => {
       FOR EACH ROW EXECUTE FUNCTION test_personal_profile_failure()
     `);
     try {
-      await expect(service.connectGalleryApp(company.id, input, actor)).rejects.toThrow();
+      await expect(service.connectGalleryApp(company.id, { ...input, reconnectConnectionId: first.connectionId }, actor)).rejects.toThrow();
       await expect(db.select().from(toolCatalogEntries).where(eq(toolCatalogEntries.connectionId, first.connectionId)))
         .resolves.toEqual(catalogBefore);
       await expect(db.select().from(toolProfiles).where(eq(toolProfiles.companyId, company.id))).resolves.toHaveLength(0);

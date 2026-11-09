@@ -8088,7 +8088,7 @@ describeEmbeddedPostgres("tool access service", () => {
     },
   );
 
-  it("replaces an archived dedicated GitHub identity with an explicitly selected personal identity", async () => {
+  it("creates a fresh personal GitHub identity after a dedicated connection is removed", async () => {
     const company = await createCompany(db);
     const userId = `github-personal-revival-${randomUUID()}`;
     await grantBoardUser(db, company.id, userId, [], "owner");
@@ -8180,38 +8180,46 @@ describeEmbeddedPostgres("tool access service", () => {
         actor,
       );
 
-      const personal = await service.connectGalleryApp(
-        company.id,
-        {
+      const app = createRouteApp(db, boardSessionActor(company.id, "owner", userId), undefined, {
+        paperclipCloudConnector: connector,
+      });
+      const personalResponse = await request(app)
+        .post(`/api/companies/${company.id}/tools/apps/connect`)
+        .send({
           galleryKey: "github",
+          applicationId: dedicated.application.id,
           connectionMethodKey: "managed",
           grantKind: "user",
           name: "GitHub",
-        },
-        actor,
-      );
-      expect(personal.connectionId).toBe(dedicated.connectionId);
+        })
+        .expect(201);
+      const personal = personalResponse.body;
+      expect(personal.connectionId).not.toBe(dedicated.connectionId);
+      expect(personal.connection.uid).not.toBe(dedicated.connection.uid);
       expect(personal.connection).toMatchObject({
         status: "draft",
         credentialPolicy: "per_user",
+        name: "GitHub (2)",
+      });
+      expect(await service.getConnection(dedicated.connectionId, company.id)).toMatchObject({
+        status: "archived",
+        credentialPolicy: "per_agent",
+        name: "GitHub",
       });
 
-      const personalStart = await service.startOAuth(
-        company.id,
-        personal.connectionId,
-        {
-          redirectUri:
-            "https://paperclip.example/api/tools/oauth/cloud-connector/callback",
-          actor,
-        },
-      );
-      const completed = await service.completePaperclipCloudConnectorCallback({
-        state: new URL(personalStart.authorizationUrl).searchParams.get(
-          "state",
-        )!,
-        claimId: "github-personal-after-removal",
-        actor,
+      const personalState = new URL(personal.auth.startUrl).searchParams.get("state")!;
+      const [pendingState] = await db.select().from(toolOauthStates).where(eq(toolOauthStates.state, personalState));
+      expect(pendingState).toMatchObject({
+        connectionId: personal.connectionId,
+        subjectUserId: userId,
+        subjectAgentId: null,
       });
+      const completedResponse = await request(app)
+        .get("/api/tools/oauth/cloud-connector/callback")
+        .query({ state: personalState, claim_id: "github-personal-after-removal" })
+        .set("accept", "application/json")
+        .expect(200);
+      const completed = completedResponse.body;
       expect(completed.connection).toMatchObject({
         status: "active",
         credentialPolicy: "per_user",
@@ -8224,23 +8232,160 @@ describeEmbeddedPostgres("tool access service", () => {
       expect(grants.grants).toEqual(
         expect.arrayContaining([
           expect.objectContaining({
-            kind: "agent",
-            subjectAgentId: agent.id,
-            status: "revoked",
-          }),
-          expect.objectContaining({
             kind: "user",
             subjectUserId: userId,
             status: "active",
           }),
         ]),
       );
+      expect(grants.grants).toHaveLength(1);
+      const archivedGrants = await service.listConnectionGrants(dedicated.connectionId, company.id);
+      expect(archivedGrants.grants).toEqual([
+        expect.objectContaining({ kind: "agent", subjectAgentId: agent.id, status: "revoked" }),
+      ]);
       expect(grants.grants.some((grant) => grant.kind === "organization")).toBe(
         false,
       );
     } finally {
       githubDefinition.ownershipAvailability = previousOwnershipAvailability;
     }
+  });
+
+  it("rejects a named dedicated-agent reconnect without its agent before OAuth consent", async () => {
+    const company = await createCompany(db);
+    const userId = `github-reconnect-${randomUUID()}`;
+    await grantBoardUser(db, company.id, userId, [], "owner");
+    const agent = await createAgent(db, company.id);
+    const connector = fakeGitHubConnector(company.id, `agent:${agent.id}`);
+    const service = createTestToolAccessService(db, { paperclipCloudConnector: connector });
+    const actor = { actorType: "user" as const, actorId: userId };
+    const original = await service.connectGalleryApp(company.id, {
+      galleryKey: "github", connectionMethodKey: "managed", grantKind: "agent",
+      subjectAgentId: agent.id, name: "Agent GitHub reconnect",
+    }, actor);
+    await service.archiveConnection(original.connectionId, company.id, actor);
+    const app = createRouteApp(db, boardSessionActor(company.id, "owner", userId), undefined, {
+      paperclipCloudConnector: connector,
+    });
+
+    const response = await request(app)
+      .post(`/api/companies/${company.id}/tools/apps/connect`)
+      .send({ galleryKey: "github", connectionMethodKey: "managed", reconnectConnectionId: original.connectionId });
+
+    expect(response.status).toBe(400);
+    expect(response.body.error).toMatch(/dedicated agent/i);
+    expect(connector.startAuthorization).not.toHaveBeenCalled();
+    await expect(db.select().from(toolOauthStates).where(eq(toolOauthStates.connectionId, original.connectionId)))
+      .resolves.toHaveLength(0);
+
+    await request(app)
+      .post(`/api/companies/${company.id}/tools/apps/connect`)
+      .send({ galleryKey: "github", connectionMethodKey: "managed", reconnectConnectionId: original.connectionId,
+        grantKind: "user" })
+      .expect(400);
+    const otherCompany = await createCompany(db);
+    await grantBoardUser(db, otherCompany.id, userId, [], "owner");
+    const otherCompanyApp = createRouteApp(db, boardSessionActor(otherCompany.id, "owner", userId), undefined, {
+      paperclipCloudConnector: connector,
+    });
+    await request(otherCompanyApp)
+      .post(`/api/companies/${otherCompany.id}/tools/apps/connect`)
+      .send({ galleryKey: "github", connectionMethodKey: "managed", reconnectConnectionId: original.connectionId })
+      .expect(404);
+    expect(connector.startAuthorization).not.toHaveBeenCalled();
+  });
+
+  it("rejects a named reconnect when an old grant names a different dedicated agent", async () => {
+    const company = await createCompany(db);
+    const userId = `github-reconnect-owner-${randomUUID()}`;
+    await grantBoardUser(db, company.id, userId, [], "owner");
+    const originalAgent = await createAgent(db, company.id);
+    const otherAgent = await createAgent(db, company.id);
+    const connector = fakeGitHubConnector(company.id, `agent:${originalAgent.id}`);
+    const service = createTestToolAccessService(db, { paperclipCloudConnector: connector });
+    const original = await service.connectGalleryApp(company.id, {
+      galleryKey: "github", connectionMethodKey: "managed", grantKind: "agent",
+      subjectAgentId: originalAgent.id, name: "Original agent GitHub",
+    }, { actorType: "user", actorId: userId });
+    await db.update(toolConnections).set({
+      config: { ...original.connection.config, connectorSubjectAgentId: originalAgent.id },
+    }).where(eq(toolConnections.id, original.connectionId));
+    await db.insert(connectionGrants).values({
+      companyId: company.id, connectionId: original.connectionId,
+      kind: "agent", subjectAgentId: otherAgent.id, status: "revoked",
+      isDefault: false, credentialSecretRefs: [],
+    });
+    await service.archiveConnection(original.connectionId, company.id, { actorType: "user", actorId: userId });
+    const app = createRouteApp(db, boardSessionActor(company.id, "owner", userId), undefined, {
+      paperclipCloudConnector: connector,
+    });
+
+    const response = await request(app)
+      .post(`/api/companies/${company.id}/tools/apps/connect`)
+      .send({ galleryKey: "github", connectionMethodKey: "managed", grantKind: "agent", reconnectConnectionId: original.connectionId,
+        subjectAgentId: otherAgent.id });
+
+    expect(response.status).toBe(400);
+    expect(response.body.error).toMatch(/original dedicated agent/i);
+    expect(connector.startAuthorization).not.toHaveBeenCalled();
+    await expect(db.select().from(toolOauthStates).where(eq(toolOauthStates.connectionId, original.connectionId)))
+      .resolves.toHaveLength(0);
+  });
+
+  it("does not start OAuth for a different agent after a named reconnect", async () => {
+    const company = await createCompany(db);
+    const userId = `github-agent-owner-${randomUUID()}`;
+    await grantBoardUser(db, company.id, userId, [], "owner");
+    const originalAgent = await createAgent(db, company.id);
+    const otherAgent = await createAgent(db, company.id);
+    const connector = fakeGitHubConnector(company.id, `agent:${originalAgent.id}`);
+    const service = createTestToolAccessService(db, { paperclipCloudConnector: connector });
+    const actor = { actorType: "user" as const, actorId: userId };
+    const original = await service.connectGalleryApp(company.id, {
+      galleryKey: "github", connectionMethodKey: "managed", grantKind: "agent",
+      subjectAgentId: originalAgent.id, name: "Agent GitHub subject",
+    }, actor);
+    await db.insert(connectionGrants).values({
+      companyId: company.id, connectionId: original.connectionId,
+      kind: "agent", subjectAgentId: originalAgent.id, status: "active",
+      isDefault: false, credentialSecretRefs: [],
+    });
+    await service.archiveConnection(original.connectionId, company.id, actor);
+    const reconnected = await service.connectGalleryApp(company.id, {
+      galleryKey: "github", connectionMethodKey: "managed", grantKind: "agent",
+      subjectAgentId: originalAgent.id, reconnectConnectionId: original.connectionId,
+    }, actor);
+    expect(reconnected.connectionId).toBe(original.connectionId);
+    expect(reconnected.connection.status).toBe("draft");
+    const app = createRouteApp(db, boardSessionActor(company.id, "owner", userId), undefined, {
+      paperclipCloudConnector: connector,
+    });
+    for (const connectionIdField of ["reconnectConnectionId", "resumeConnectionId"] as const) {
+      const response = await request(app)
+        .post(`/api/companies/${company.id}/tools/apps/connect`)
+        .send({ galleryKey: "github", connectionMethodKey: "managed", grantKind: "agent",
+          subjectAgentId: otherAgent.id, [connectionIdField]: original.connectionId });
+      expect(response.status).toBe(400);
+      expect(response.body.error).toMatch(/original dedicated agent/i);
+      await expect(service.getConnection(original.connectionId)).resolves.toMatchObject({
+        status: "draft", config: expect.objectContaining({ connectorSubjectAgentId: originalAgent.id }),
+      });
+      await expect(db.select().from(toolOauthStates).where(eq(toolOauthStates.connectionId, original.connectionId)))
+        .resolves.toHaveLength(0);
+    }
+    const resumed = await service.connectGalleryApp(company.id, {
+      galleryKey: "github", connectionMethodKey: "managed", grantKind: "agent",
+      subjectAgentId: originalAgent.id, resumeConnectionId: original.connectionId,
+    }, actor);
+    expect(resumed.connectionId).toBe(original.connectionId);
+
+    await expect(service.startOAuth(company.id, reconnected.connectionId, {
+      redirectUri: "https://paperclip.example/api/tools/oauth/cloud-connector/callback",
+      actor, subjectAgentId: otherAgent.id,
+    })).rejects.toMatchObject({ status: 400 });
+    expect(connector.startAuthorization).not.toHaveBeenCalled();
+    await expect(db.select().from(toolOauthStates).where(eq(toolOauthStates.connectionId, original.connectionId)))
+      .resolves.toHaveLength(0);
   });
 
   it.each(["user", "organization"] as const)("builds one Workspace catalog from actual partial consent for a %s grant", async (grantKind) => {
@@ -9385,6 +9530,7 @@ describeEmbeddedPostgres("tool access service", () => {
         company.id,
         {
           galleryKey: "google-drive",
+          reconnectConnectionId: first.connectionId,
           connectionMethodKey: "paperclip-write",
           grantKind: "user",
           name: "Drive managed revival",
@@ -15457,7 +15603,7 @@ describeEmbeddedPostgres("tool access service", () => {
     });
   });
 
-  it("reuses and revives an existing application when connecting with applicationId", async () => {
+  it("reuses an archived application but creates a new connection with applicationId", async () => {
     const company = await createCompany(db);
     const service = createTestToolAccessService(db);
     mockToolsList([
@@ -15495,10 +15641,13 @@ describeEmbeddedPostgres("tool access service", () => {
     );
 
     expect(second.application.id).toBe(applicationId);
-    // The archived connection is revived in place, not duplicated.
-    expect(second.connectionId).toBe(first.connectionId);
+    expect(second.connectionId).not.toBe(first.connectionId);
+    expect(second.connection.uid).not.toBe(first.connection.uid);
+    expect(second.connection.name).toBe("Reusable app (2)");
     await expect(db.select().from(toolApplications)).resolves.toHaveLength(1);
-    await expect(db.select().from(toolConnections)).resolves.toHaveLength(1);
+    await expect(db.select().from(toolConnections)).resolves.toHaveLength(2);
+    const [archivedConnection] = await db.select().from(toolConnections).where(eq(toolConnections.id, first.connectionId));
+    expect(archivedConnection.status).toBe("archived");
     const [revived] = await db
       .select()
       .from(toolApplications)
@@ -15518,7 +15667,7 @@ describeEmbeddedPostgres("tool access service", () => {
     ).rejects.toMatchObject({ status: 404 });
   });
 
-  it("reuses a removed gallery app while applying the omitted organization identity default", async () => {
+  it("reuses a removed gallery app without reviving either archived connection", async () => {
     const company = await createCompany(db);
     const service = createTestToolAccessService(db);
     const actor = { actorType: "user" as const, actorId: "local-board" };
@@ -15544,10 +15693,12 @@ describeEmbeddedPostgres("tool access service", () => {
     );
 
     expect(second.application.id).toBe(first.application.id);
-    expect(second.connectionId).toBe(first.connectionId);
+    expect(second.connectionId).not.toBe(first.connectionId);
+    expect(second.connection.uid).not.toBe(first.connection.uid);
     expect(second.application.status).toBe("draft");
     expect(second.connection.status).toBe("draft");
     expect(second.connection.credentialPolicy).toBe("shared");
+    expect(second.connection.name).toBe("Notion (2)");
     const grants = await service.listConnectionGrants(
       second.connectionId,
       company.id,
@@ -15560,7 +15711,19 @@ describeEmbeddedPostgres("tool access service", () => {
       }),
     ]);
     await expect(db.select().from(toolApplications)).resolves.toHaveLength(1);
-    await expect(db.select().from(toolConnections)).resolves.toHaveLength(1);
+    await service.archiveConnection(second.connectionId, company.id, actor);
+    const third = await service.connectGalleryApp(company.id, {
+      galleryKey: "notion", name: "Notion",
+    }, actor);
+    expect(third.application.id).toBe(first.application.id);
+    expect(third.connectionId).not.toBe(first.connectionId);
+    expect(third.connectionId).not.toBe(second.connectionId);
+    expect(third.connection.name).toBe("Notion (3)");
+    await expect(db.select().from(toolConnections).where(eq(toolConnections.companyId, company.id)))
+      .resolves.toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: first.connectionId, status: "archived", credentialPolicy: "per_user" }),
+        expect.objectContaining({ id: second.connectionId, status: "archived", credentialPolicy: "shared" }),
+      ]));
   });
 
   it("restores grants and credential policy when an identity-changing revival fails", async () => {
@@ -15629,7 +15792,7 @@ describeEmbeddedPostgres("tool access service", () => {
     expect(afterGrants.grants).toEqual(beforeGrants.grants);
   });
 
-  it("preserves a concurrent grant change when an identity-changing revival fails", async () => {
+  it("preserves a concurrent grant change when an explicit personal reconnect fails", async () => {
     const company = await createCompany(db);
     const service = createTestToolAccessService(db);
     const actor = {
@@ -15646,7 +15809,7 @@ describeEmbeddedPostgres("tool access service", () => {
       {
         galleryKey: "github",
         connectionMethodKey: "mcp-key",
-        grantKind: "organization",
+        grantKind: "user",
         name: "GitHub concurrent rollback",
         credentialValues: {
           "credentials.authorization": "old-organization-token",
@@ -15685,6 +15848,7 @@ describeEmbeddedPostgres("tool access service", () => {
         company.id,
         {
           galleryKey: "github",
+          reconnectConnectionId: first.connectionId,
           connectionMethodKey: "mcp-key",
           grantKind: "user",
           name: "GitHub concurrent rollback",
@@ -15700,7 +15864,7 @@ describeEmbeddedPostgres("tool access service", () => {
       service.getConnection(first.connectionId, company.id),
     ).resolves.toMatchObject({
       status: "archived",
-      credentialPolicy: "shared",
+      credentialPolicy: "per_user",
     });
     const afterGrants = await service.listConnectionGrants(
       first.connectionId,
@@ -15708,7 +15872,6 @@ describeEmbeddedPostgres("tool access service", () => {
     );
     expect(afterGrants.grants).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ kind: "organization", status: "revoked" }),
         expect.objectContaining({
           kind: "user",
           status: "revoked",
@@ -15718,7 +15881,7 @@ describeEmbeddedPostgres("tool access service", () => {
     );
   });
 
-  it("preserves a concurrent connection update when an identity-changing revival fails", async () => {
+  it("preserves a concurrent connection update when an explicit personal reconnect fails", async () => {
     const company = await createCompany(db);
     const service = createTestToolAccessService(db);
     const actor = {
@@ -15735,7 +15898,7 @@ describeEmbeddedPostgres("tool access service", () => {
       {
         galleryKey: "github",
         connectionMethodKey: "mcp-key",
-        grantKind: "organization",
+        grantKind: "user",
         name: "GitHub concurrent connection rollback",
         credentialValues: {
           "credentials.authorization": "old-organization-token",
@@ -15771,6 +15934,7 @@ describeEmbeddedPostgres("tool access service", () => {
         company.id,
         {
           galleryKey: "github",
+          reconnectConnectionId: first.connectionId,
           connectionMethodKey: "mcp-key",
           grantKind: "user",
           name: "GitHub concurrent connection rollback",
@@ -15808,7 +15972,7 @@ describeEmbeddedPostgres("tool access service", () => {
     expect(preservedSecret.deletedAt).toBeNull();
   });
 
-  it("fails closed when an identity-changing revival cannot roll back", async () => {
+  it("fails closed when an explicit personal reconnect cannot roll back", async () => {
     const company = await createCompany(db);
     const service = createTestToolAccessService(db);
     const actor = {
@@ -15825,7 +15989,7 @@ describeEmbeddedPostgres("tool access service", () => {
       {
         galleryKey: "github",
         connectionMethodKey: "mcp-key",
-        grantKind: "organization",
+        grantKind: "user",
         name: "GitHub rollback failure",
         credentialValues: {
           "credentials.authorization": "old-organization-token",
@@ -15845,6 +16009,7 @@ describeEmbeddedPostgres("tool access service", () => {
         company.id,
         {
           galleryKey: "github",
+          reconnectConnectionId: first.connectionId,
           connectionMethodKey: "mcp-key",
           grantKind: "user",
           name: "GitHub rollback failure",
@@ -17332,6 +17497,7 @@ describeEmbeddedPostgres("tool access service", () => {
           company.id,
           {
             galleryKey: "zapier",
+            reconnectConnectionId: first.connectionId,
             name: "Zapier reconnect defaults",
             credentialValues: { "credentials.authorization": "second-secret" },
           },
@@ -18031,6 +18197,7 @@ describeEmbeddedPostgres("tool access service", () => {
           company.id,
           {
             applicationId: connected.application.id,
+            reconnectConnectionId: connected.connectionId,
             galleryKey: "github",
             connectionMethodKey: "mcp-key",
             name: "Personal GitHub reconnect",

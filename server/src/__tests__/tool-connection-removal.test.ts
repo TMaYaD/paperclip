@@ -684,16 +684,19 @@ describeEmbeddedPostgres("tool connection removal", () => {
       name: archived!.name,
       credentialValues: { [`headers.${HEADER.name}`]: HEADER.value },
     });
-    // Same connection identity, brand new credential.
-    expect(reconnected.connectionId).toBe(connectionId);
+    // Fresh setup gets a new identity and a brand new credential.
+    expect(reconnected.connectionId).not.toBe(connectionId);
+    expect(reconnected.connection.uid).not.toBe(beforeRemoval!.uid);
     const [after] = await db.select().from(toolConnections).where(eq(toolConnections.id, connectionId));
-    expect(after!.credentialSecretRefs.length).toBeGreaterThan(0);
-    const reconnectedSecretIds = after!.credentialSecretRefs.map((ref) => ref.secretId);
+    expect(after).toMatchObject({ status: "archived", credentialSecretRefs: [] });
+    const [fresh] = await db.select().from(toolConnections).where(eq(toolConnections.id, reconnected.connectionId));
+    expect(fresh!.credentialSecretRefs.length).toBeGreaterThan(0);
+    const reconnectedSecretIds = fresh!.credentialSecretRefs.map((ref) => ref.secretId);
     // Not one of the revoked secrets came back.
     for (const secretId of originalSecretIds) expect(reconnectedSecretIds).not.toContain(secretId);
-    // A fresh connect recreates the deny-by-default profile, but does not restore installs.
-    await expect(db.select().from(toolProfiles).where(eq(toolProfiles.profileKey, `app:${connectionId}`)))
-      .resolves.toHaveLength(1);
-    expect(await service.listConnectionInstalls(connectionId, company.id)).toEqual([]);
+    // Fresh setup has no approved profile or installs until permissions are saved.
+    await expect(db.select().from(toolProfiles).where(eq(toolProfiles.profileKey, `app:${reconnected.connectionId}`)))
+      .resolves.toHaveLength(0);
+    expect(await service.listConnectionInstalls(reconnected.connectionId, company.id)).toEqual([]);
   });
 });
