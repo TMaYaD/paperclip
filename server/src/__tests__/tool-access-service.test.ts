@@ -1012,6 +1012,54 @@ describeEmbeddedPostgres("tool access service", () => {
     expect(requests).toEqual(Array(3).fill("Bearer agent-catalog-token"));
   });
 
+  it("keeps the dedicated Workspace grant through scope filtering and a 401 retry", async () => {
+    const company = await createCompany(db);
+    const userId = `workspace-agent-${randomUUID()}`;
+    await grantBoardUser(db, company.id, userId, [], "owner");
+    const agent = await createAgent(db, company.id);
+    const actor = { actorType: "user" as const, actorId: userId };
+    const connector = fakeGoogleWorkspaceConnector(company.id, userId, "workspace.all");
+    const scope = "https://www.googleapis.com/auth/documents.readonly";
+    const originalClaim = connector.claim;
+    connector.claim = vi.fn(async (input) => ({ ...await originalClaim(input),
+      accessTokenExpiresAt: new Date(Date.now() + 7_200_000).toISOString(), scopes: [scope] }));
+    const originalRefresh = connector.refresh;
+    connector.refresh = vi.fn(async (input) => ({ ...await originalRefresh(input), accessToken: "workspace-agent-rotated", scopes: [scope] }));
+    const service = createTestToolAccessService(db, { paperclipCloudConnector: connector });
+    let refreshing = false;
+    const headers: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (url, init) => {
+      expect(String(url)).toBe("https://docsmcp.googleapis.com/mcp/v1");
+      headers.push(new Headers(init?.headers).get("authorization") ?? "");
+      if (refreshing && headers.length === 2) return new Response("", { status: 401 });
+      return mcpHttpResponse(catalogResponse([{ name: "read_doc", annotations: { readOnlyHint: true } }]));
+    });
+    const connected = await service.connectGalleryApp(company.id, {
+      galleryKey: "google-workspace", connectionMethodKey: "paperclip-workspace",
+      grantKind: "organization",
+    }, actor);
+    const started = await service.startOAuth(company.id, connected.connectionId, {
+      redirectUri: "https://paperclip.example/api/tools/oauth/cloud-connector/callback",
+      actor,
+    });
+    await service.completePaperclipCloudConnectorCallback({
+      state: new URL(started.authorizationUrl).searchParams.get("state")!, claimId: "workspace-agent", actor,
+    });
+    const [grant] = await db.select().from(connectionGrants).where(eq(connectionGrants.connectionId, connected.connectionId));
+    await db.update(toolConnections).set({ credentialPolicy: "per_agent" }).where(eq(toolConnections.id, connected.connectionId));
+    await db.update(connectionGrants).set({ kind: "agent", subjectAgentId: agent.id, isDefault: false })
+      .where(eq(connectionGrants.id, grant!.id));
+    const [agentGrant] = await db.select().from(connectionGrants).where(eq(connectionGrants.id, grant!.id));
+    expect(agentGrant).toMatchObject({ kind: "agent", subjectAgentId: agent.id, status: "active" });
+    refreshing = true;
+    const result = await service.refreshCatalog(connected.connectionId, actor);
+    expect(result.discoveredCount).toBe(1);
+    expect(headers).toEqual(["Bearer workspace-access-token", "Bearer workspace-access-token", "Bearer workspace-agent-rotated"]);
+    expect((await service.listCatalog(connected.connectionId)).map((entry) => entry.toolName)).toContain("docs__read_doc");
+    const [retained] = await db.select().from(connectionGrants).where(eq(connectionGrants.id, grant!.id));
+    expect(retained).toMatchObject({ id: grant!.id, status: "active" });
+  });
+
   it("denies a creator's dedicated catalog refresh and reads the saved catalog without discovery", async () => {
     const company = await createCompany(db);
     const creator = `creator-${randomUUID()}`;

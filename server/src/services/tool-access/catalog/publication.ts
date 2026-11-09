@@ -41,11 +41,12 @@ type PublicationDependencies = {
   updateConnectionHealth: ConnectionHealth["updateConnectionHealth"];
   vaultGrantForConnection: ConnectionCredentialAccess["vaultGrantForConnection"];
   agentCatalogGrantForConnection: ConnectionCredentialAccess["agentCatalogGrantForConnection"];
+  selectedAgentCatalogGrant: ConnectionCredentialAccess["selectedAgentCatalogGrant"];
   ensureRuntimeSlot: ReturnType<typeof createToolRuntimeSlots>["ensureRuntimeSlot"];
   enableCatalogEntriesByDefault: CatalogDefaultAccess["enableCatalogEntriesByDefault"];
 };
 
-export function createToolCatalogPublication(db: Db, { now, audit, getConnectionRow, discoverTools, assertConnectorConnectionSetupEnabled, updateConnectionHealth, vaultGrantForConnection, agentCatalogGrantForConnection, ensureRuntimeSlot, enableCatalogEntriesByDefault }: PublicationDependencies) {
+export function createToolCatalogPublication(db: Db, { now, audit, getConnectionRow, discoverTools, assertConnectorConnectionSetupEnabled, updateConnectionHealth, vaultGrantForConnection, agentCatalogGrantForConnection, selectedAgentCatalogGrant, ensureRuntimeSlot, enableCatalogEntriesByDefault }: PublicationDependencies) {
   async function refreshCatalog(
     connectionId: string,
     actor?: ActorInfo,
@@ -145,7 +146,9 @@ export function createToolCatalogPublication(db: Db, { now, audit, getConnection
       let otherWorkspaceGrants: string[][] = [];
       let selectedWorkspaceScopes: string[] = [];
       if (connection.config.sourceTemplateKey === "google-workspace") {
-        const selected = await vaultGrantForConnection(connection, actor);
+        const selected = catalogGrantId
+          ? await selectedAgentCatalogGrant(connection, catalogGrantId)
+          : await vaultGrantForConnection(connection, actor);
         selectedWorkspaceScopes = googleWorkspaceGrantedScopes(selected);
         const grants = await db.select().from(connectionGrants).where(and(
           eq(connectionGrants.companyId, connection.companyId), eq(connectionGrants.connectionId, connection.id),

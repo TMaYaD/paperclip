@@ -59,7 +59,7 @@ type DiscoveryDependencies = {
 };
 
 export function createToolCatalogDiscovery(db: Db, { now, audit, secrets, credentials, vercel, vercelConnect, setupPolicy, requestRemoteHttpEndpoint, resolveOAuthGrantSecret, discoverOAuthEndpoints, localTools }: DiscoveryDependencies) {
-  const { vaultGrantForConnection, resolveCredentialHeaders, resolvedRemoteEndpoint } = credentials;
+  const { vaultGrantForConnection, selectedAgentCatalogGrant, resolveCredentialHeaders, resolvedRemoteEndpoint } = credentials;
   const { resolveVercelCredentialHeaders, vercelGrantForConnection } = vercel;
   const { assertConnectorConnectionSetupEnabled } = setupPolicy;
   async function remoteTools(
@@ -77,14 +77,16 @@ export function createToolCatalogDiscovery(db: Db, { now, audit, secrets, creden
       ...(await resolveCredentialHeaders(connection, actor, { catalogGrantId })),
     };
     if (connection.config.sourceTemplateKey === "google-workspace" && !workspaceEndpoint) {
-      const grant = await vaultGrantForConnection(connection, actor);
+      const grant = catalogGrantId
+        ? await selectedAgentCatalogGrant(connection, catalogGrantId)
+        : await vaultGrantForConnection(connection, actor);
       const scopes = googleWorkspaceGrantedScopes(grant);
       const services = (Object.keys(GOOGLE_WORKSPACE_SERVICES) as GoogleWorkspaceService[])
         .filter((service) => googleWorkspaceServiceGranted(service, scopes));
       // One credential authority, no child connections or implied service grants.
       const catalogs = await Promise.allSettled(services.map(async (service) => {
         const profile = GOOGLE_WORKSPACE_CONNECTOR_PROFILES[GOOGLE_WORKSPACE_SERVICES[service]];
-        const tools = await remoteTools(connection, headers, actor, profile.serverUrl);
+        const tools = await remoteTools(connection, headers, actor, profile.serverUrl, unavailableServices, catalogGrantId);
         return tools.map((tool) => ({ ...tool, name: googleWorkspaceToolName(service, tool.name) }))
           .filter((tool) => isGoogleWorkspaceToolGranted(tool.name, scopes));
       }));
@@ -96,7 +98,9 @@ export function createToolCatalogDiscovery(db: Db, { now, audit, secrets, creden
           action: "tool_connection.catalog_refresh", outcome: "failure", actor,
           reasonCode: "google_workspace_service_unavailable", details: { service } });
       }
-      const currentGrant = await vaultGrantForConnection(connection, actor);
+      const currentGrant = catalogGrantId
+        ? await selectedAgentCatalogGrant(connection, catalogGrantId)
+        : await vaultGrantForConnection(connection, actor);
       if (!currentGrant) throw unprocessable("OAuth authorization must be reconnected", { code: "oauth_reauthorization_required" });
       if (catalogs.length > 0 && catalogs.every((catalog) => catalog.status === "rejected")) {
         throw new HttpError(502, `Google services unavailable: ${unavailableServices.join(", ")}. Retry refreshing actions.`,
