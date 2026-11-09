@@ -465,6 +465,7 @@ export {
   issueThreadInteractionEffectiveResolverPolicySourceSchema,
   issueThreadInteractionContinuationPolicySchema,
   connectionIntentPhaseSchema,
+  connectionIntentOAuthFailureSchema,
   connectionIntentPayloadSchema,
   connectionIntentResultSchema,
   suggestedTaskDraftSchema,

@@ -1155,6 +1155,23 @@ export const connectionIntentPhaseSchema = z.enum([
   "authorizing",
   "needs_retry",
 ]);
+const githubRecoveryUrlSchema = z.string().max(2048).refine((value) => {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && url.hostname.toLowerCase() === "github.com"
+      && !url.username && !url.password && !url.port;
+  } catch {
+    return false;
+  }
+}, "Recovery links must be public GitHub HTTPS URLs");
+export const connectionIntentOAuthFailureSchema = z.discriminatedUnion("code", [
+  z.object({
+    code: z.literal("github_installation_required"),
+    installationUrl: githubRecoveryUrlSchema.optional(),
+    managementUrl: githubRecoveryUrlSchema.optional(),
+  }).strict(),
+  z.object({ code: z.literal("oauth_callback_failed") }).strict(),
+]);
 const connectionIntentBrandAssetSchema = z
   .string()
   .max(2048)
@@ -1190,6 +1207,7 @@ export const connectionIntentPayloadSchema = z
     requestingAgentId: z.string().guid(),
     requestingAgentName: z.string().trim().min(1).max(160),
     phase: connectionIntentPhaseSchema,
+    oauthFailure: connectionIntentOAuthFailureSchema.optional(),
   })
   .strict();
 
