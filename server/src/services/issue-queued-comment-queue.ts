@@ -4,6 +4,8 @@ import type { IssueComment, IssueQueuedCommentQueue } from "@paperclipai/shared"
 const QUEUE_CONTEXT_KEY = "_paperclipWakeContext";
 const QUEUE_IDS_KEY = "wakeCommentIds";
 
+export const QUEUED_COMMENT_INTERRUPT_DELIVERY_STATUSES = ["todo", "in_progress", "in_review", "blocked"];
+
 function record(value: unknown): Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? value as Record<string, unknown>

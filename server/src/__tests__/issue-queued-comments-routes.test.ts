@@ -680,6 +680,66 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
     await request(client).post(`/api/issues/${seeded.issueId}/queued-comments/interrupt`).send(body).expect(409);
   });
 
+  it.each(["done", "cancelled", "reassigned"] as const)(
+    "does not retry a parked interrupt after its task is %s",
+    async (scenario) => {
+      const seeded = await seedQueue();
+      await db.update(agents).set({ adapterType: "claude_local" }).where(eq(agents.id, seeded.agentId));
+      await db.update(heartbeatRuns).set({ runtimeMode: "legacy", status: "succeeded", finishedAt: new Date() })
+        .where(eq(heartbeatRuns.id, seeded.runId));
+      const successorAgentId = randomUUID();
+      if (scenario === "reassigned") {
+        await db.insert(agents).values({ id: successorAgentId, companyId: seeded.companyId,
+          name: "New assignee", role: "engineer", status: "idle", adapterType: "claude_local",
+        });
+      }
+      await db.update(issues).set({ executionRunId: null,
+        ...(scenario === "reassigned" ? { assigneeAgentId: successorAgentId } : { status: scenario }),
+      }).where(eq(issues.id, seeded.issueId));
+      const [originalWake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, seeded.wakeId));
+      await db.update(agentWakeupRequests).set({ payload: { ...originalWake.payload,
+        queuedCommentInterrupt: { actorId: "other-operator", requestedAt: new Date().toISOString() },
+      } }).where(eq(agentWakeupRequests.id, seeded.wakeId));
+      const originalComments = await db.select({ id: issueComments.id, body: issueComments.body })
+        .from(issueComments).where(eq(issueComments.issueId, seeded.issueId));
+
+      for (let sweep = 0; sweep < 3; sweep += 1) {
+        await db.update(agentWakeupRequests).set({ updatedAt: new Date(0) })
+          .where(eq(agentWakeupRequests.id, seeded.wakeId));
+        await heartbeatService(db).resumeQueuedRuns();
+        const [wake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, seeded.wakeId));
+        expect(wake.status).toBe(scenario === "reassigned" ? "deferred_issue_execution" : "cancelled");
+        if (scenario === "reassigned") expect(wake.updatedAt.getTime()).toBe(0);
+        else {
+          expect(wake.finishedAt).toBeInstanceOf(Date);
+          expect(wake.error).toMatch(/terminal task/);
+        }
+        expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.reason, "issue_state_guard_mismatch")))
+          .toHaveLength(0);
+        expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, seeded.companyId)))
+          .toHaveLength(1);
+        expect(await db.select({ id: issueComments.id, body: issueComments.body })
+          .from(issueComments).where(eq(issueComments.issueId, seeded.issueId))).toEqual(originalComments);
+      }
+      if (scenario === "reassigned") {
+        await db.update(agents).set({ runtimeConfig: { heartbeat: { maxConcurrentRuns: 1 } } })
+          .where(eq(agents.id, seeded.agentId));
+        await db.insert(heartbeatRuns).values({ companyId: seeded.companyId, agentId: seeded.agentId,
+          status: "running", contextSnapshot: { issueId: randomUUID() },
+        });
+        await db.update(issues).set({ assigneeAgentId: seeded.agentId }).where(eq(issues.id, seeded.issueId));
+        await db.update(agentWakeupRequests).set({ updatedAt: new Date(0) })
+          .where(eq(agentWakeupRequests.id, seeded.wakeId));
+        await heartbeatService(db).resumeQueuedRuns();
+        const [wake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, seeded.wakeId));
+        expect(wake.status).toBe("coalesced");
+        const [successor] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, wake.runId!));
+        expect(successor).toMatchObject({ agentId: seeded.agentId, status: "queued" });
+        expect(successor.contextSnapshot?.wakeCommentIds).toEqual(seeded.commentIds);
+      }
+    },
+  );
+
   it.each([
     ["other", "running"], ["other", "queued"], ["other", "scheduled_retry"],
     ["same", "running"], ["same", "queued"], ["same", "scheduled_retry"],

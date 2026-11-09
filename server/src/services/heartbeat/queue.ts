@@ -103,6 +103,7 @@ import { logger } from "../../middleware/logger.js";
 import { publishLiveEvent } from "../live-events.js";
 import { allocateHeartbeatRunEventSeq } from "../heartbeat-run-events.js";
 import {
+  QUEUED_COMMENT_INTERRUPT_DELIVERY_STATUSES,
   queuedCommentIdsFromWakePayload,
   queuedCommentIdsFromRunContext,
   withQueuedCommentIdsInWakePayload,
@@ -1986,10 +1987,16 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
     await resumeExecutionWaitComments();
     const cutoff = await getWorktreeExecutionCutoff();
     const pendingInterrupts = await db.select({ id: agentWakeupRequests.id, companyId: agentWakeupRequests.companyId })
-      .from(agentWakeupRequests).innerJoin(companies, eq(companies.id, agentWakeupRequests.companyId))
+      .from(agentWakeupRequests)
+      .innerJoin(issues, and(eq(issues.companyId, agentWakeupRequests.companyId),
+        sql`${issues.id}::text = ${agentWakeupRequests.payload}->>'issueId'`))
+      .innerJoin(companies, eq(companies.id, agentWakeupRequests.companyId))
       .where(and(eq(agentWakeupRequests.status, "deferred_issue_execution"),
         eq(companies.status, "active"),
         sql`${agentWakeupRequests.payload}->'queuedCommentInterrupt' is not null`,
+        or(inArray(issues.status, ["done", "cancelled"]),
+          and(eq(issues.assigneeAgentId, agentWakeupRequests.agentId),
+            inArray(issues.status, QUEUED_COMMENT_INTERRUPT_DELIVERY_STATUSES))),
         lte(agentWakeupRequests.updatedAt, new Date(Date.now() - 30_000)),
         cutoff ? gte(agentWakeupRequests.requestedAt, cutoff) : undefined))
       .orderBy(asc(agentWakeupRequests.updatedAt)).limit(50);
