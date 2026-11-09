@@ -17,12 +17,15 @@ import {
   caseHandoffs,
   cases,
   companies,
+  companyMemberships,
+  companySkills,
   createDb,
   documentRevisions,
   documents,
   environmentLeases,
   environments,
   heartbeatRuns,
+  heartbeatRunEvents,
   issueComments,
   issueInboxArchives,
   issueRecoveryActions,
@@ -170,6 +173,7 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     await db.delete(environmentLeases);
     await db.delete(activityLog);
     await db.delete(costEvents);
+    await db.delete(heartbeatRunEvents);
     await db.delete(heartbeatRuns);
     await db.delete(agentWakeupRequests);
     await db.delete(environments);
@@ -177,6 +181,8 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     await db.delete(issues);
     await db.delete(agentRuntimeState);
     await db.delete(agents);
+    await db.delete(companySkills);
+    await db.delete(companyMemberships);
     await db.delete(companies);
     await db.delete(authUsers);
   });
@@ -2074,11 +2080,15 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     const responsibleUserId = randomUUID();
     await db.insert(authUsers).values({ id: responsibleUserId, name: "Recovery operator",
       email: `${responsibleUserId}@example.test`, emailVerified: true, createdAt: new Date(), updatedAt: new Date() });
+    await db.insert(companyMemberships).values({ companyId, principalType: "user", principalId: responsibleUserId,
+      status: "active", membershipRole: "member" });
     await db.update(companies).set({ defaultResponsibleUserId: responsibleUserId }).where(eq(companies.id, companyId));
     const runId = randomUUID();
     await seedHeartbeatRun({ companyId, agentId: coderId, runId, issueId: sourceIssueId, status: "cancelled" });
-    await db.update(agents).set({ runtimeConfig: { heartbeat: { maxConcurrentRuns: 1 } } }).where(eq(agents.id, coderId));
-    await seedHeartbeatRun({ companyId, agentId: coderId, runId: randomUUID(), status: "running" });
+    await db.update(agents).set({ runtimeConfig: { heartbeat: { maxConcurrentRuns: 1 } },
+      adapterType: "process", adapterConfig: { command: process.execPath, args: ["-e", "process.exit(0)"] } }).where(eq(agents.id, coderId));
+    const occupiedRunId = randomUUID();
+    await seedHeartbeatRun({ companyId, agentId: coderId, runId: occupiedRunId, status: "running" });
     await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, sourceIssueId));
     const actions = await db.insert(issueRecoveryActions).values([
       "uncertain_external_action", "provider_failure_meaning_unverified",
@@ -2112,7 +2122,24 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     const wakes = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.idempotencyKey,
       `execution-reconciliation:${actions[0]!.id}`));
     expect(wakes).toHaveLength(1);
-  });
+    expect(await request(app).get(`/api/issues/${sourceIssueId}`).expect(200).then(({ body }) => body.executionBlocker)).toBeNull();
+    await db.update(heartbeatRuns).set({ status: "succeeded", finishedAt: new Date() }).where(eq(heartbeatRuns.id, occupiedRunId));
+    await deliverReconciledExecutions(db, heartbeatService(db, { runtimeEnv: {} }).wakeup);
+    const successors = await db.select().from(heartbeatRuns).where(and(
+      eq(heartbeatRuns.companyId, companyId), eq(heartbeatRuns.retryOfRunId, runId),
+    ));
+    expect(successors).toHaveLength(1);
+    expect(successors[0]).toMatchObject({ agentId: coderId, status: "queued", contextSnapshot: { issueId: sourceIssueId } });
+    const heartbeat = heartbeatService(db, { runtimeEnv: {} });
+    await heartbeat.resumeQueuedRunsForAgent(companyId, coderId);
+    await heartbeat.drainActiveRunExecutions();
+    const [continued] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, successors[0]!.id));
+    expect(continued!.startedAt).not.toBeNull();
+    expect(continued!.status).toBe("succeeded");
+    expect(await db.select().from(heartbeatRuns).where(and(
+      eq(heartbeatRuns.companyId, companyId), eq(heartbeatRuns.retryOfRunId, runId),
+    ))).toHaveLength(1);
+  }, 30_000);
 
   it.each(["changed owner", "live process"])("retains a cancelled-run hold when the %s makes reconciliation unsafe", async (reason) => {
     const { companyId, coderId, managerId, sourceIssueId } = await seedCompany();

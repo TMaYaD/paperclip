@@ -7825,7 +7825,7 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
           )}
           {resolvedDetailTab === "chat" && (
             <CancelledRunReconciliation key={`${issue.id}:${issue.executionBlocker?.runId ?? "none"}`} className={shellSectionClass} blocker={issue.executionBlocker}
-              issueId={issueId!} canResolve={canResolveBoardRecoveryAction}
+              issueId={issue.id} canResolve={canResolveBoardRecoveryAction}
               onResolved={() => {
                 void queryClient.invalidateQueries({ queryKey: queryKeys.issues.detail(issueId!) });
                 void queryClient.invalidateQueries({ queryKey: queryKeys.issues.activity(issueId!) });
