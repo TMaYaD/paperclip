@@ -2671,6 +2671,19 @@ describe("IssueDetail", () => {
     mockIssuesApi.resolveRecoveryAction.mockReset();
   });
 
+  it("shows cancelled-run reconciliation when the retained hold has no active recovery action", async () => {
+    mockAuthApi.getSession.mockResolvedValue({ session: { userId: "operator" }, user: { id: "operator" } });
+    mockIssuesApi.get.mockResolvedValue(createIssue({
+      status: "blocked", activeRecoveryAction: null, interruption: null,
+      executionBlocker: { recoveryActionId: "retained-action", runId: "run-1", agentId: "agent-1",
+        cause: "uncertain_external_action", nextAction: "Inspect the run.", runStatus: "cancelled",
+        canRetry: false, canContinue: false },
+    }));
+    await act(async () => renderIssueView());
+    await flushReact(); await flushReact();
+    expect(Array.from(container.querySelectorAll("button")).some((button) => button.textContent === "Reconcile")).toBe(true);
+  });
+
   it.each(["success", "failure", "pending question"])("connects the inline disposition retry to current state (%s)", async outcome => {
     const fail = outcome === "failure";
     const actionId = "recovery-action-inline";

@@ -2069,6 +2069,73 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     expect((await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action!.id)))[0]).toEqual(recorded);
   });
 
+  it("reconciles two cancelled-run holds with one continuation owner", async () => {
+    const { companyId, coderId, sourceIssueId } = await seedCompany();
+    const responsibleUserId = randomUUID();
+    await db.insert(authUsers).values({ id: responsibleUserId, name: "Recovery operator",
+      email: `${responsibleUserId}@example.test`, emailVerified: true, createdAt: new Date(), updatedAt: new Date() });
+    await db.update(companies).set({ defaultResponsibleUserId: responsibleUserId }).where(eq(companies.id, companyId));
+    const runId = randomUUID();
+    await seedHeartbeatRun({ companyId, agentId: coderId, runId, issueId: sourceIssueId, status: "cancelled" });
+    await db.update(agents).set({ runtimeConfig: { heartbeat: { maxConcurrentRuns: 1 } } }).where(eq(agents.id, coderId));
+    await seedHeartbeatRun({ companyId, agentId: coderId, runId: randomUUID(), status: "running" });
+    await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, sourceIssueId));
+    const actions = await db.insert(issueRecoveryActions).values([
+      "uncertain_external_action", "provider_failure_meaning_unverified",
+    ].map((cause) => ({
+      companyId, sourceIssueId, kind: "active_run_watchdog" as const, status: "resolved" as const,
+      outcome: "blocked" as const, ownerType: "board" as const, returnOwnerAgentId: coderId,
+      cause, fingerprint: `${runId}:${cause}`, nextAction: "Record observed outcome.",
+      evidence: { runId, automaticRecovery: { replay: "blocked", actionOutcome: "unknown" } },
+    }))).returning();
+    const app = createApp();
+    const decision = { runId, providerStopped: true, actionOutcome: "mixed",
+      outcomeEvidence: "Provider receipts show one action completed and another was not performed." };
+    for (const [index, action] of actions.entries()) {
+      await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send({
+        actionId: action.id, outcome: "restored", sourceIssueStatus: "todo", executionReconciliation: decision,
+      }).expect(200);
+      if (index === 0) await deliverReconciledExecutions(db, heartbeatService(db, { runtimeEnv: {} }).wakeup);
+    }
+    await deliverReconciledExecutions(db, heartbeatService(db, { runtimeEnv: {} }).wakeup);
+    await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send({
+      actionId: actions[0]!.id, outcome: "restored", sourceIssueStatus: "todo", executionReconciliation: decision,
+    }).expect(200);
+    const recorded = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, sourceIssueId));
+    expect(recorded).toHaveLength(2);
+    expect(recorded.every((row) => row.status === "resolved" && !row.evidence.automaticRecovery)).toBe(true);
+    expect(recorded.every((row) => (row.evidence.executionReconciliation as { runId?: string })?.runId === runId)).toBe(true);
+    expect(recorded.map((row) => row.evidence.continuationDelivery).sort()).toEqual(["covered", "delivered"]);
+    const wake = vi.fn(async () => null);
+    await deliverReconciledExecutions(db, wake as never);
+    expect(wake).not.toHaveBeenCalled();
+    const wakes = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.idempotencyKey,
+      `execution-reconciliation:${actions[0]!.id}`));
+    expect(wakes).toHaveLength(1);
+  });
+
+  it.each(["changed owner", "live process"])("retains a cancelled-run hold when the %s makes reconciliation unsafe", async (reason) => {
+    const { companyId, coderId, managerId, sourceIssueId } = await seedCompany();
+    const runId = randomUUID();
+    await seedHeartbeatRun({ companyId, agentId: coderId, runId, issueId: sourceIssueId, status: "cancelled" });
+    await db.update(issues).set({ status: "blocked", ...(reason === "changed owner" ? { assigneeAgentId: managerId } : {}) })
+      .where(eq(issues.id, sourceIssueId));
+    if (reason === "live process") await db.update(heartbeatRuns).set({ processPid: process.pid }).where(eq(heartbeatRuns.id, runId));
+    const [action] = await db.insert(issueRecoveryActions).values({
+      companyId, sourceIssueId, kind: "active_run_watchdog", status: "resolved", outcome: "blocked",
+      ownerType: "board", returnOwnerAgentId: coderId, cause: "uncertain_external_action", fingerprint: runId,
+      nextAction: "Preserve recorded work without replay.",
+      evidence: { runId, automaticRecovery: { replay: "blocked", actionOutcome: "unknown" } },
+    }).returning();
+    await request(createApp()).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send({
+      actionId: action!.id, outcome: "restored", sourceIssueStatus: "todo",
+      executionReconciliation: { runId, providerStopped: true, actionOutcome: "mixed",
+        outcomeEvidence: "Provider receipts establish what happened before cancellation." },
+    }).expect(409);
+    const [retained] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action!.id));
+    expect(retained!.evidence.automaticRecovery).toMatchObject({ replay: "blocked" });
+  });
+
   async function seedReconciledDelivery() {
     const fixture = await seedCompany();
     const { companyId, coderId, sourceIssueId } = fixture;
