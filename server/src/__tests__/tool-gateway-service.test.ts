@@ -12,6 +12,8 @@ import {
   companies,
   companySecretBindings,
   companySecrets,
+  userSecretDefinitions,
+  userSecretDeclarations,
   companyMemberships,
   toolConnectionInstalls,
   issueComments,
@@ -222,6 +224,8 @@ describeEmbeddedPostgres("tool gateway service", () => {
     await db.delete(toolConnections);
     await db.delete(toolApplications);
     await db.delete(companySecrets);
+    await db.delete(userSecretDeclarations);
+    await db.delete(userSecretDefinitions);
     await db.delete(toolPolicies);
     await db.delete(heartbeatRuns);
     await db.delete(issues);
@@ -1628,18 +1632,43 @@ describeEmbeddedPostgres("tool gateway service", () => {
 
   it("keeps managed GitHub personal identity even under a legacy shared policy", async () => {
     const { company, agent, issue, run } = await createRunFixture(db);
-    const { connection } = await createRemoteMcpToolFixture(db, company.id);
-    await db.update(toolConnections).set({ authKind: "oauth", credentialSource: "paperclip_vault",
-      config: { ...connection.config, sourceTemplateKey: "github" },
-    }).where(eq(toolConnections.id, connection.id));
-    await db.insert(toolConnectionInstalls).values({ companyId: company.id,
-      connectionId: connection.id, targetType: "agent", targetId: agent.id });
+    const first = await createRemoteMcpToolFixture(db, company.id);
+    await db.update(toolApplications).set({ name: "Remote MCP A" }).where(eq(toolApplications.id, first.application.id));
+    const connections = [first.connection, (await createRemoteMcpToolFixture(db, company.id)).connection];
     await db.insert(companyMemberships).values(["A", "B"].map(principalId => ({ companyId: company.id,
       principalType: "user", principalId, status: "active", membershipRole: "member" })));
-    const grants = await db.insert(connectionGrants).values(["A", "B"].map(subjectUserId => ({
-      companyId: company.id, connectionId: connection.id, kind: "user", subjectUserId,
-      status: "active", credentialSecretRefs: [],
-    }))).returning();
+    const personalGrants = [];
+    for (const [index, subjectUserId] of ["A", "B"].entries()) {
+      const connection = connections[index]!;
+      await db.update(toolConnections).set({ authKind: "oauth", credentialSource: "paperclip_vault",
+        config: { ...connection.config, sourceTemplateKey: "github" },
+      }).where(eq(toolConnections.id, connection.id));
+      await db.insert(toolConnectionInstalls).values({ companyId: company.id,
+        connectionId: connection.id, targetType: "agent", targetId: agent.id });
+      const definitionKey = `github_personal_${randomUUID().replace(/-/g, "")}`;
+      const [definition] = await db.insert(userSecretDefinitions).values({
+        companyId: company.id, key: definitionKey, name: `${subjectUserId} GitHub token`,
+      }).returning();
+      const secret = await secretService(db).createCurrentUserSecretValue(company.id, subjectUserId, {
+        definitionId: definition!.id, value: `token-${subjectUserId}`,
+      });
+      await db.insert(userSecretDeclarations).values({
+        companyId: company.id, userSecretDefinitionId: definition!.id,
+        targetType: "tool_connection", targetId: connection.id,
+        configPath: "oauth.access_token", envKey: "GITHUB_TOKEN",
+      });
+      const [personalGrant] = await db.insert(connectionGrants).values({
+        companyId: company.id, connectionId: connection.id, kind: "user", subjectUserId,
+        status: "active",
+        credentialSecretRefs: [{ secretId: secret.id, configPath: "oauth.access_token", versionSelector: "latest" }],
+        providerTenant: { github: {
+          userId: subjectUserId, login: subjectUserId, installationCount: 1,
+          repositoryCount: 1, repositorySelection: "selected",
+          installationIds: ["1"], installationOwnerLogins: [subjectUserId],
+        } },
+      }).returning();
+      personalGrants.push(personalGrant!);
+    }
     await initializeRunIdentity(db, { companyId: company.id, runId: run.id, issueId: issue.id,
       responsibleUserId: "A", cause: "instruction" });
     await db.insert(toolPolicies).values(readPolicyRow(company, "Allow reads"));
@@ -1665,7 +1694,7 @@ describeEmbeddedPostgres("tool gateway service", () => {
       }
       expect((await gateway.executeTool({ sessionToken: session.token, tool: tool.name, parameters: {} })).status).toBe("completed");
     }
-    expect(resolvedGrants).toEqual([grants[0].id, grants[1].id, grants[0].id]);
+    expect(resolvedGrants).toEqual([personalGrants[0].id, personalGrants[1].id, personalGrants[0].id]);
     await db.delete(companyMemberships).where(eq(companyMemberships.companyId, company.id));
     await expect(gateway.executeTool({ sessionToken: session.token, tool: tool.name, parameters: {} }))
       .rejects.toMatchObject({ reasonCode: "grant_owner_membership_inactive" });
