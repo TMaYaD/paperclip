@@ -155,6 +155,30 @@ function registerModuleMocks() {
   }));
 }
 
+let agentRoutes: typeof import("../routes/agents.js")["agentRoutes"];
+let errorHandler: typeof import("../middleware/index.js")["errorHandler"];
+
+vi.resetModules();
+vi.doUnmock("../services/agents.js");
+vi.doUnmock("../services/heartbeat.js");
+vi.doUnmock("../services/index.js");
+vi.doUnmock("../services/instance-settings.js");
+vi.doUnmock("../services/issues.js");
+vi.doUnmock("../adapters/index.js");
+vi.doUnmock("../routes/agents.js");
+vi.doUnmock("../routes/authz.js");
+vi.doUnmock("../middleware/index.js");
+registerModuleMocks();
+// Vitest tracks factory-mock resolution in one shared call stack. Importing
+// these graphs concurrently can drop the services/index factory mock and
+// accidentally run real DB-backed activity logging against this test stub.
+({ agentRoutes } = await vi.importActual<
+  typeof import("../routes/agents.js")
+>("../routes/agents.js"));
+({ errorHandler } = await vi.importActual<
+  typeof import("../middleware/index.js")
+>("../middleware/index.js"));
+
 async function createApp(
   db: Record<string, unknown> = {},
   actor: Record<string, unknown> = {
@@ -166,15 +190,6 @@ async function createApp(
   },
   options: { chatRunRetries?: typeof mockChatRunRetries } = {},
 ) {
-  // Vitest tracks factory-mock resolution in one shared call stack. Importing
-  // these graphs concurrently can drop the services/index factory mock and
-  // accidentally run real DB-backed activity logging against this test stub.
-  const { agentRoutes } = await vi.importActual<
-    typeof import("../routes/agents.js")
-  >("../routes/agents.js");
-  const { errorHandler } = await vi.importActual<
-    typeof import("../middleware/index.js")
-  >("../middleware/index.js");
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => {
@@ -290,17 +305,6 @@ describe("agent live run routes", () => {
     expect(mockRunSecretRedactionRegistry.redactForRuns).toHaveBeenCalled();
   });
   beforeEach(() => {
-    vi.resetModules();
-    vi.doUnmock("../services/agents.js");
-    vi.doUnmock("../services/heartbeat.js");
-    vi.doUnmock("../services/index.js");
-    vi.doUnmock("../services/instance-settings.js");
-    vi.doUnmock("../services/issues.js");
-    vi.doUnmock("../adapters/index.js");
-    vi.doUnmock("../routes/agents.js");
-    vi.doUnmock("../routes/authz.js");
-    vi.doUnmock("../middleware/index.js");
-    registerModuleMocks();
     vi.clearAllMocks();
     mockChatRunRetries.prepareFailedChatRunRetry.mockReset();
     mockChatRunRetries.processFailedChatRunRetry.mockReset();
