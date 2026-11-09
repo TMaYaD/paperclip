@@ -8697,6 +8697,27 @@ describeEmbeddedPostgres("tool access service", () => {
     const [deniedSaved] = await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.id, interaction.id));
     expect(deniedSaved.payload).toMatchObject({ phase: "needs_retry" });
     expect(deniedSaved.payload.oauthFailure).toBeUndefined();
+    await connectionIntentService(db).updatePhase(interaction.id, "authorizing", userId);
+    const providerErrorStart = await service.startOAuth(company.id, connected.connectionId, {
+      redirectUri: "https://paperclip.example/api/tools/oauth/cloud-connector/callback", actor,
+      subjectUserId: userId, interactionId: interaction.id,
+    });
+    const providerError = await request(app).get("/api/tools/oauth/cloud-connector/callback")
+      .query({ state: new URL(providerErrorStart.authorizationUrl).searchParams.get("state"),
+        error: "server_error", error_description: "provider-secret-message" })
+      .set("accept", "text/html");
+    expect(providerError.status, providerError.text).toBe(200);
+    expect(providerError.text).toContain('"outcome":"failed"');
+    expect(providerError.text).not.toContain("provider-secret-message");
+    const [providerErrorSaved] = await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.id, interaction.id));
+    expect(providerErrorSaved).toMatchObject({ status: "pending", payload: {
+      phase: "needs_retry", oauthFailure: { code: "oauth_callback_failed" },
+    } });
+    expect(JSON.stringify(providerErrorSaved.payload)).not.toContain("provider-secret-message");
+    const providerErrorFailures = await db.select().from(activityLog).where(and(
+      eq(activityLog.entityId, connected.connectionId), eq(activityLog.action, "tool_app.oauth_failed")));
+    expect(providerErrorFailures.at(-1)?.details).toMatchObject({ code: "oauth_callback_failed" });
+    expect(JSON.stringify(providerErrorFailures)).not.toContain("provider-secret-message");
     const jsonStart = await service.startOAuth(company.id, connected.connectionId, {
       redirectUri: "https://paperclip.example/api/tools/oauth/cloud-connector/callback", actor,
       subjectUserId: userId, interactionId: interaction.id,

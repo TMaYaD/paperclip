@@ -1214,10 +1214,11 @@ function connectorEnrollmentPrincipal(req: Request): string {
         ? callbackError.details as Record<string, unknown>
         : null;
       const denied = details?.code === "oauth_authorization_denied";
-      // Denial consumes the state before reporting it. Other missing states
-      // mean the credential transaction committed; later delivery failures
-      // must not be reported as failed authorization.
-      if (!denied && !await svc.peekOAuthState(state)) throw callbackError;
+      // Provider errors consume state before reporting failure. For other
+      // missing states, the credential transaction may have committed, so a
+      // later delivery error must not be reported as failed authorization.
+      const terminalProviderError = denied || details?.code === "paperclip_cloud_connector_failed";
+      if (!terminalProviderError && !await svc.peekOAuthState(state)) throw callbackError;
       const code = denied ? "oauth_authorization_denied"
         : details?.code === "github_installation_required" ? "github_installation_required" : "oauth_callback_failed";
       await logActivity(db, {
