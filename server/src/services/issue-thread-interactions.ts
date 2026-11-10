@@ -2755,6 +2755,7 @@ export function issueThreadInteractionService(
       interactionId: string,
       phase: ConnectionIntentInteraction["payload"]["phase"],
       actor: InteractionActor,
+      oauthFailure?: ConnectionIntentInteraction["payload"]["oauthFailure"],
     ) => {
       const current = await getPendingInteractionForResolution({
         issue,
@@ -2767,9 +2768,14 @@ export function issueThreadInteractionService(
       }
       assertInteractionResolutionAllowed(current, actor);
       const payload = connectionIntentPayloadSchema.parse(current.payload);
+      const nextPayload = connectionIntentPayloadSchema.parse({
+        ...payload,
+        phase,
+        oauthFailure: phase === "needs_retry" ? oauthFailure : undefined,
+      });
       const [updated] = await db
         .update(issueThreadInteractions)
-        .set({ payload: { ...payload, phase }, updatedAt: now() })
+        .set({ payload: nextPayload, updatedAt: now() })
         .where(
           and(
             eq(issueThreadInteractions.id, interactionId),

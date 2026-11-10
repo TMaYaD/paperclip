@@ -1985,6 +1985,7 @@ export {
   issueThreadInteractionKindSchema,
   issueThreadInteractionContinuationPolicySchema,
   connectionIntentPhaseSchema,
+  connectionIntentOAuthFailureSchema,
   connectionIntentPayloadSchema,
   connectionIntentResultSchema,
   suggestedTaskDraftSchema,

@@ -27,6 +27,12 @@ screens. A task request locks agent access to its requester and returns to the
 card after completion; reusing an account must preserve its existing access.
 OAuth popups need a normal sign-in link fallback, and callback messages must be
 verified against durable server state before accepting the request.
+For a failed Cloud connector callback from a pending task card, save only a
+bounded server-authored failure code and validated public GitHub recovery links
+on the pending interaction. The popup is only a refresh signal. The addressed
+operator reads the durable hint after refresh; a new authorization attempt clears
+it. Log the stable failure code under the connection, but do not store provider
+messages, OAuth state, or token material in the hint or activity details.
 
 For chat and email setup, account linking, and ongoing configuration, also follow
 [Chat connector UX](./CHAT-CONNECTOR-UX.md). It covers step navigation, footer

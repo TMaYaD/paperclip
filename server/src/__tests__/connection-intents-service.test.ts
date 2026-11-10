@@ -714,6 +714,17 @@ describeEmbeddedPostgres("connectionIntentService", () => {
     }
   });
 
+  it("stores safe OAuth failure guidance and clears it when authorization restarts", async () => {
+    const service = connectionIntentService(db);
+    const pending = await service.request(claims, "github");
+    const interactionId = pending.interactionId!;
+    const failure = { code: "github_installation_required" as const, installationUrl: "https://github.com/apps/paperclip/installations/new" };
+    await service.updatePhase(interactionId, "needs_retry", claims.responsible_user_id, { oauthFailure: failure });
+    expect((await service.loadIntent(interactionId)).interaction.payload).toMatchObject({ phase: "needs_retry", oauthFailure: failure });
+    await service.updatePhase(interactionId, "authorizing", claims.responsible_user_id);
+    expect((await service.loadIntent(interactionId)).interaction.payload.oauthFailure).toBeUndefined();
+  });
+
 
   it("native authority discovers and requests services on an empty tool snapshot", async () => {
     const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));

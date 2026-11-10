@@ -8,7 +8,7 @@ import {
   RotateCcw,
   XCircle,
 } from "lucide-react";
-import { AI_CONNECTION_CAPABILITIES, aiProviderSchema, type AiAuthMethod, type ConnectionIntentInteraction } from "@paperclipai/shared";
+import { AI_CONNECTION_CAPABILITIES, aiProviderSchema, connectionIntentOAuthFailureSchema, type AiAuthMethod, type ConnectionIntentInteraction } from "@paperclipai/shared";
 import { AgentMailIntentSetup } from "./AgentMailIntentSetup";
 import { connectionIntentsApi } from "@/api/connection-intents";
 import { aiConnectionsApi } from "@/api/ai-connections";
@@ -325,8 +325,11 @@ export function ConnectionIntentInteractionBody({
     );
   }
 
-  const needsRetry = interaction.payload.phase === "needs_retry";
-  const authorizing = interaction.payload.phase === "authorizing";
+  const latestInteraction = setupQuery.data?.interaction?.id === interaction.id
+    ? setupQuery.data.interaction : interaction;
+  const needsRetry = latestInteraction.payload.phase === "needs_retry";
+  const oauthFailure = connectionIntentOAuthFailureSchema.safeParse(latestInteraction.payload.oauthFailure).data;
+  const authorizing = latestInteraction.payload.phase === "authorizing";
 
   if (accessRequest) {
     const busy = completeMutation.isPending || declineMutation.isPending;
@@ -479,11 +482,13 @@ export function ConnectionIntentInteractionBody({
         </div>
 
         {needsRetry ? (
-          <p className="mt-4 flex items-center gap-2 text-sm text-destructive">
+          <div className="mt-4 flex items-center gap-2 text-sm text-destructive">
             <RotateCcw className="h-4 w-4" />
-            Authorization didn’t finish. Your previous choices are safe; try
-            again.
-          </p>
+            <span>{oauthFailure?.code === "github_installation_required"
+              ? <>Install Paperclip and grant at least one repository. Your previous choices are safe; try again.
+                  {oauthFailure.installationUrl ? <> <a className="underline" href={oauthFailure.installationUrl} target="_blank" rel="noopener noreferrer">Install on GitHub</a></> : null}</>
+              : <>Authorization didn’t finish. Your previous choices are safe; try again.</>}</span>
+          </div>
         ) : null}
 
         {isEmail ? setupQuery.isLoading || setupQuery.isError ? <>

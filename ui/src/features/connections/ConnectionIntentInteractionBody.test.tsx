@@ -271,6 +271,22 @@ describe("ConnectionIntentInteractionBody states and audience", () => {
     expect(document.body.textContent).not.toContain("This request is no longer active.");
   });
 
+  it("shows saved GitHub installation guidance after refetch and rejects unsafe links", async () => {
+    const failed = { ...retryConnectionIntentInteraction, id: pendingConnectionIntentInteraction.id, payload: { ...retryConnectionIntentInteraction.payload,
+      oauthFailure: { code: "github_installation_required" as const, installationUrl: "https://github.com/apps/paperclip/installations/new" } } };
+    setupOptionsMock.mockResolvedValue({ interaction: failed, existingConnections: [] });
+    renderBody(pendingConnectionIntentInteraction);
+    await waitForAssertion(() => expect(document.body.textContent).toContain("Install Paperclip and grant at least one repository"));
+    expect(document.querySelector('a[href="https://github.com/apps/paperclip/installations/new"]')).not.toBeNull();
+    setupOptionsMock.mockResolvedValue({ interaction: { ...failed, payload: { ...failed.payload, oauthFailure: {
+      code: "github_installation_required", installationUrl: "https://evil.example/install" } } }, existingConnections: [] });
+    await act(() => root?.unmount()); root = null;
+    queryClient.clear();
+    renderBody(pendingConnectionIntentInteraction);
+    await flush();
+    expect(document.querySelector('a[href="https://evil.example/install"]')).toBeNull();
+  });
+
   it("shows non-addressees only the waiting state and never loads setup", () => {
     renderBody(pendingConnectionIntentInteraction, "other-user");
     expect(document.body.textContent).toContain("Waiting for Carol");
