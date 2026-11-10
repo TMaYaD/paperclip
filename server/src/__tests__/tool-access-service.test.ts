@@ -8682,7 +8682,8 @@ describeEmbeddedPostgres("tool access service", () => {
     expect(JSON.stringify(unknownSaved.payload)).not.toContain("provider-secret-message");
     expect(unknown.text).not.toContain("provider-secret-message");
     const failures = await db.select().from(activityLog).where(and(eq(activityLog.entityId, connected.connectionId), eq(activityLog.action, "tool_app.oauth_failed")));
-    expect(failures.at(-1)?.details).toMatchObject({ code: "oauth_callback_failed" });
+    expect(failures).toHaveLength(2);
+    expect(failures.find((failure) => failure.id !== activity.id)?.details).toMatchObject({ code: "oauth_callback_failed" });
     expect(JSON.stringify(failures)).not.toContain("provider-secret-message");
     await connectionIntentService(db).updatePhase(interaction.id, "authorizing", userId);
     const deniedStart = await service.startOAuth(company.id, connected.connectionId, {
@@ -8697,6 +8698,8 @@ describeEmbeddedPostgres("tool access service", () => {
     const [deniedSaved] = await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.id, interaction.id));
     expect(deniedSaved.payload).toMatchObject({ phase: "needs_retry" });
     expect(deniedSaved.payload.oauthFailure).toBeUndefined();
+    const failureIdsBeforeProviderError = new Set((await db.select().from(activityLog).where(and(
+      eq(activityLog.entityId, connected.connectionId), eq(activityLog.action, "tool_app.oauth_failed")))).map((failure) => failure.id));
     await connectionIntentService(db).updatePhase(interaction.id, "authorizing", userId);
     const providerErrorStart = await service.startOAuth(company.id, connected.connectionId, {
       redirectUri: "https://paperclip.example/api/tools/oauth/cloud-connector/callback", actor,
@@ -8716,7 +8719,9 @@ describeEmbeddedPostgres("tool access service", () => {
     expect(JSON.stringify(providerErrorSaved.payload)).not.toContain("provider-secret-message");
     const providerErrorFailures = await db.select().from(activityLog).where(and(
       eq(activityLog.entityId, connected.connectionId), eq(activityLog.action, "tool_app.oauth_failed")));
-    expect(providerErrorFailures.at(-1)?.details).toMatchObject({ code: "oauth_callback_failed" });
+    expect(providerErrorFailures).toHaveLength(failureIdsBeforeProviderError.size + 1);
+    expect(providerErrorFailures.find((failure) => !failureIdsBeforeProviderError.has(failure.id))?.details)
+      .toMatchObject({ code: "oauth_callback_failed" });
     expect(JSON.stringify(providerErrorFailures)).not.toContain("provider-secret-message");
     const jsonStart = await service.startOAuth(company.id, connected.connectionId, {
       redirectUri: "https://paperclip.example/api/tools/oauth/cloud-connector/callback", actor,
