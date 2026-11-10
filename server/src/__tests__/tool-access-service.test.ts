@@ -8315,6 +8315,64 @@ describeEmbeddedPostgres("tool access service", () => {
     },
   );
 
+  it("rejects installs and finish access outside a dedicated GitHub agent", async () => {
+    const company = await createCompany(db);
+    const actor = { actorType: "user" as const, actorId: "board" };
+    const subject = await createAgent(db, company.id);
+    const other = await createAgent(db, company.id);
+    const githubDefinition = getConnectableAppDefinition("github")!;
+    const previousOwnershipAvailability = githubDefinition.ownershipAvailability;
+    githubDefinition.ownershipAvailability = { ...previousOwnershipAvailability, platform_shared: true };
+    const service = createTestToolAccessService(db, { paperclipCloudConnector: fakeGitHubConnector(company.id, `agent:${subject.id}`) });
+    try {
+    const connected = await service.connectGalleryApp(company.id, {
+      galleryKey: "github", connectionMethodKey: "managed", grantKind: "agent",
+      subjectAgentId: subject.id, name: "Dedicated GitHub",
+    }, actor);
+    const installs = (targetIds: string[]) => ({ installs: targetIds.map((targetId) => ({ targetType: "agent" as const, targetId })) });
+
+    await expect(service.putConnectionInstalls(connected.connectionId, installs([subject.id, other.id]), actor))
+      .rejects.toMatchObject({ status: 422 });
+    await expect(service.putConnectionInstalls(connected.connectionId, { installs: [{ targetType: "company", targetId: company.id }] }, actor))
+      .rejects.toMatchObject({ status: 422 });
+    await expect(service.finishGalleryAppConnection(company.id, connected.connectionId, {
+      enabledCatalogEntryIds: [], askFirstCatalogEntryIds: [], access: "all_agents",
+    }, actor)).rejects.toMatchObject({ status: 422 });
+    await expect(service.finishGalleryAppConnection(company.id, connected.connectionId, {
+      enabledCatalogEntryIds: [], askFirstCatalogEntryIds: [], access: { agentIds: [subject.id, other.id] },
+    }, actor)).rejects.toMatchObject({ status: 422 });
+    expect(await service.listConnectionInstalls(connected.connectionId)).toEqual([]);
+    await expect(service.putConnectionInstalls(connected.connectionId, installs([other.id]), actor))
+      .rejects.toMatchObject({ status: 422 });
+
+    const started = await service.startOAuth(company.id, connected.connectionId, {
+      redirectUri: "https://paperclip.example/api/tools/oauth/cloud-connector/callback", actor, subjectAgentId: subject.id,
+    });
+    expect(started.authorizationUrl).toContain("state=");
+    await expect(service.putConnectionInstalls(connected.connectionId, installs([other.id]), actor))
+      .rejects.toMatchObject({ status: 422 });
+    await expect(service.finishGalleryAppConnection(company.id, connected.connectionId, {
+      enabledCatalogEntryIds: [], askFirstCatalogEntryIds: [], access: { agentIds: [other.id] },
+    }, actor)).rejects.toMatchObject({ status: 422 });
+    await db.delete(toolOauthStates).where(eq(toolOauthStates.connectionId, connected.connectionId));
+    await db.insert(connectionGrants).values({
+      companyId: company.id, connectionId: connected.connectionId, kind: "agent",
+      subjectAgentId: subject.id, credentialSecretRefs: [], status: "active",
+    });
+    await expect(service.putConnectionInstalls(connected.connectionId, installs([other.id]), actor))
+      .rejects.toMatchObject({ status: 422 });
+    await service.putConnectionInstalls(connected.connectionId, installs([subject.id]), actor);
+    await service.finishGalleryAppConnection(company.id, connected.connectionId, {
+      enabledCatalogEntryIds: [], askFirstCatalogEntryIds: [], access: { agentIds: [subject.id] },
+    }, actor);
+    expect((await service.listConnectionInstalls(connected.connectionId)).map((install) => install.targetId)).toEqual([subject.id]);
+    await service.putConnectionInstalls(connected.connectionId, { installs: [] }, actor);
+    expect(await service.listConnectionInstalls(connected.connectionId)).toEqual([]);
+    } finally {
+      githubDefinition.ownershipAvailability = previousOwnershipAvailability;
+    }
+  });
+
   it("creates a fresh personal GitHub identity after a dedicated connection is removed", async () => {
     const company = await createCompany(db);
     const userId = `github-personal-revival-${randomUUID()}`;

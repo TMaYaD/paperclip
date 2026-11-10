@@ -1,6 +1,7 @@
 import { createConnectionCredentialValidation } from "./tool-access/connections/credential-validation.js";
 import { createConnectionGrants } from "./tool-access/connections/grants.js";
 import { createConnectionInstalls } from "./tool-access/connections/installs.js";
+import { assertDedicatedAgentTargets } from "./tool-access/connections/dedicated-agent-access.js";
 import { createConnectionRemoval } from "./tool-access/connections/removal.js";
 import { createToolRemoteHttp } from "./tool-access/remote-http.js";
 import { classifyRisk, normalizeToolDescriptor, type McpToolDescriptor } from "./tool-access/catalog/descriptors.js";
@@ -3136,6 +3137,13 @@ export function toolAccessService(
       const policies = (await db.select().from(toolPolicies).where(eq(toolPolicies.companyId, companyId))).filter((policy) => asRecord(policy.config).connectionId === connection.id);
       return { connection: toConnection(updated), profile: toProfile(profile), profileEntries: details.entries, profileBindings: details.bindings, policies: policies.map(toPolicy) };
     }
+    await assertDedicatedAgentTargets(
+      db,
+      connection,
+      input.access === "all_agents"
+        ? [{ targetType: "company", targetId: companyId }]
+        : input.access.agentIds.map((targetId) => ({ targetType: "agent" as const, targetId })),
+    );
     const enabledIds = [
       ...new Set([
         ...input.enabledCatalogEntryIds,

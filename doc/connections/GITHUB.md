@@ -95,6 +95,9 @@ create account ambiguity. If no grant in that tier is usable, access remains
 unavailable; an unusable dedicated tier does not select a personal grant.
 Agent grants are company-scoped, have exactly one `subjectAgentId`, cannot be
 organization defaults, and are installed only for that agent.
+In GitHub setup, choose one agent for a dedicated account. Choosing another
+replaces the prior choice; an invalid saved choice must be corrected before
+authorization or completion.
 
 For a dedicated-agent connection, **Refresh actions** uses its one active agent
 authorization. A connection manager can run it without signing in again. An

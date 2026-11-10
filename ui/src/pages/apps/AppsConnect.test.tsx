@@ -1186,6 +1186,7 @@ describe("AppsConnect — Connect with a link (M4 frame)", () => {
 
   it("reflects a changed access selection in the stated default", async () => {
     mockParams.appKey = "github";
+    listGalleryMock.mockResolvedValue({ apps: [GITHUB_MANAGED] });
     await render();
     await openAccessAdvanced();
 
@@ -1203,6 +1204,21 @@ describe("AppsConnect — Connect with a link (M4 frame)", () => {
     const radios = Array.from(document.body.querySelectorAll('[role="radio"]'));
     expect(radios.find((r) => r.textContent?.includes("Only agents I choose"))
       ?.getAttribute("aria-checked")).toBe("true");
+    await act(async () => buttonByText("Select agents")?.click());
+    await flushReact();
+    await act(async () => {
+      document.body.querySelector<HTMLElement>('[aria-label="Allow Ada"]')?.click();
+    });
+    await flushReact();
+    await act(async () => {
+      document.body.querySelector<HTMLElement>('[aria-label="Allow Grace"]')?.click();
+    });
+    await flushReact();
+    expect(container.textContent).toContain("available to 2 selected agents");
+    await act(async () => radioContaining("A dedicated account for an agent")?.click());
+    await flushReact();
+    expect(container.textContent).toContain("no agents selected yet");
+    expect(connectAppMock).not.toHaveBeenCalled();
   });
 
   it("returns to the pending skill import when GitHub setup is cancelled", async () => {
@@ -1835,6 +1851,16 @@ describe("AppsConnect — Connect with a link (M4 frame)", () => {
     });
     await flushReact();
     await act(async () => {
+      document.body.querySelector<HTMLElement>('[aria-label="Allow Grace"]')?.click();
+    });
+    await flushReact();
+    expect(container.textContent).toContain("available to 1 selected agent");
+    await act(async () => {
+      document.body.querySelector<HTMLElement>('[aria-label="Allow Ada"]')?.click();
+    });
+    await flushReact();
+    expect(container.textContent).toContain("available to 1 selected agent");
+    await act(async () => {
       buttonByText("Connect with Paperclip")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
     await flushReact();
@@ -1889,6 +1915,76 @@ describe("AppsConnect — Connect with a link (M4 frame)", () => {
       grantKind: "agent",
       subjectAgentId: "agent-1",
     }));
+  });
+
+  it("blocks a restored dedicated selection with two agents before GitHub authorization", async () => {
+    mockSearch.value = "source=github&stage=setup&cloud_connector=enrolled";
+    listGalleryMock.mockResolvedValue({ apps: [GITHUB_MANAGED] });
+    window.sessionStorage.setItem("paperclip.connector-enrollment-access:github", JSON.stringify({
+      companyId: "company-1", grantKind: "agent", installChoice: "specific", agentIds: ["agent-1", "agent-2"],
+    }));
+
+    await render();
+    expect(container.textContent).toContain("Choose exactly one agent");
+    await act(async () => {
+      buttonByText("Continue to GitHub")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flushReact();
+    expect(connectAppMock).not.toHaveBeenCalled();
+    expect(startOAuthMock).not.toHaveBeenCalled();
+    expect(putConnectionInstallsMock).not.toHaveBeenCalled();
+
+    await openAccessAdvanced();
+    await act(async () => {
+      buttonByText("2 agents selected")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flushReact();
+    await act(async () => {
+      document.body.querySelector<HTMLElement>('[aria-label="Allow Grace"]')?.click();
+    });
+    await flushReact();
+    connectAppMock.mockResolvedValueOnce({
+      connectionId: "conn-dedicated", application: { id: "app-github", name: "GitHub" },
+      connection: { id: "conn-dedicated", credentialPolicy: "per_agent" },
+      actions: { readOnly: [], canMakeChanges: [] }, catalog: [], suggestedDefaults: {},
+      auth: { kind: "oauth" },
+    });
+    vi.spyOn(window, "open").mockReturnValue({
+      closed: false, location: { assign: vi.fn() }, focus: vi.fn(), close: vi.fn(),
+    } as unknown as Window);
+    await act(async () => {
+      buttonByText("Continue to GitHub")?.click();
+    });
+    await vi.waitFor(() => expect(startOAuthMock).toHaveBeenCalled());
+    expect(connectAppMock).toHaveBeenCalledWith("company-1", expect.objectContaining({
+      grantKind: "agent", subjectAgentId: "agent-1",
+    }));
+    expect(putConnectionInstallsMock).toHaveBeenCalledWith("conn-dedicated", [
+      { targetType: "agent", targetId: "agent-1" },
+    ]);
+    expect(startOAuthMock).toHaveBeenCalledWith("conn-dedicated", { asCurrentUser: false, asAgentId: "agent-1" });
+  });
+
+  it("retries a dedicated GitHub draft with its saved agent", async () => {
+    const draft = {
+      id: "conn-dedicated", applicationId: "app-github", status: "draft", authKind: "oauth",
+      credentialPolicy: "per_agent", config: {
+        sourceTemplateKey: "github", connectionMethodKey: "managed", connectorSubjectAgentId: "agent-2",
+      }, transportConfig: {},
+    };
+    mockSearch.value = "source=github&resume=conn-dedicated&oauth=failed&code=oauth_callback_failed";
+    listGalleryMock.mockResolvedValue({ apps: [GITHUB_MANAGED] });
+    listApplicationsMock.mockResolvedValue({ applications: [{ id: "app-github", applicationKey: "github", name: "GitHub", status: "draft" }] });
+    listConnectionsMock.mockResolvedValue({ connections: [draft] });
+    getConnectionMock.mockResolvedValue(draft);
+
+    await render();
+    expect(buttonByText("Try again")).toBeTruthy();
+    await act(async () => buttonByText("Try again")?.click());
+    await vi.waitFor(() => expect(startOAuthMock).toHaveBeenCalledWith("conn-dedicated", {
+      asCurrentUser: false, asAgentId: "agent-2",
+    }));
+    expect(connectAppMock).not.toHaveBeenCalled();
   });
 
   it.each([...new Set(Object.values(GOOGLE_WORKSPACE_CONNECTOR_PROFILES).map((profile) => profile.appSlug))]
