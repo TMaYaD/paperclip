@@ -110,7 +110,11 @@ runs the selector above for each live agent, using the signed-in user as
 another one, or no usable identity. The page flags any listed agent that does
 not resolve here. The result is exact only for runs owned by the viewer; runs
 owned by someone else or without an owner can resolve differently, and standing
-delegations are not guessed at. The response contains no credential references.
+delegations are not guessed at. A selected grant counts only if it is also usable
+(complete, with repository access, and an authorized owner). The response
+contains no credential references. Other connections' names and account logins
+follow the grants-list policy: they appear only for the viewer's own personal
+grant or for managers.
 The page also refuses to newly add an agent to a connection dedicated to a
 different agent; legacy bindings stay listed so they can be removed.
 

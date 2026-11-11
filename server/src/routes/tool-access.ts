@@ -1762,11 +1762,17 @@ function connectorEnrollmentPrincipal(req: Request): string {
     if (!connection) return;
     const sourceTemplateKey = (connection.config as Record<string, unknown> | null)?.sourceTemplateKey;
     if (sourceTemplateKey !== "github") throw badRequest("Not a GitHub connection");
-    res.json(await previewGitHubAgentIdentities(db, {
+    const capabilities = await describeConnectionCapabilities(req, connection);
+    const preview = await previewGitHubAgentIdentities(db, {
       companyId: connection.companyId,
       connectionId: connection.id,
       viewerUserId: req.actor.userId ?? null,
-    }));
+      // Same policy as the grants list: only managers read other identities.
+      canViewPrivateIdentities: capabilities.canViewOtherPersonalIdentities,
+    });
+    // Agent grants are hidden from ordinary members in the grants list, so the
+    // dedicated-subject list follows that policy too.
+    res.json(capabilities.canViewOtherPersonalIdentities ? preview : { ...preview, dedicatedAgentIds: [] });
   });
 
   router.put(

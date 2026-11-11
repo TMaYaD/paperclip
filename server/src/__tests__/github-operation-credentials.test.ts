@@ -244,16 +244,22 @@ const support = await getEmbeddedPostgresTestSupport();
       expect(selection.grant?.connectionId).toBe(dedicated.connectionId);
 
       const onPersonal = await previewGitHubAgentIdentities(db, {
-        companyId: input.companyId, connectionId: personal.connectionId, viewerUserId: "A",
+        companyId: input.companyId, connectionId: personal.connectionId, viewerUserId: "A", canViewPrivateIdentities: false,
       });
       expect(onPersonal.agents).toEqual([expect.objectContaining({
         agentId: input.agentId, state: "selected_elsewhere", source: "dedicated",
-        selectedConnectionId: dedicated.connectionId, selectedAccountLogin: "B",
+        selectedConnectionId: null, selectedConnectionName: null, selectedAccountLogin: null,
       })]);
+      const asManager = await previewGitHubAgentIdentities(db, {
+        companyId: input.companyId, connectionId: personal.connectionId, viewerUserId: "A", canViewPrivateIdentities: true,
+      });
+      expect(asManager.agents[0]).toMatchObject({
+        state: "selected_elsewhere", selectedConnectionId: dedicated.connectionId, selectedAccountLogin: "B",
+      });
       expect(onPersonal.dedicatedAgentIds).toEqual([]);
 
       const onDedicated = await previewGitHubAgentIdentities(db, {
-        companyId: input.companyId, connectionId: dedicated.connectionId, viewerUserId: "A",
+        companyId: input.companyId, connectionId: dedicated.connectionId, viewerUserId: "A", canViewPrivateIdentities: false,
       });
       expect(onDedicated.agents[0]).toMatchObject({ state: "selected_here", source: "dedicated" });
       expect(onDedicated.dedicatedAgentIds).toEqual([input.agentId]);
@@ -264,17 +270,53 @@ const support = await getEmbeddedPostgresTestSupport();
       const input = await seed();
       const personal = await grant(input, "A");
       const forA = await previewGitHubAgentIdentities(db, {
-        companyId: input.companyId, connectionId: personal.connectionId, viewerUserId: "A",
+        companyId: input.companyId, connectionId: personal.connectionId, viewerUserId: "A", canViewPrivateIdentities: false,
       });
       expect(forA.agents[0]).toMatchObject({ state: "selected_here", source: "personal" });
       const forB = await previewGitHubAgentIdentities(db, {
-        companyId: input.companyId, connectionId: personal.connectionId, viewerUserId: "B",
+        companyId: input.companyId, connectionId: personal.connectionId, viewerUserId: "B", canViewPrivateIdentities: false,
       });
       expect(forB.agents[0]).toMatchObject({ state: "unavailable" });
       const anonymous = await previewGitHubAgentIdentities(db, {
-        companyId: input.companyId, connectionId: personal.connectionId, viewerUserId: null,
+        companyId: input.companyId, connectionId: personal.connectionId, viewerUserId: null, canViewPrivateIdentities: false,
       });
       expect(anonymous.agents[0]).toMatchObject({ state: "no_context", selectedAccountLogin: null });
+    });
+
+    it("does not present incomplete or zero-access grants as selected, and loads once for any number of agents", async () => {
+      const input = await seed();
+      const personal = await grant(input, "A");
+      const selectedCalls = async () => {
+        const select = vi.spyOn(db, "select");
+        await previewGitHubAgentIdentities(db, {
+          companyId: input.companyId, connectionId: personal.connectionId, viewerUserId: "A", canViewPrivateIdentities: false,
+        });
+        const count = select.mock.calls.length;
+        select.mockRestore();
+        return count;
+      };
+      const oneAgent = await selectedCalls();
+      for (let index = 0; index < 4; index++) {
+        await db.insert(agents).values({
+          companyId: input.companyId, name: `Extra ${index}`, role: "engineer", adapterType: "codex_local",
+        });
+      }
+      expect(await selectedCalls()).toBe(oneAgent);
+
+      await db.update(connectionGrants).set({
+        providerTenant: { github: { userId: "A", login: "A", installationCount: 1, repositoryCount: 0,
+          repositorySelection: "selected", installationIds: ["1"], installationOwnerLogins: ["A"] } },
+      }).where(eq(connectionGrants.id, personal.id));
+      const zeroAccess = await previewGitHubAgentIdentities(db, {
+        companyId: input.companyId, connectionId: personal.connectionId, viewerUserId: "A", canViewPrivateIdentities: false,
+      });
+      expect(zeroAccess.agents.find((row) => row.agentId === input.agentId)?.state).toBe("unavailable");
+
+      await db.update(connectionGrants).set({ credentialSecretRefs: [] }).where(eq(connectionGrants.id, personal.id));
+      const incomplete = await previewGitHubAgentIdentities(db, {
+        companyId: input.companyId, connectionId: personal.connectionId, viewerUserId: "A", canViewPrivateIdentities: false,
+      });
+      expect(incomplete.agents.find((row) => row.agentId === input.agentId)?.state).toBe("unavailable");
     });
 
     it("returns no credential for unconnected users, removed membership, or ambiguous personal accounts", async () => {
