@@ -1,7 +1,7 @@
 import { AgentAvatar } from "@/components/AgentAvatar";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Ban, Check, FlaskConical, Loader2, RefreshCw, Search, ShieldQuestion } from "lucide-react";
-import type { Agent, ToolCatalogEntry, ToolConnectionCapabilities } from "@paperclipai/shared";
+import type { Agent, GitHubAgentIdentitiesResponse, GitHubAgentIdentityPreview, ToolCatalogEntry, ToolConnectionCapabilities } from "@paperclipai/shared";
 import { useSearchParams } from "@/lib/router";
 import { AgentMultiSelect } from "@/components/AgentMultiSelect";
 import { InlineBanner } from "@/components/InlineBanner";
@@ -14,6 +14,12 @@ import { type InstallState } from "@/lib/tool-installs";
 import { QuarantinedActionsReview } from "./SetupPanel";
 import { ActionTestDialog } from "./ActionTestDialog";
 import type { AccessDraft, AppDetailSectionProps } from "./types";
+
+export interface GitHubIdentitiesState {
+  loading: boolean;
+  failed: boolean;
+  data: GitHubAgentIdentitiesResponse | undefined;
+}
 
 type ActionPermission = "off" | "ask" | "allowed";
 type ActionKindFilter = "all" | "read" | "write";
@@ -39,6 +45,7 @@ export function PermissionsPanel({
   capabilities,
   permissionChangeWarning,
   actions,
+  githubIdentities,
 }: Pick<
   AppDetailSectionProps,
   | "appName"
@@ -64,6 +71,8 @@ export function PermissionsPanel({
   actions?: ReactNode;
   /** Supplemental agent settings share the existing connection configuration page. */
   afterAgentAccess?: ReactNode;
+  /** Present only for GitHub connections: which identity each agent would actually use. */
+  githubIdentities?: GitHubIdentitiesState;
 }) {
   const [searchParams] = useSearchParams();
   return (
@@ -75,6 +84,7 @@ export function PermissionsPanel({
         capabilities={capabilities}
         disabled={pending}
         onSave={onSaveAccess}
+        githubIdentities={githubIdentities}
       />
       {afterAgentAccess}
       {actions !== undefined ? actions : <ActionsSection
@@ -106,7 +116,9 @@ function AgentAccessSection({
   capabilities,
   disabled,
   onSave,
+  githubIdentities,
 }: {
+  githubIdentities?: GitHubIdentitiesState;
   agents: Agent[];
   access: AccessDraft;
   install: InstallState;
@@ -122,6 +134,11 @@ function AgentAccessSection({
     : liveAgents;
   const selectedAgents = liveAgents.filter((agent) => access.agentIds.has(agent.id));
   const requiredAgentIds = install.agentIds;
+  const dedicatedAgentIds = new Set(githubIdentities?.data?.dedicatedAgentIds ?? []);
+  // A dedicated account belongs to one agent. Another agent can be listed by a
+  // legacy binding (kept so it can be removed) but must not be newly added.
+  const isForeignToDedicated = (agentId: string) =>
+    dedicatedAgentIds.size > 0 && !dedicatedAgentIds.has(agentId) && !access.agentIds.has(agentId);
 
   return (
     <section className="space-y-4 border-t border-border pt-8">
@@ -170,13 +187,20 @@ function AgentAccessSection({
                 ? "Choose agents"
                 : `${access.agentIds.size} ${access.agentIds.size === 1 ? "agent" : "agents"} selected`}
               emptyMessage="You cannot edit any agents yet."
-              isAgentDisabled={(agent) => requiredAgentIds.has(agent.id)}
-              getDescription={(agent) => requiredAgentIds.has(agent.id) ? "Required by this connection's install setting" : agent.title}
+              isAgentDisabled={(agent) => requiredAgentIds.has(agent.id) || isForeignToDedicated(agent.id)}
+              getDescription={(agent) => requiredAgentIds.has(agent.id)
+                ? "Required by this connection's install setting"
+                : isForeignToDedicated(agent.id)
+                  ? "This GitHub account is dedicated to another agent"
+                  : agent.title}
               onChange={(agentIds) => onSave({
                 mode: "specific",
                 agentIds: new Set([...agentIds, ...requiredAgentIds]),
               })}
             />
+          ) : null}
+          {githubIdentities ? (
+            <GitHubIdentityNotes agents={liveAgents} access={access} state={githubIdentities} />
           ) : null}
         </div>
       ) : access.mode === "all" ? (
@@ -193,7 +217,72 @@ function AgentAccessSection({
           ))}
         </div>
       )}
+      {!canManage && githubIdentities ? (
+        <GitHubIdentityNotes agents={liveAgents} access={access} state={githubIdentities} />
+      ) : null}
     </section>
+  );
+}
+
+function describeGitHubIdentity(preview: GitHubAgentIdentityPreview, agentName: string): string | null {
+  const account = preview.selectedAccountLogin ? `@${preview.selectedAccountLogin}` : "another GitHub account";
+  switch (preview.state) {
+    case "selected_here":
+      return null;
+    case "selected_elsewhere":
+      return `${agentName} will not use this connection. For runs you own it uses ${account}${
+        preview.selectedConnectionName ? ` (${preview.selectedConnectionName})` : ""
+      }. Listing the agent here does not change which GitHub account it uses.`;
+    case "ambiguous":
+      return `${agentName} matches more than one GitHub account, so no account is selected for runs you own.`;
+    case "unavailable":
+      return `${agentName} has no usable GitHub account for runs you own, so this connection does not give it access.`;
+    case "not_installed":
+      return `${agentName} has no GitHub connection installed, so this connection does not give it access.`;
+    case "no_context":
+      return `Which personal GitHub account ${agentName} uses depends on who owns the run; it cannot be previewed here.`;
+  }
+}
+
+function GitHubIdentityNotes({
+  agents,
+  access,
+  state,
+}: {
+  agents: Agent[];
+  access: AccessDraft;
+  state: GitHubIdentitiesState;
+}) {
+  if (state.loading) {
+    return <p className="text-xs text-muted-foreground">Checking which GitHub account each agent uses…</p>;
+  }
+  if (state.failed || !state.data) {
+    return (
+      <InlineBanner tone="warning">
+        Could not check which GitHub account each agent uses. Listed agents may not be able to use this connection.
+      </InlineBanner>
+    );
+  }
+  const previews = new Map(state.data.agents.map((preview) => [preview.agentId, preview]));
+  const listed = agents.filter((agent) => access.mode === "all" || access.agentIds.has(agent.id));
+  const rows = listed.flatMap((agent) => {
+    const preview = previews.get(agent.id);
+    if (!preview) return [];
+    const message = describeGitHubIdentity(preview, agent.name);
+    return message ? [{ agent, message, dedicatedElsewhere: state.data!.dedicatedAgentIds.length > 0 && !state.data!.dedicatedAgentIds.includes(agent.id) }] : [];
+  });
+  return (
+    <div className="space-y-2" data-testid="github-identity-notes">
+      <p className="text-xs text-muted-foreground">
+        Previewed for runs you own. Runs owned by someone else, or started without an owner, can use a different account.
+      </p>
+      {rows.map(({ agent, message, dedicatedElsewhere }) => (
+        <InlineBanner key={agent.id} tone="warning">
+          {message}
+          {dedicatedElsewhere ? " This account has no dedicated grant for this agent." : ""}
+        </InlineBanner>
+      ))}
+    </div>
   );
 }
 

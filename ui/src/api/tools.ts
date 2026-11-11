@@ -63,6 +63,7 @@ import type {
   ConnectionGrantKind,
   ConnectionGrantDelegation,
   ConnectionGrantsResponse,
+  GitHubAgentIdentitiesResponse,
   ToolConnectionCreateCapabilities,
   ToolAppMetadataPreflightResult,
 } from "@paperclipai/shared";
@@ -369,6 +370,8 @@ export const toolsApi = {
   // the UI never rebuilds the permission matrix from `membershipRole`.
   listConnectionGrants: (connectionId: string) =>
     api.get<ConnectionGrantsResponse>(`/tool-connections/${connectionId}/grants`),
+  listGitHubAgentIdentities: (connectionId: string) =>
+    api.get<GitHubAgentIdentitiesResponse>(`/tool-connections/${connectionId}/github-agent-identities`),
   createConnectionGrantDelegation: (connectionId: string, grantId: string, agentId: string) =>
     api.post<ConnectionGrantDelegation>(
       `/tool-connections/${connectionId}/grants/${grantId}/delegations`,

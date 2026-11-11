@@ -62,6 +62,7 @@ import { validate } from "../middleware/validate.js";
 import { getActorInfo, assertBoard, assertCompanyAccess, assertInstanceAdmin, getAccessibleResource, hasCompanyAccess } from "./authz.js";
 import { badRequest, forbidden, HttpError, notFound, unprocessable } from "../errors.js";
 import { accessService, logActivity, toolAccessPolicyService, toolAccessService, vercelConnectIntegrationStatus } from "../services/index.js";
+import { previewGitHubAgentIdentities } from "../services/git-credentials.js";
 import { ToolGatewayHttpError, type ToolGatewayService } from "../services/tool-gateway.js";
 import { RailwayError } from "../services/railway.js";
 import type { VercelConnectClient } from "../services/vercel-connect.js";
@@ -1751,6 +1752,21 @@ function connectorEnrollmentPrincipal(req: Request): string {
         ? await svc.listConnectionAudienceMembers(connection.companyId)
         : [],
     });
+  });
+
+  // Descriptive preview of the GitHub identity each agent would resolve to. It is
+  // relative to the signed-in user and returns no credential references.
+  router.get("/tool-connections/:connectionId/github-agent-identities", async (req, res) => {
+    assertBoard(req);
+    const connection = await getAccessibleResource(req, res, svc.getConnection(req.params.connectionId as string), "Tool connection not found");
+    if (!connection) return;
+    const sourceTemplateKey = (connection.config as Record<string, unknown> | null)?.sourceTemplateKey;
+    if (sourceTemplateKey !== "github") throw badRequest("Not a GitHub connection");
+    res.json(await previewGitHubAgentIdentities(db, {
+      companyId: connection.companyId,
+      connectionId: connection.id,
+      viewerUserId: req.actor.userId ?? null,
+    }));
   });
 
   router.put(

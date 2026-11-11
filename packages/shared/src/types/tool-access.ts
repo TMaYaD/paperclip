@@ -1734,3 +1734,35 @@ export interface ToolConnectionTestCallStatus {
   /** ISO timestamp the request was resolved (approved/denied/cancelled), when applicable. */
   resolvedAt?: string | null;
 }
+
+/**
+ * What GitHub identity a run by one agent would resolve to, relative to the
+ * connection being viewed. Descriptive only: it never grants access.
+ * `no_context` means the viewer has no authenticated user, so a personal
+ * identity cannot be previewed.
+ */
+export type GitHubAgentIdentityState =
+  | "selected_here"
+  | "selected_elsewhere"
+  | "unavailable"
+  | "ambiguous"
+  | "not_installed"
+  | "no_context";
+
+export interface GitHubAgentIdentityPreview {
+  agentId: string;
+  state: GitHubAgentIdentityState;
+  source: "dedicated" | "personal" | null;
+  selectedConnectionId: string | null;
+  selectedConnectionName: string | null;
+  selectedAccountLogin: string | null;
+}
+
+export interface GitHubAgentIdentitiesResponse {
+  connectionId: string;
+  /** Previews are exact only for runs owned by this user; null when unknown. */
+  previewUserId: string | null;
+  /** Agents holding a dedicated grant on this connection. */
+  dedicatedAgentIds: string[];
+  agents: GitHubAgentIdentityPreview[];
+}

@@ -37,6 +37,7 @@ import {
 import { resolveGitHubOperationCredentials } from "../services/github-operation-credentials.js";
 import {
   filterResolvedGitHubConnectionsForRun,
+  previewGitHubAgentIdentities,
   resolveManagedGitHubIdentitySelection,
 } from "../services/git-credentials.js";
 
@@ -233,6 +234,49 @@ const support = await getEmbeddedPostgresTestSupport();
         .where(eq(runIdentityContexts.runId, input.runId));
       expect(JSON.stringify(history)).not.toContain("test-token-");
     });
+    it("previews the identity each agent resolves to, flagging a personal connection beaten by a dedicated grant", async () => {
+      const input = await seed();
+      const personal = await grant(input, "A");
+      const dedicated = await grant(input, "B", true);
+      const selection = await resolveManagedGitHubIdentitySelection(db, input.companyId, {
+        agentId: input.agentId, responsibleUserId: "A",
+      });
+      expect(selection.grant?.connectionId).toBe(dedicated.connectionId);
+
+      const onPersonal = await previewGitHubAgentIdentities(db, {
+        companyId: input.companyId, connectionId: personal.connectionId, viewerUserId: "A",
+      });
+      expect(onPersonal.agents).toEqual([expect.objectContaining({
+        agentId: input.agentId, state: "selected_elsewhere", source: "dedicated",
+        selectedConnectionId: dedicated.connectionId, selectedAccountLogin: "B",
+      })]);
+      expect(onPersonal.dedicatedAgentIds).toEqual([]);
+
+      const onDedicated = await previewGitHubAgentIdentities(db, {
+        companyId: input.companyId, connectionId: dedicated.connectionId, viewerUserId: "A",
+      });
+      expect(onDedicated.agents[0]).toMatchObject({ state: "selected_here", source: "dedicated" });
+      expect(onDedicated.dedicatedAgentIds).toEqual([input.agentId]);
+      expect(JSON.stringify(onDedicated)).not.toContain("secret");
+    });
+
+    it("previews personal-only identities per viewer and refuses to guess without a user", async () => {
+      const input = await seed();
+      const personal = await grant(input, "A");
+      const forA = await previewGitHubAgentIdentities(db, {
+        companyId: input.companyId, connectionId: personal.connectionId, viewerUserId: "A",
+      });
+      expect(forA.agents[0]).toMatchObject({ state: "selected_here", source: "personal" });
+      const forB = await previewGitHubAgentIdentities(db, {
+        companyId: input.companyId, connectionId: personal.connectionId, viewerUserId: "B",
+      });
+      expect(forB.agents[0]).toMatchObject({ state: "unavailable" });
+      const anonymous = await previewGitHubAgentIdentities(db, {
+        companyId: input.companyId, connectionId: personal.connectionId, viewerUserId: null,
+      });
+      expect(anonymous.agents[0]).toMatchObject({ state: "no_context", selectedAccountLogin: null });
+    });
+
     it("returns no credential for unconnected users, removed membership, or ambiguous personal accounts", async () => {
       const input = await seed();
       await grant(input, "A");

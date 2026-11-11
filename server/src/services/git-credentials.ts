@@ -1,4 +1,5 @@
 import {
+  agents as agentsTable,
   companySecrets,
   heartbeatRuns,
   companyMemberships,
@@ -10,6 +11,7 @@ import {
   type Db,
 } from "@paperclipai/db";
 import { and, eq, inArray, or } from "drizzle-orm";
+import type { GitHubAgentIdentitiesResponse, GitHubAgentIdentityPreview } from "@paperclipai/shared";
 import { isGitHubDotCom } from "./github-fetch.js";
 import { secretService } from "./secrets.js";
 import { toolAccessService } from "./tool-access.js";
@@ -576,4 +578,70 @@ export async function resolveManagedGitHubCredential(
     || alternate.grant.subjectUserId !== selection.grant.subjectUserId
     || alternate.grant.subjectAgentId !== selection.grant.subjectAgentId) return failure;
   try { return await acquire(alternate); } catch { return failure; }
+}
+
+/**
+ * Read-only preview of which managed GitHub identity each live agent in the
+ * company would use, as seen from one connection's Permissions page.
+ *
+ * It reuses the runtime selector so the page cannot drift from what a run
+ * actually gets. Personal grants depend on the run's responsible user, so the
+ * preview is exact only for runs owned by `viewerUserId`; standing delegations
+ * (ownerless runs) are deliberately not guessed at. It never returns
+ * credential references.
+ */
+export async function previewGitHubAgentIdentities(
+  db: Db,
+  input: { companyId: string; connectionId: string; viewerUserId: string | null },
+): Promise<GitHubAgentIdentitiesResponse> {
+  const { companyId, connectionId, viewerUserId } = input;
+  const [agentRows, dedicatedRows, connectionRows] = await Promise.all([
+    db.select({ id: agentsTable.id, status: agentsTable.status }).from(agentsTable)
+      .where(eq(agentsTable.companyId, companyId)),
+    db.select({ agentId: connectionGrants.subjectAgentId }).from(connectionGrants).where(and(
+      eq(connectionGrants.companyId, companyId),
+      eq(connectionGrants.connectionId, connectionId),
+      eq(connectionGrants.kind, "agent"),
+    )),
+    db.select({ id: toolConnections.id, name: toolConnections.name }).from(toolConnections)
+      .where(eq(toolConnections.companyId, companyId)),
+  ]);
+  const names = new Map(connectionRows.map((row) => [row.id, row.name]));
+  const previews = await Promise.all(agentRows.filter((agent) => agent.status !== "terminated").map(
+    async (agent): Promise<GitHubAgentIdentityPreview> => {
+      const selection = await resolveManagedGitHubIdentitySelection(db, companyId, {
+        agentId: agent.id,
+        responsibleUserId: viewerUserId,
+        allowStandingDelegation: false,
+      });
+      const base = {
+        agentId: agent.id,
+        source: selection.identitySource ?? null,
+        selectedConnectionId: null,
+        selectedConnectionName: null,
+        selectedAccountLogin: null,
+      };
+      if (!selection.configured) return { ...base, state: "not_installed" };
+      if (selection.grant) {
+        const selectedId = selection.grant.connectionId;
+        return {
+          ...base,
+          state: selectedId === connectionId ? "selected_here" : "selected_elsewhere",
+          selectedConnectionId: selectedId,
+          selectedConnectionName: names.get(selectedId) ?? null,
+          // Only the viewer's own personal grant or an agent grant can be
+          // selected here, so the login is never another person's identity.
+          selectedAccountLogin: selection.grant.providerTenant?.github?.login ?? null,
+        };
+      }
+      if (!viewerUserId && selection.identitySource !== "dedicated") return { ...base, state: "no_context" };
+      return { ...base, state: selection.error?.startsWith("More than one") ? "ambiguous" : "unavailable" };
+    },
+  ));
+  return {
+    connectionId,
+    previewUserId: viewerUserId,
+    dedicatedAgentIds: dedicatedRows.flatMap((row) => row.agentId ? [row.agentId] : []),
+    agents: previews,
+  };
 }
