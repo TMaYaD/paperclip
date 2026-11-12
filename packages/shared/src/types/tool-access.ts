@@ -303,6 +303,7 @@ export interface ConnectionGrantCapabilities {
  */
 export interface ToolConnectionCapabilities {
   canConfigure: boolean;
+  canRefreshActions?: boolean;
   canCreateOrganizationGrant: boolean;
   canSetCompanyInstall: boolean;
   canConnectAsCurrentUser: boolean;

@@ -18,6 +18,7 @@ import { trackRecentProject } from "@/lib/recent-projects";
 import { Settings as ChatSettings } from "lucide-react";
 import { agentDetailHref } from "./agent-detail-navigation";
 import { ExecutionBlockerNotice } from "../components/ExecutionBlockerNotice";
+import { CancelledRunReconciliation } from "../components/CancelledRunReconciliation";
 import type { TaskComposerPause } from "../components/task-chat/TaskChatPausedTakeover";
 import { TaskDetailTasksPanel } from "@/components/task-detail/TaskDetailTasksPanel";
 import { IssueCreatedFromNote } from "@/components/task-detail/IssueCreatedFromNote";
@@ -7821,6 +7822,15 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
             <ExecutionBlockerNotice className={shellSectionClass} presentation={issue.interruption}
               canRetry={canResolveBoardRecoveryAction} onRetry={taskRetry.retry}
               optimistic={taskRetry.optimistic} takingLonger={taskRetry.takingLonger} error={taskRetry.error} />
+          )}
+          {resolvedDetailTab === "chat" && (
+            <CancelledRunReconciliation key={`${issue.id}:${issue.executionBlocker?.runId ?? "none"}`} className={shellSectionClass} blocker={issue.executionBlocker}
+              issueId={issue.id} canResolve={canResolveBoardRecoveryAction}
+              onResolved={() => {
+                void queryClient.invalidateQueries({ queryKey: queryKeys.issues.detail(issueId!) });
+                void queryClient.invalidateQueries({ queryKey: queryKeys.issues.activity(issueId!) });
+                invalidateIssueCollections();
+              }} />
           )}
 
           {issue.status === "in_review" && issue.externalConversationState === "waiting" && (

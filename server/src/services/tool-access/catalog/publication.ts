@@ -40,11 +40,13 @@ type PublicationDependencies = {
   assertConnectorConnectionSetupEnabled: ConnectionSetupPolicy["assertConnectorConnectionSetupEnabled"];
   updateConnectionHealth: ConnectionHealth["updateConnectionHealth"];
   vaultGrantForConnection: ConnectionCredentialAccess["vaultGrantForConnection"];
+  agentCatalogGrantForConnection: ConnectionCredentialAccess["agentCatalogGrantForConnection"];
+  selectedAgentCatalogGrant: ConnectionCredentialAccess["selectedAgentCatalogGrant"];
   ensureRuntimeSlot: ReturnType<typeof createToolRuntimeSlots>["ensureRuntimeSlot"];
   enableCatalogEntriesByDefault: CatalogDefaultAccess["enableCatalogEntriesByDefault"];
 };
 
-export function createToolCatalogPublication(db: Db, { now, audit, getConnectionRow, discoverTools, assertConnectorConnectionSetupEnabled, updateConnectionHealth, vaultGrantForConnection, ensureRuntimeSlot, enableCatalogEntriesByDefault }: PublicationDependencies) {
+export function createToolCatalogPublication(db: Db, { now, audit, getConnectionRow, discoverTools, assertConnectorConnectionSetupEnabled, updateConnectionHealth, vaultGrantForConnection, agentCatalogGrantForConnection, selectedAgentCatalogGrant, ensureRuntimeSlot, enableCatalogEntriesByDefault }: PublicationDependencies) {
   async function refreshCatalog(
     connectionId: string,
     actor?: ActorInfo,
@@ -60,6 +62,24 @@ export function createToolCatalogPublication(db: Db, { now, audit, getConnection
     const connection = await getConnectionRow(connectionId);
     if (connection.connectionPurpose === "ai") throw unprocessable("AI connections do not have a tool catalog");
     await assertConnectorConnectionSetupEnabled(connection);
+    let catalogGrantId: string | undefined;
+    if (connection.credentialPolicy === "per_agent" && !refreshOptions.credentialHeaders) {
+      try {
+        catalogGrantId = (await agentCatalogGrantForConnection(connection)).id;
+      } catch (error) {
+        await audit({
+          companyId: connection.companyId,
+          connectionId: connection.id,
+          action: "tool_connection.catalog_refresh",
+          outcome: "failure",
+          reasonCode: error instanceof HttpError
+            ? String(asRecord(error.details).code ?? "agent_catalog_grant_selection_failed")
+            : "agent_catalog_grant_selection_failed",
+          actor,
+        });
+        throw error;
+      }
+    }
     const refreshedAt = now();
     const unavailableServices: string[] = [];
     let descriptors: McpToolDescriptor[];
@@ -69,6 +89,7 @@ export function createToolCatalogPublication(db: Db, { now, audit, getConnection
         refreshOptions.credentialHeaders,
         actor,
         unavailableServices,
+        catalogGrantId,
       );
     } catch (error) {
       if (
@@ -125,7 +146,9 @@ export function createToolCatalogPublication(db: Db, { now, audit, getConnection
       let otherWorkspaceGrants: string[][] = [];
       let selectedWorkspaceScopes: string[] = [];
       if (connection.config.sourceTemplateKey === "google-workspace") {
-        const selected = await vaultGrantForConnection(connection, actor);
+        const selected = catalogGrantId
+          ? await selectedAgentCatalogGrant(connection, catalogGrantId)
+          : await vaultGrantForConnection(connection, actor);
         selectedWorkspaceScopes = googleWorkspaceGrantedScopes(selected);
         const grants = await db.select().from(connectionGrants).where(and(
           eq(connectionGrants.companyId, connection.companyId), eq(connectionGrants.connectionId, connection.id),

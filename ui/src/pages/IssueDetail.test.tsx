@@ -69,6 +69,7 @@ const mockIssuesApi = vi.hoisted(() => ({
   markRead: vi.fn(),
   update: vi.fn(),
   resolveRecoveryAction: vi.fn(),
+  recoveryActions: vi.fn(),
   previewTreeControl: vi.fn(),
   getTreeControlState: vi.fn(),
   listTreeHolds: vi.fn(),
@@ -2669,6 +2670,38 @@ describe("IssueDetail", () => {
     });
 
     mockIssuesApi.resolveRecoveryAction.mockReset();
+  });
+
+  it("shows cancelled-run reconciliation when the retained hold has no active recovery action", async () => {
+    mockAuthApi.getSession.mockResolvedValue({ session: { userId: "operator" }, user: { id: "operator" } });
+    const issue = createIssue({
+      status: "blocked", activeRecoveryAction: null, interruption: null,
+      executionBlocker: { recoveryActionId: "retained-action", runId: "run-1", agentId: "agent-1",
+        cause: "uncertain_external_action", nextAction: "Inspect the run.", runStatus: "cancelled",
+        canRetry: false, canContinue: false },
+    });
+    mockIssuesApi.get.mockResolvedValue(issue);
+    mockIssuesApi.recoveryActions.mockResolvedValueOnce({ active: null, actions: [{
+      id: "retained-action", sourceIssueId: issue.id, status: "resolved", cause: "uncertain_external_action",
+      evidence: { runId: "run-1", automaticRecovery: { replay: "blocked" } },
+    }] }).mockResolvedValueOnce({ active: null, actions: [] });
+    mockIssuesApi.resolveRecoveryAction.mockResolvedValue({});
+    await act(async () => renderIssueView());
+    await flushReact(); await flushReact();
+    const reconcile = Array.from(container.querySelectorAll("button")).find((button) => button.textContent === "Reconcile");
+    expect(reconcile).toBeDefined();
+    await act(async () => reconcile!.click());
+    const form = Array.from(container.querySelectorAll("form")).find((item) => item.textContent?.includes("Provider stopped"))!;
+    await act(async () => form.querySelector<HTMLButtonElement>('[role="checkbox"]')!.click());
+    await act(async () => { const select = form.querySelector("select")!; select.value = "mixed";
+      select.dispatchEvent(new Event("change", { bubbles: true })); });
+    await act(async () => { const textarea = form.querySelector("textarea")!;
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(textarea,
+        "Receipts show one completed action and another unperformed action.");
+      textarea.dispatchEvent(new Event("input", { bubbles: true })); });
+    await act(async () => form.querySelector<HTMLButtonElement>('button[type="submit"]')!.click());
+    await waitForAssertion(() => expect(mockIssuesApi.resolveRecoveryAction).toHaveBeenCalledWith(issue.id,
+      expect.objectContaining({ actionId: "retained-action", outcome: "restored", sourceIssueStatus: "todo" })));
   });
 
   it.each(["success", "failure", "pending question"])("connects the inline disposition retry to current state (%s)", async outcome => {

@@ -1469,6 +1469,12 @@ export interface ConnectionIntentPayload {
   requestingAgentId: string;
   requestingAgentName: string;
   phase: ConnectionIntentPhase;
+  /** Presentation-safe hint saved after a failed browser authorization. */
+  oauthFailure?: {
+    code: "github_installation_required" | "oauth_callback_failed";
+    installationUrl?: string;
+    managementUrl?: string;
+  };
 }
 
 export interface ConnectionIntentResult {

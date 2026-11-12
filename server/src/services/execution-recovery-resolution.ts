@@ -205,6 +205,18 @@ export async function markExecutionReconciliation(
     }
   }
   await db.transaction(async tx => {
+    const [existingDelivery] = options?.workspaceRepairOnly ? [] : await tx
+      .select({ id: issueRecoveryActions.id })
+      .from(issueRecoveryActions)
+      .where(and(
+        eq(issueRecoveryActions.companyId, action.companyId),
+        eq(issueRecoveryActions.sourceIssueId, action.sourceIssueId),
+        eq(issueRecoveryActions.status, "resolved"),
+        sql`${issueRecoveryActions.id} <> ${action.id}`,
+        sql`${issueRecoveryActions.evidence}->'executionReconciliation'->>'runId' = ${decision.runId}`,
+        sql`${issueRecoveryActions.evidence}->>'continuationDelivery' in ('pending', 'delivered', 'delegated')`,
+      ))
+      .limit(1);
     await notifyDeliveryWork(tx, DELIVERY_QUEUES.executionContinuation);
     await notifyDeliveryWork(tx, DELIVERY_QUEUES.executionReplacement);
     await notifyDeliveryWork(tx, DELIVERY_QUEUES.executionDisposition);
@@ -230,7 +242,8 @@ export async function markExecutionReconciliation(
             actorId,
             recordedAt: new Date().toISOString(),
           },
-          continuationDelivery: options?.workspaceRepairOnly ? "not_requested" : deliveryOwner ? "delegated" : "pending",
+          continuationDelivery: options?.workspaceRepairOnly ? "not_requested" : existingDelivery ? "covered" : deliveryOwner ? "delegated" : "pending",
+          ...(existingDelivery ? { continuationDeliveryCoveredByActionId: existingDelivery.id } : {}),
           ...(deliveryOwner ? { continuationDeliveryOwner: deliveryOwner } : {}),
         },
       })

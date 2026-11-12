@@ -49,6 +49,15 @@ and leaves all existing cases passive. Source identities are not grants.
 
 ### Task query performance
 
+The attention feed checks for newer runs with company-scoped existence probes.
+The probes match the failed run's agent and issue or task context. They preserve
+the existing millisecond comparison and empty-context rules. Each batch holds
+at most 1,000 failed runs. Retained run history stays in the database; this check
+returns only the identifiers of failures that have a newer matching run.
+For failures without a task key, it reads the latest keyless timestamp once per
+agent. Unique agents are batched separately, so repeated failures do not repeat
+the same history scan. Both paths retain the current millisecond comparison.
+
 Run-context lookups use expression indexes for both `context_snapshot.issueId`
 and `context_snapshot.paperclipIssue.id`. Task creation provenance has its own
 company-scoped expression index that follows the query's native issue ID and

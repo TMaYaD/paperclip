@@ -1236,7 +1236,7 @@ export function connectionIntentService(db: Db) {
       interactionId: string,
       phase: "requested" | "authorizing" | "needs_retry",
       userId: string,
-      options: { bypassCurrentMembershipCheck?: boolean } = {},
+      options: { bypassCurrentMembershipCheck?: boolean; oauthFailure?: ConnectionIntentInteraction["payload"]["oauthFailure"] } = {},
     ) => {
       const loaded = await loadIntent(interactionId);
       if (loaded.interaction.addresseeUserId !== userId) throw forbidden("Only the addressed user can update this request");
@@ -1245,7 +1245,7 @@ export function connectionIntentService(db: Db) {
         userId,
         options.bypassCurrentMembershipCheck,
       );
-      return interactions.updateConnectionIntentPhase(loaded.issue, interactionId, phase, { userId });
+      return interactions.updateConnectionIntentPhase(loaded.issue, interactionId, phase, { userId }, options.oauthFailure);
     },
   };
 }

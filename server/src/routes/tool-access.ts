@@ -1,6 +1,7 @@
 import { isCrossSiteOAuthCallbackNavigation, oauthCallbackInterstitialHtml } from "../lib/oauth-browser-return.js";
 import { aiConnectionRouterPluginKey } from "@paperclipai/shared";
 import { aiConnectionRouterService } from "../services/ai-connection-router.js";
+import { connectionIntentOAuthFailureSchema } from "@paperclipai/shared";
 import { composioAppSetupSchema, composioAppsRefreshSchema, composioAppsSyncSchema, composioAppAccountSchema } from "@paperclipai/shared";
 import { aggregatorAppsSyncSchema, aggregatorAppsRefreshSchema, arcadeDiscoverySetupSchema } from "@paperclipai/shared/aggregator-apps";
 import { Router, type Request, type Response } from "express";
@@ -198,6 +199,17 @@ export function connectionIntentOAuthOutcomeHtml(input: {
   return `<!doctype html><html><head><meta charset="utf-8"><title>Connection authorization</title></head><body><p>Returning to Paperclip…</p><script>const message=${message};const targetOrigin=${targetOrigin}||window.location.origin;if(window.opener&&window.opener!==window){window.opener.postMessage(message,targetOrigin);window.close();}else{window.location.replace(${fallback});}</script></body></html>`;
 }
 
+function safeGitHubRecoveryUrl(value: unknown): string | undefined {
+  if (typeof value !== "string" || value.length > 2048) return undefined;
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && url.hostname.toLowerCase() === "github.com"
+      && !url.username && !url.password && !url.port ? url.toString() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function normalizeCloudConnectorEnrollmentReturnTo(returnTo?: string | null): string | null {
   if (!returnTo || returnTo.length > 2_048) return null;
   try {
@@ -278,6 +290,7 @@ export function toolAccessRoutes(
     outcome: "connected" | "declined" | "failed";
     canManageOrganizationGrant: boolean;
     bypassCurrentMembershipCheck: boolean;
+    oauthFailure?: { code: "github_installation_required" | "oauth_callback_failed"; installationUrl?: string; managementUrl?: string };
   }) {
     const loaded = await connectionIntents.loadIntent(input.interactionId);
     if (loaded.interaction.addresseeUserId !== input.userId) {
@@ -291,6 +304,7 @@ export function toolAccessRoutes(
         })
       : await connectionIntents.updatePhase(input.interactionId, "needs_retry", input.userId, {
             bypassCurrentMembershipCheck: input.bypassCurrentMembershipCheck,
+            oauthFailure: input.oauthFailure,
           });
     if (interaction.status === "accepted" && options.connectionIntentHeartbeat) {
       await connectionIntentDeliveryService(db, options.connectionIntentHeartbeat).tryDeliver(input.interactionId);
@@ -480,16 +494,8 @@ function connectorEnrollmentPrincipal(req: Request): string {
         ["installation_url", providerRecovery?.installationUrl],
         ["management_url", providerRecovery?.managementUrl],
       ] as const) {
-        if (typeof value !== "string") continue;
-        try {
-          const url = new URL(value);
-          if (url.protocol === "https:" && url.hostname.toLowerCase() === "github.com") {
-            target.set(key, url.toString());
-          }
-        } catch {
-          // Provider recovery links are optional. The retry path remains usable
-          // when an upstream response omits or malforms one.
-        }
+        const url = safeGitHubRecoveryUrl(value);
+        if (url) target.set(key, url);
       }
     };
     addGitHubRecoveryUrls(params);
@@ -651,7 +657,7 @@ function connectorEnrollmentPrincipal(req: Request): string {
    */
   async function describeConnectionCapabilities(
     req: Request,
-    connection: { id: string; companyId: string; createdByUserId?: string | null },
+    connection: { id: string; companyId: string; credentialPolicy: string; createdByUserId?: string | null },
   ) {
     const membership = toolMembershipRole(req, connection.companyId);
     const isManager = await isToolConnectionManagerQuiet(req, connection.companyId);
@@ -675,6 +681,7 @@ function connectorEnrollmentPrincipal(req: Request): string {
     }
     return {
       canConfigure,
+      canRefreshActions: canConfigure && (connection.credentialPolicy !== "per_agent" || isManager),
       canCreateOrganizationGrant: canConfigure,
       canSetCompanyInstall: canConfigure,
       // Personal consent belongs to the person: it needs a named board user, and
@@ -922,8 +929,8 @@ function connectorEnrollmentPrincipal(req: Request): string {
           // caller's personal grant instead of an organization grant
           // (PAP-17835). The service refuses any subject other than the actor,
           // so this cannot start consent on someone else's behalf.
-          const personalSubjectUserId = req.body.grantKind === "user" ? req.actor.userId ?? null : null;
-          const dedicatedSubjectAgentId = req.body.grantKind === "agent" ? req.body.subjectAgentId ?? null : null;
+          const personalSubjectUserId = result.connection.credentialPolicy === "per_user" ? req.actor.userId ?? null : null;
+          const dedicatedSubjectAgentId = result.connection.credentialPolicy === "per_agent" ? req.body.subjectAgentId ?? null : null;
           const start = await svc.startOAuth(companyId, result.connectionId, {
             workspaceServices: req.body.workspaceServices,
             redirectUri: oauthRedirectUri(req),
@@ -1139,6 +1146,7 @@ function connectorEnrollmentPrincipal(req: Request): string {
       await assertToolConnectionConfigureAccess(req, pendingConnection);
     }
     const acceptsHtml = req.get("accept")?.includes("text/html") === true;
+    let authorizationCompleted = false;
     try {
       const result = await svc.completePaperclipCloudConnectorCallback({
         state,
@@ -1146,6 +1154,7 @@ function connectorEnrollmentPrincipal(req: Request): string {
         error,
         actor: getActorInfo(req),
       });
+      authorizationCompleted = true;
       const pendingConfig = pendingConnection.config ?? {};
       const oauthConfig = pendingConfig.oauth && typeof pendingConfig.oauth === "object"
         ? pendingConfig.oauth as Record<string, unknown>
@@ -1201,16 +1210,41 @@ function connectorEnrollmentPrincipal(req: Request): string {
       }
       res.json(result);
     } catch (callbackError) {
+      if (authorizationCompleted) throw callbackError;
       if (!acceptsHtml) throw callbackError;
       const details = callbackError instanceof HttpError && callbackError.details && typeof callbackError.details === "object"
         ? callbackError.details as Record<string, unknown>
         : null;
+      const denied = details?.code === "oauth_authorization_denied";
+      // Provider errors consume state before reporting failure. For other
+      // missing states, the credential transaction may have committed, so a
+      // later delivery error must not be reported as failed authorization.
+      const terminalProviderError = denied || details?.code === "paperclip_cloud_connector_failed";
+      if (!terminalProviderError && !await svc.peekOAuthState(state)) throw callbackError;
+      const code = denied ? "oauth_authorization_denied"
+        : details?.code === "github_installation_required" ? "github_installation_required" : "oauth_callback_failed";
+      await logActivity(db, {
+        companyId: pendingState.companyId,
+        actorType: "user",
+        actorId: req.actor.userId ?? "board",
+        action: "tool_app.oauth_failed",
+        entityType: "tool_connection",
+        entityId: pendingState.connectionId,
+        details: { code, provider: "managed" },
+      });
       if (pendingConnectionIntent && pendingState.interactionId && req.actor.userId) {
-        const outcome = details?.code === "oauth_authorization_denied" ? "declined" : "failed";
+        const outcome = denied ? "declined" : "failed";
+        const rawHint = { code: code === "github_installation_required" ? code : "oauth_callback_failed",
+          ...(code === "github_installation_required" ? {
+            installationUrl: safeGitHubRecoveryUrl(details?.installationUrl),
+            managementUrl: safeGitHubRecoveryUrl(details?.managementUrl),
+          } : {}) };
+        const oauthFailure = !denied ? connectionIntentOAuthFailureSchema.parse(rawHint) : undefined;
         await finishConnectionIntentOAuth({
           interactionId: pendingState.interactionId,
           userId: req.actor.userId,
           outcome,
+          oauthFailure,
           canManageOrganizationGrant: await isToolConnectionManager(req, pendingConnection.companyId),
           bypassCurrentMembershipCheck: bypassCurrentMembershipCheck(req),
         });
@@ -2287,6 +2321,9 @@ function connectorEnrollmentPrincipal(req: Request): string {
     const existing = await getAccessibleResource(req, res, svc.getConnection(req.params.connectionId as string), "Tool connection not found");
     if (!existing) return;
     await assertToolConnectionConfigureAccess(req, existing);
+    if (existing.credentialPolicy === "per_agent" && !(await isToolConnectionManager(req, existing.companyId))) {
+      throw forbidden("Only a connection manager can refresh actions with an agent authorization");
+    }
     const result = await svc.refreshCatalog(existing.id, getActorInfo(req));
     await logActivity(db, {
       companyId: existing.companyId,
@@ -2307,7 +2344,9 @@ function connectorEnrollmentPrincipal(req: Request): string {
     assertBoard(req);
     const existing = await getAccessibleResource(req, res, svc.getConnection(req.params.connectionId as string), "Tool connection not found");
     if (!existing) return;
-    res.json({ catalog: await svc.listCatalog(existing.id, existing.companyId, getActorInfo(req)) });
+    const allowAgentCredentialRefresh = existing.credentialPolicy !== "per_agent"
+      || await isToolConnectionManagerQuiet(req, existing.companyId);
+    res.json({ catalog: await svc.listCatalog(existing.id, existing.companyId, getActorInfo(req), allowAgentCredentialRefresh) });
   });
 
   router.get("/tool-connections/:connectionId/activity", async (req, res) => {

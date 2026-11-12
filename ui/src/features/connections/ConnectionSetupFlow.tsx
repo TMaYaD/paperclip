@@ -139,9 +139,9 @@ function validEnrollmentAccessState(value: unknown): value is EnrollmentAccessSt
   }
   const agentIds = new Set(candidate.agentIds);
   if (agentIds.size !== candidate.agentIds.length) return false;
-  if (candidate.grantKind === "agent") {
-    return candidate.installChoice === "specific" && agentIds.size === 1;
-  }
+  // Keep an invalid restored dedicated selection visible so the operator can
+  // correct it; silently discarding it would change the chosen identity.
+  if (candidate.grantKind === "agent") return true;
   return candidate.installChoice === "all" ? agentIds.size === 0 : agentIds.size > 0;
 }
 
@@ -382,6 +382,8 @@ function defaultInstallChoiceFor(method: ConnectionMethodDef | null, requestedAg
 }
 
 function configuredAgentIdentity(connection: ToolConnection): string | undefined {
+  const savedSubject = connection.config?.connectorSubjectAgentId;
+  if (typeof savedSubject === "string") return savedSubject;
   const oauth = connection.config?.oauth;
   if (!oauth || typeof oauth !== "object" || Array.isArray(oauth)) return undefined;
   const value = (oauth as Record<string, unknown>).connectorSubjectAgentId;
@@ -770,7 +772,8 @@ function StandardConnectionSetupFlow({
     restoredEnrollmentAccess?.grantKind ?? reconnectGrantKindHint ?? (requestedAgentId ? "user" : "organization"),
   );
   const [installChoice, setInstallChoice] = useState<"specific" | "all">(
-    restoredEnrollmentAccess?.installChoice ?? (requestedAgentId ? "specific" : "all"),
+    restoredEnrollmentAccess?.grantKind === "agent" ? "specific"
+      : restoredEnrollmentAccess?.installChoice ?? (requestedAgentId ? "specific" : "all"),
   );
   const resumingAfterOAuthFailure = Boolean(
     resumeConnectionId
@@ -1337,6 +1340,14 @@ function StandardConnectionSetupFlow({
     : null;
   const instructionsValid = !instructionValue || Boolean(instructionValue.text.trim());
 
+  const savedDedicatedConnection = resumableOAuthConnection ?? reconnectConnection ?? identityConnection;
+  const savedDedicatedAgentId = savedDedicatedConnection ? configuredAgentIdentity(savedDedicatedConnection) : undefined;
+  const selectedDedicatedAgentId = installChoice === "specific" && installAgentIds.size === 1
+    ? [...installAgentIds][0]
+    : undefined;
+  const dedicatedSelectionInvalid = (fixedGrantKind ?? grantKind) === "agent"
+    && !savedDedicatedAgentId && !selectedDedicatedAgentId;
+
   const oauthStartMutation = useMutation({
     // Retry/reconnect reads identity from the durable connection. Provider is
     // not identity: an organization Notion connection must stay organization-
@@ -1350,7 +1361,7 @@ function StandardConnectionSetupFlow({
       ...(connection.config?.sourceTemplateKey === "google-workspace" && workspaceSelectionRef.current ? { workspaceServices: workspaceSelectionRef.current } : {}),
       asCurrentUser: connection.credentialPolicy === "per_user",
       ...(connection.credentialPolicy === "per_agent"
-        ? { asAgentId: configuredAgentIdentity(connection) ?? [...installAgentIds][0] }
+        ? { asAgentId: configuredAgentIdentity(connection) ?? selectedDedicatedAgentId }
         : {}),
       ...(connectionIntentId ? { interactionId: connectionIntentId } : {}),
       });
@@ -1374,6 +1385,11 @@ function StandardConnectionSetupFlow({
   });
   const mutateOAuthStart = oauthStartMutation.mutate;
   const startOAuth = useCallback((connection: ToolConnection) => {
+    if (connection.credentialPolicy === "per_agent" && !configuredAgentIdentity(connection) && !selectedDedicatedAgentId) {
+      setOAuthPhase("error");
+      setOAuthError("Choose exactly one agent for this dedicated account.");
+      return;
+    }
     if (connection.config?.sourceTemplateKey === "google-workspace" && !workspaceSelectionRef.current) {
       setWorkspaceConnection(connection);
       setWorkspaceConsent(() => () => {
@@ -1388,7 +1404,7 @@ function StandardConnectionSetupFlow({
     reserveOAuthPopup();
     if (host === "dialog" && !connectionIntentId) setDialogOAuthConnectionId(connection.id);
     mutateOAuthStart(connection);
-  }, [mutateOAuthStart, onPhaseChange, reserveOAuthPopup, host, connectionIntentId]);
+  }, [mutateOAuthStart, onPhaseChange, reserveOAuthPopup, host, connectionIntentId, selectedDedicatedAgentId]);
 
   /**
    * Commit the Access step's agent reach for a connection. Shared by the
@@ -1396,6 +1412,7 @@ function StandardConnectionSetupFlow({
    * apply the same selection.
    */
   const applyAccessInstalls = async (connectionId: string) => {
+    if (dedicatedSelectionInvalid) throw new Error("Choose exactly one agent for this dedicated account.");
     // The task completion endpoint adds the requester atomically with resolution.
     if (requestedAgentId) return;
     const dedicatedIdentity = (fixedGrantKind ?? grantKind) === "agent";
@@ -1409,6 +1426,7 @@ function StandardConnectionSetupFlow({
   const effectiveGrantKind = fixedGrantKind ?? grantKind;
   const connectMutation = useMutation({
     mutationFn: async (entryOverride?: AppDefinition) => {
+      if (dedicatedSelectionInvalid) throw new Error("Choose exactly one agent for this dedicated account.");
       const connectEntry = entryOverride ?? entry;
       let result: ConnectToolAppResult;
       if (connectEntry) {
@@ -1454,7 +1472,7 @@ function StandardConnectionSetupFlow({
             ? { resumeConnectionId: resumeConnectionId ?? customerClientResumeRef.current! }
             : reconnectConnectionId ? { reconnectConnectionId } : {}),
           ...(requestedGrantKind !== "organization" ? { grantKind: requestedGrantKind } : {}),
-          ...(requestedGrantKind === "agent" ? { subjectAgentId: [...installAgentIds][0] } : {}),
+          ...(requestedGrantKind === "agent" ? { subjectAgentId: savedDedicatedAgentId ?? selectedDedicatedAgentId } : {}),
         });
         customerClientResumeRef.current = null;
       } else {
@@ -1488,7 +1506,7 @@ function StandardConnectionSetupFlow({
           name: connectionName,
           applicationId: prefill.applicationId,
           ...(effectiveGrantKind !== "organization" ? { grantKind: effectiveGrantKind } : {}),
-          ...(effectiveGrantKind === "agent" ? { subjectAgentId: [...installAgentIds][0] } : {}),
+          ...(effectiveGrantKind === "agent" ? { subjectAgentId: savedDedicatedAgentId ?? selectedDedicatedAgentId } : {}),
         });
       }
       // A resumable draft already owns its identity and install reach. Replacing
@@ -1585,6 +1603,11 @@ function StandardConnectionSetupFlow({
   });
   const mutateConnect = connectMutation.mutate;
   const connectApp = useCallback((entryOverride?: AppDefinition) => {
+    if (dedicatedSelectionInvalid) {
+      setOAuthPhase("error");
+      setOAuthError("Choose exactly one agent for this dedicated account.");
+      return;
+    }
     const connectEntry = entryOverride ?? entry;
     const method = connectEntry
       ? availableToolConnectionMethod(connectEntry, connectionMethodKey || null)
@@ -1601,7 +1624,7 @@ function StandardConnectionSetupFlow({
       reserveOAuthPopup();
     }
     mutateConnect(entryOverride);
-  }, [connectionMethodKey, entry, identityConnection, mutateConnect, reserveOAuthPopup]);
+  }, [connectionMethodKey, dedicatedSelectionInvalid, entry, identityConnection, mutateConnect, reserveOAuthPopup]);
 
   useEffect(() => {
     if (!requestedAppKey || galleryQuery.isLoading || !galleryQuery.data) return;
@@ -1726,7 +1749,8 @@ function StandardConnectionSetupFlow({
       setInstallAgentIds(new Set(
         matchingEnrollmentAccess?.agentIds ?? (requestedAgentId ? [requestedAgentId] : []),
       ));
-      setInstallChoice(matchingEnrollmentAccess?.installChoice ?? defaultInstallChoiceFor(initialMethod, requestedAgentId));
+      setInstallChoice(matchingEnrollmentAccess?.grantKind === "agent" ? "specific"
+        : matchingEnrollmentAccess?.installChoice ?? defaultInstallChoiceFor(initialMethod, requestedAgentId));
       // Route/service selection initializes the wizard once. Later renders must
       // preserve the user's current step in both hosts instead of snapping back
       // to Access after they continue.
@@ -1876,6 +1900,7 @@ function StandardConnectionSetupFlow({
    */
   const finishMutation = useMutation({
     mutationFn: async (input: { result: ConnectToolAppResult; enabled: Record<string, boolean> }) => {
+      if (dedicatedSelectionInvalid) throw new Error("Choose exactly one agent for this dedicated account.");
       const { result: connected, enabled: enabledMap } = input;
       const enabledIds = Object.entries(enabledMap)
         .filter(([, on]) => on)
@@ -2154,6 +2179,7 @@ function StandardConnectionSetupFlow({
         preserveAgentAccess: Boolean(automaticOAuthEntry && (resumableOAuthConnection || reconnectConnection)),
       })}
       notice={[
+        dedicatedSelectionInvalid ? "Choose exactly one agent for this dedicated account before continuing." : null,
         galleryQuery.data?.capabilities?.canCreateOrganizationGrant === false
           ? galleryQuery.data.capabilities.organizationGrantReason
             ?? "Only a connection manager can share this credential with the organization."
@@ -2274,7 +2300,7 @@ function StandardConnectionSetupFlow({
           </div>
         ) : null}
         defaults={curatedOAuthDefaults}
-        settingsValid={additionalSettingsValid && instructionsValid}
+        settingsValid={additionalSettingsValid && instructionsValid && !dedicatedSelectionInvalid}
         onOpenAuthorization={openAuthorizationTab}
         onRetry={async () => {
           const firstAttempt = !directOAuthAccessConfirmedRef.current;
@@ -2583,7 +2609,7 @@ function StandardConnectionSetupFlow({
               </Button>
               <Button
                 type="button"
-                disabled={connectorEnrollmentQuery.isLoading || startConnectorEnrollment.isPending}
+                disabled={dedicatedSelectionInvalid || connectorEnrollmentQuery.isLoading || startConnectorEnrollment.isPending}
                 onClick={() => {
                   setConnectorEnrollmentError(null);
                   reserveOAuthPopup();
@@ -2603,7 +2629,7 @@ function StandardConnectionSetupFlow({
         </div>
       ) : step === "key" && entry && credentialStep !== undefined ? credentialStep : step === "key" && entry ? (
         <KeyStep
-          settingsValid={additionalSettingsValid && instructionsValid}
+          settingsValid={additionalSettingsValid && instructionsValid && !dedicatedSelectionInvalid}
           entry={entry}
           error={connectMutation.isError ? (connectMutation.error instanceof Error ? connectMutation.error.message : "Please check your key and try again.") : null}
           values={credentials}
@@ -4381,7 +4407,7 @@ export function AccessStepContent({
                   setGrantKind(kind);
                   if (kind === "agent") {
                     setInstallChoice("specific");
-                    if (installAgentIds.size > 1) setInstallAgentIds(new Set([[...installAgentIds][0]!]));
+                    if (installAgentIds.size > 1) setInstallAgentIds(new Set());
                   }
                 }}
                 options={[

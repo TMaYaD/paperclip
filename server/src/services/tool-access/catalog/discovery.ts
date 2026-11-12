@@ -59,7 +59,7 @@ type DiscoveryDependencies = {
 };
 
 export function createToolCatalogDiscovery(db: Db, { now, audit, secrets, credentials, vercel, vercelConnect, setupPolicy, requestRemoteHttpEndpoint, resolveOAuthGrantSecret, discoverOAuthEndpoints, localTools }: DiscoveryDependencies) {
-  const { vaultGrantForConnection, resolveCredentialHeaders, resolvedRemoteEndpoint } = credentials;
+  const { vaultGrantForConnection, selectedAgentCatalogGrant, resolveCredentialHeaders, resolvedRemoteEndpoint } = credentials;
   const { resolveVercelCredentialHeaders, vercelGrantForConnection } = vercel;
   const { assertConnectorConnectionSetupEnabled } = setupPolicy;
   async function remoteTools(
@@ -68,22 +68,25 @@ export function createToolCatalogDiscovery(db: Db, { now, audit, secrets, creden
     actor?: ActorInfo,
     workspaceEndpoint?: string,
     unavailableServices: string[] = [],
+    catalogGrantId?: string,
   ): Promise<McpToolDescriptor[]> {
     assertSupportedConnection(connection);
     await assertConnectorConnectionSetupEnabled(connection);
     let headers = credentialHeaders ?? {
       ...projectedConnectionHeaders(connection),
-      ...(await resolveCredentialHeaders(connection, actor)),
+      ...(await resolveCredentialHeaders(connection, actor, { catalogGrantId })),
     };
     if (connection.config.sourceTemplateKey === "google-workspace" && !workspaceEndpoint) {
-      const grant = await vaultGrantForConnection(connection, actor);
+      const grant = catalogGrantId
+        ? await selectedAgentCatalogGrant(connection, catalogGrantId)
+        : await vaultGrantForConnection(connection, actor);
       const scopes = googleWorkspaceGrantedScopes(grant);
       const services = (Object.keys(GOOGLE_WORKSPACE_SERVICES) as GoogleWorkspaceService[])
         .filter((service) => googleWorkspaceServiceGranted(service, scopes));
       // One credential authority, no child connections or implied service grants.
       const catalogs = await Promise.allSettled(services.map(async (service) => {
         const profile = GOOGLE_WORKSPACE_CONNECTOR_PROFILES[GOOGLE_WORKSPACE_SERVICES[service]];
-        const tools = await remoteTools(connection, headers, actor, profile.serverUrl);
+        const tools = await remoteTools(connection, headers, actor, profile.serverUrl, unavailableServices, catalogGrantId);
         return tools.map((tool) => ({ ...tool, name: googleWorkspaceToolName(service, tool.name) }))
           .filter((tool) => isGoogleWorkspaceToolGranted(tool.name, scopes));
       }));
@@ -95,7 +98,9 @@ export function createToolCatalogDiscovery(db: Db, { now, audit, secrets, creden
           action: "tool_connection.catalog_refresh", outcome: "failure", actor,
           reasonCode: "google_workspace_service_unavailable", details: { service } });
       }
-      const currentGrant = await vaultGrantForConnection(connection, actor);
+      const currentGrant = catalogGrantId
+        ? await selectedAgentCatalogGrant(connection, catalogGrantId)
+        : await vaultGrantForConnection(connection, actor);
       if (!currentGrant) throw unprocessable("OAuth authorization must be reconnected", { code: "oauth_reauthorization_required" });
       if (catalogs.length > 0 && catalogs.every((catalog) => catalog.status === "rejected")) {
         throw new HttpError(502, `Google services unavailable: ${unavailableServices.join(", ")}. Retry refreshing actions.`,
@@ -107,7 +112,7 @@ export function createToolCatalogDiscovery(db: Db, { now, audit, secrets, creden
       return catalogs.flatMap((catalog) => catalog.status === "fulfilled" ? catalog.value : [])
         .filter((tool) => isGoogleWorkspaceToolGranted(tool.name, currentScopes));
     }
-    const endpoint = workspaceEndpoint ?? await resolvedRemoteEndpoint(connection, actor);
+    const endpoint = workspaceEndpoint ?? await resolvedRemoteEndpoint(connection, actor, catalogGrantId);
     // Pinned to the address the guard approved: `config.url` is operator-supplied,
     // so a second DNS resolution here would reopen the rebinding window that
     // PAP-17098 closed for the OAuth endpoints.
@@ -229,6 +234,7 @@ export function createToolCatalogDiscovery(db: Db, { now, audit, secrets, creden
         ...projectedConnectionHeaders(connection),
         ...(await resolveCredentialHeaders(connection, actor, {
           forceRefresh: true,
+          catalogGrantId,
         })),
       };
       response = await sendToolsList(headers);
@@ -236,7 +242,9 @@ export function createToolCatalogDiscovery(db: Db, { now, audit, secrets, creden
         response.status === 401 &&
         isPaperclipCloudConnectorStrategy(oauthConfig(connection).strategy)
       ) {
-        const grant = await vaultGrantForConnection(connection, actor);
+        const grant = catalogGrantId
+          ? await credentials.selectedAgentCatalogGrant(connection, catalogGrantId)
+          : await vaultGrantForConnection(connection, actor);
         if (grant) {
           await db
             .update(connectionGrants)
@@ -422,18 +430,19 @@ export function createToolCatalogDiscovery(db: Db, { now, audit, secrets, creden
     credentialHeaders?: Record<string, string>,
     actor?: ActorInfo,
     unavailableServices: string[] = [],
+    catalogGrantId?: string,
   ): Promise<McpToolDescriptor[]> {
     assertSupportedConnection(connection);
     await assertConnectorConnectionSetupEnabled(connection);
     if (connection.connectionPurpose === "ai") throw unprocessable("AI connections provide runtime authentication, not tool actions");
     const nativeProvider = nativeProviderCatalogFor(connection);
     if (nativeProvider) {
-      const headers = credentialHeaders ?? await resolveCredentialHeaders(connection, actor);
+      const headers = credentialHeaders ?? await resolveCredentialHeaders(connection, actor, { catalogGrantId });
       await nativeProvider.probe(connection, headers, (url, init) => requestRemoteHttpEndpoint(new URL(url), init));
       return nativeProvider.tools;
     }
     if (isBrowserUseConnection(connection)) {
-      const headers = credentialHeaders ?? await resolveCredentialHeaders(connection, actor);
+      const headers = credentialHeaders ?? await resolveCredentialHeaders(connection, actor, { catalogGrantId });
       await browserUseClient(headers, (url, init) => requestRemoteHttpEndpoint(new URL(url), init), connection.id).probe();
       return BROWSER_USE_TOOLS;
     }
@@ -442,11 +451,11 @@ export function createToolCatalogDiscovery(db: Db, { now, audit, secrets, creden
       return [];
     }
     if (connection.transport === "mcp_remote")
-      return remoteTools(connection, credentialHeaders, actor, undefined, unavailableServices);
+      return remoteTools(connection, credentialHeaders, actor, undefined, unavailableServices, catalogGrantId);
     if (connection.transport !== "local_stdio") {
       throw unsupportedToolConnectionTransport();
     }
-    await resolveCredentialHeaders(connection);
+    await resolveCredentialHeaders(connection, actor, { catalogGrantId });
     await validateCogneeConnection(connection, actor);
     return localTools(connection);
   }

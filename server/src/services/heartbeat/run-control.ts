@@ -103,6 +103,7 @@ import {
 import { logger } from "../../middleware/logger.js";
 import { DELIVERY_QUEUES, notifyDeliveryWork } from "../delivery-work-notifications.js";
 import {
+  QUEUED_COMMENT_INTERRUPT_DELIVERY_STATUSES,
   queuedCommentIdsFromWakePayload,
   withQueuedCommentIdsInWakePayload,
   withQueuedCommentIdsInRunContext,
@@ -655,6 +656,21 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
       inArray(heartbeatRuns.status, ["running", "queued", "scheduled_retry"]),
     )).limit(1);
     if (active) return;
+    if (interrupted) {
+      if (task && ["done", "cancelled"].includes(task.status)) {
+        await db.update(agentWakeupRequests).set({
+          status: "cancelled", finishedAt: new Date(), updatedAt: new Date(),
+          error: "Queued comment interrupt no longer applies to a terminal task",
+        }).where(and(
+          eq(agentWakeupRequests.companyId, companyId), eq(agentWakeupRequests.id, queueId),
+          eq(agentWakeupRequests.status, "deferred_issue_execution"),
+          sql`${agentWakeupRequests.payload}->'queuedCommentInterrupt' is not null`,
+        ));
+        return;
+      }
+      if (!task || task.assigneeAgentId !== wake.agentId ||
+          !QUEUED_COMMENT_INTERRUPT_DELIVERY_STATUSES.includes(task.status)) return;
+    }
     if (interrupted && opts?.retryCleanup) {
       // Only the HTTP click grants an extra cleanup attempt. Periodic retries
       // reuse the intent to deliver, never a fresh provider teardown budget.
@@ -727,7 +743,7 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
       requestedByActorType: "user", requestedByActorId: actorId,
       ...(interrupted ? { queuedCommentInterruptId: queueId } : transfer
         ? { transferCommentRequestId: queueId } : { queuedCommentRequestId: queueId }),
-      issueStateGuard: { assigneeAgentId: deliveryAgentId, statuses: ["todo", "in_progress", "in_review", "blocked"] },
+      issueStateGuard: { assigneeAgentId: deliveryAgentId, statuses: QUEUED_COMMENT_INTERRUPT_DELIVERY_STATUSES },
       idempotencyKey: `queued-comment-${interrupted ? "interrupt" : transfer ? "transfer" : "delivery"}:${queueId}${transfer ? `:${deliveryAgentId}` : ""}`,
     }, transfer ? undefined : queueId);
   }

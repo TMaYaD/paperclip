@@ -965,15 +965,23 @@ describe("personal Muse control plane",()=>{
   });
   it("does not clear claimed-worker or unknown-native-effect holds when recording detector removal",async()=>{
     const activeRun=await active(await oauthFixture(true));
+    const settle=activeRun.port.settle.bind(activeRun.port);
+    const delayedSettle=vi.spyOn(activeRun.port,"settle").mockImplementation(async event=>{
+      await new Promise(resolve=>setTimeout(resolve,1700));
+      return settle(event);
+    });
     try {
-      expect((await activeRun.broker.act(activeRun.subject,{version:1,command:"accept",assignmentId:activeRun.assignment.id,requestId:randomUUID()})).status).toBe("accepted");
+      const requestId=randomUUID();
+      const accepted=await activeRun.broker.act(activeRun.subject,{version:1,command:"accept",assignmentId:activeRun.assignment.id,requestId});
+      expect(["accepted","pending"]).toContain(accepted.status);
+      await expect.poll(async()=>(await activeRun.broker.inspect(activeRun.subject,{version:1,query:"operation.receipt",assignmentId:activeRun.assignment.id,requestId})).status,{timeout:5000,interval:50}).toBe("accepted");
       const f=await detectorCleanupFixture(activeRun);
       await db.update(externalAgentHolds).set({nativeEffectsUnknown:true}).where(eq(externalAgentHolds.assignmentId,activeRun.assignment.id));
       const before=await db.select().from(externalAgentHolds).where(eq(externalAgentHolds.assignmentId,activeRun.assignment.id));expect(before).toHaveLength(1);expect(before[0]).toMatchObject({workerUnknown:true,nativeEffectsUnknown:true,releasedAt:null});
       expect((await request(f.app).post(f.path).send(f.input)).status).toBe(200);
       expect(await db.select().from(externalAgentHolds).where(eq(externalAgentHolds.assignmentId,activeRun.assignment.id))).toEqual(before);
       expect((await f.broker.bindingForAgent(f.company.id,f.agent.id))!.stop).toMatchObject({status:"cannot_confirm",nativeEffectsUnknown:true});
-    }finally{await activeRun.detach();}
+    }finally{delayedSettle.mockRestore();await activeRun.detach();}
   });
   it("requires a full supported hook listing and exact absence, not disablement or arbitrary evidence",async()=>{
     const f=await detectorCleanupFixture();

@@ -69,7 +69,8 @@ Automated: [queued-message UI](../../ui/src/components/task-chat/TaskChatQueuedM
 covers order, failure restoration, unavailable steering, stale revisions, and
 discard acknowledgements. [Queue routes](../../server/src/__tests__/issue-queued-comments-routes.test.ts)
 cover durable ordering, authorization, steering acknowledgements, interrupt
-recovery, and concurrent dispatch. [Composer](../../ui/src/components/task-chat/TaskChatComposer.test.tsx)
+recovery, terminal settlement, reassignment without repeated admission, and
+concurrent dispatch. [Composer](../../ui/src/components/task-chat/TaskChatComposer.test.tsx)
 covers drafts and uncertain saves.
 
 [Task-detail delivery races](../../ui/src/pages/IssueDetail.test.tsx) cover a
@@ -102,7 +103,10 @@ the send response arrives later. Reload and confirm it appears once in history.
 Steer one while busy and verify the agent receives that exact message once.
 Repeat with a rejected steer and a stale second-tab edit; the UI must preserve
 retryable content and explain the conflict. On a fresh run, interrupt with a
-queued follow-up and verify confirmed stop followed by one continuation. Pause
+queued follow-up and verify confirmed stop followed by one continuation. Close
+the task and confirm the parked wake settles once while the comment remains.
+Reassign an open task and confirm its old agent's interrupt stays parked without
+repeated receipts; assign it back and confirm eligible delivery. Pause
 the task (and separately its ancestor), preserve a draft, then resume the actual
 hold; no hidden send should occur while paused. Check both task presentations
 when available; the named component tests do not prove every host integration.

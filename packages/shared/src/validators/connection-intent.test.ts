@@ -28,6 +28,18 @@ describe("connection intent contracts", () => {
     })).toMatchObject({ serviceSlug: "notion", phase: "requested" });
   });
 
+  it("accepts only bounded GitHub recovery guidance on pending intents", () => {
+    const base = { version: 1, serviceSlug: "github", serviceName: "GitHub", requestingAgentId: agentId,
+      requestingAgentName: "Researcher", phase: "needs_retry" };
+    const hint = { code: "github_installation_required", installationUrl: "https://github.com/apps/paperclip/installations/new" };
+    expect(connectionIntentPayloadSchema.safeParse({ ...base, oauthFailure: hint }).success).toBe(true);
+    for (const installationUrl of ["https://evil.example/install", "http://github.com/install", "https://user@github.com/install", "https://github.com:444/install", `https://github.com/${"x".repeat(2100)}`]) {
+      expect(connectionIntentPayloadSchema.safeParse({ ...base, oauthFailure: { ...hint, installationUrl } }).success).toBe(false);
+    }
+    expect(connectionIntentPayloadSchema.safeParse({ ...base, oauthFailure: { code: "provider-secret" } }).success).toBe(false);
+    expect(connectionIntentPayloadSchema.safeParse({ ...base, oauthFailure: { code: "oauth_callback_failed", installationUrl: hint.installationUrl } }).success).toBe(false);
+  });
+
   it("rejects credentials, authorization URLs, and unknown phases in thread payloads", () => {
     const base = {
       version: 1,

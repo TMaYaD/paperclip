@@ -89,8 +89,22 @@ and webhook binding uses the same order:
 
 An unavailable or ambiguous managed identity fails visibly. It never falls
 through to another person, an organization credential, or a legacy token.
+Within the selected grant tier, disabled connections, inactive or revoked
+grants, and grants without a valid credential or repository access do not
+create account ambiguity. If no grant in that tier is usable, access remains
+unavailable; an unusable dedicated tier does not select a personal grant.
 Agent grants are company-scoped, have exactly one `subjectAgentId`, cannot be
 organization defaults, and are installed only for that agent.
+In GitHub setup, choose one agent for a dedicated account. Choosing another
+replaces the prior choice; an invalid saved choice must be corrected before
+authorization or completion.
+
+For a dedicated-agent connection, **Refresh actions** uses its one active agent
+authorization. A connection manager can run it without signing in again. An
+automatic catalog refresh can use the same grant. If no agent authorization is
+active, reconnect one. If several are active, keep one active authorization and
+retry. Refresh stops before contacting GitHub in either case. Other company
+members can read the saved action catalog without using the agent credential.
 
 The connection installation is the credential owner's consent boundary. A
 personal setup may target every agent or a selected set, and runtime resolution

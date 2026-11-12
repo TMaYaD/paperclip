@@ -344,6 +344,8 @@ Agent access: `restricted` — source read plus board execution-reconciliation d
 
 Policy: Server independently checks terminal source/task/owner or reviewer, stopped leases/process, no coordinator/successor/unreleased authority and workspace evidence. Outcome completed/not_performed/mixed informs continuation without repeating completed effects. Matching source-only file repair requests do not enqueue work.
 
+Board task detail offers Reconcile for a cancelled source with a retained no-replay hold and no ordinary Retry or Continue. A board decision clears each matching row; one source-run delivery owner prevents duplicate continuation requests. Agent access to the decision remains restricted.
+
 Evidence: `source-only` — [recovery routes](../../server/src/routes/issues.ts), [execution proof](../../server/src/services/execution-recovery-resolution.ts); reviewed at `3bbc2104b65caf9f7763938a01260a5673e12f7a`. No live provider proof.
 
 Verification: `not-run` — Inspect external provider first; wrong source/flag without stop evidence/live owner denied. Record truthful outcome -> one eligible continuation or retained hold; duplicate doesn't replay.

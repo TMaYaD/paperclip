@@ -185,7 +185,8 @@ Agent access: `restricted` — Human setup/resume APIs; agent request state and
 continuation.
 
 Policy: Setup and credentials belong to the addressed authorized human; active-run tools
-can search/request access.
+can search/request access. Fresh setup creates a new connection after removal. An
+explicit reconnect must name the old connection and keep its credential policy and subject.
 
 Evidence: `source-only` —
 [implementation](../../server/src/routes/connection-intents.ts#L130) at the reviewed

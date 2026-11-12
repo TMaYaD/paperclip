@@ -9,6 +9,7 @@ import {
   activityLog,
   companies,
   companyMemberships,
+  companySecrets,
   connectionGrants,
   createDb,
   heartbeatRuns,
@@ -22,6 +23,7 @@ import {
   toolProfileBindings,
   toolProfileEntries,
   toolProfiles,
+  userSecretDefinitions,
 } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
@@ -54,6 +56,8 @@ describeEmbeddedPostgres("heartbeat runtime MCP servers", () => {
     await db.delete(heartbeatRuns);
     await db.delete(toolMcpGateways);
     await db.delete(connectionGrants);
+    await db.delete(companySecrets);
+    await db.delete(userSecretDefinitions);
     await db.delete(toolConnectionInstalls);
     await db.delete(toolProfileBindings);
     await db.delete(toolProfileEntries);
@@ -575,6 +579,23 @@ describeEmbeddedPostgres("heartbeat runtime MCP servers", () => {
         transportConfig: { sourceTemplateKey: "github" },
       },
     ]).returning();
+    const definitionId = randomUUID();
+    const personalSecretId = randomUUID();
+    const dedicatedSecretId = randomUUID();
+    await db.insert(userSecretDefinitions).values({
+      id: definitionId, companyId: company!.id, key: definitionId, name: "Personal GitHub token",
+    });
+    await db.insert(companySecrets).values([
+      {
+        id: personalSecretId, companyId: company!.id, key: personalSecretId,
+        name: "Personal GitHub token", scope: "user", ownerUserId: "responsible-user",
+        userSecretDefinitionId: definitionId,
+      },
+      {
+        id: dedicatedSecretId, companyId: company!.id, key: dedicatedSecretId,
+        name: "Dedicated GitHub token", scope: "company",
+      },
+    ]);
     await db.insert(connectionGrants).values([
       {
         companyId: company!.id,
@@ -583,6 +604,12 @@ describeEmbeddedPostgres("heartbeat runtime MCP servers", () => {
         subjectUserId: "responsible-user",
         status: "active",
         isDefault: false,
+        credentialSecretRefs: [{ secretId: personalSecretId, configPath: "oauth.access_token", versionSelector: "latest" }],
+        providerTenant: { github: {
+          userId: "responsible-user", login: "responsible-user", installationCount: 1,
+          repositoryCount: 1, repositorySelection: "selected",
+          installationIds: ["1"], installationOwnerLogins: ["responsible-user"],
+        } },
       },
       {
         companyId: company!.id,
@@ -591,6 +618,12 @@ describeEmbeddedPostgres("heartbeat runtime MCP servers", () => {
         subjectAgentId: agent!.id,
         status: "active",
         isDefault: false,
+        credentialSecretRefs: [{ secretId: dedicatedSecretId, configPath: "oauth.access_token", versionSelector: "latest" }],
+        providerTenant: { github: {
+          userId: "dedicated-agent", login: "dedicated-agent", installationCount: 1,
+          repositoryCount: 1, repositorySelection: "selected",
+          installationIds: ["2"], installationOwnerLogins: ["dedicated-agent"],
+        } },
       },
     ]);
     await db.insert(toolConnectionInstalls).values([
