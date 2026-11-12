@@ -682,10 +682,15 @@ export async function previewGitHubAgentIdentities(
     const github = grant.providerTenant?.github;
     const ref = accessRefOf(grant);
     if (!ref || !github || github.installationCount < 1 || github.repositoryCount < 1) return false;
-    if (grant.kind !== "user") return true;
-    if (!grant.subjectUserId || grant.subjectUserId !== viewerUserId || !viewerIsAuthorizedMember) return false;
     const record = secretRecords.find((secret) => secret.id === ref.secretId);
-    return Boolean(record?.userSecretDefinitionId && record.ownerUserId === grant.subjectUserId);
+    if (!record || record.status !== "active" || record.deletedAt) return false;
+    if (grant.kind !== "user") return record.scope === "company";
+    if (!grant.subjectUserId || grant.subjectUserId !== viewerUserId || !viewerIsAuthorizedMember) return false;
+    return record.scope === "user"
+      && Boolean(record.userSecretDefinitionId)
+      && record.ownerUserId === grant.subjectUserId
+      && record.definitionStatus === "active"
+      && !record.definitionDeletedAt;
   };
   const previews = await Promise.all(agentRows.filter((agent) => agent.status !== "terminated").map(
     async (agent): Promise<GitHubAgentIdentityPreview> => {
