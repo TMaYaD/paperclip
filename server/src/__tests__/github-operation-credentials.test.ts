@@ -37,6 +37,7 @@ import {
 import { resolveGitHubOperationCredentials } from "../services/github-operation-credentials.js";
 import {
   filterResolvedGitHubConnectionsForRun,
+  previewGitHubAgentIdentities,
   resolveManagedGitHubIdentitySelection,
 } from "../services/git-credentials.js";
 
@@ -233,6 +234,149 @@ const support = await getEmbeddedPostgresTestSupport();
         .where(eq(runIdentityContexts.runId, input.runId));
       expect(JSON.stringify(history)).not.toContain("test-token-");
     });
+    it("previews the identity each agent resolves to, flagging a personal connection beaten by a dedicated grant", async () => {
+      const input = await seed();
+      const personal = await grant(input, "A");
+      const dedicated = await grant(input, "B", true);
+      const selection = await resolveManagedGitHubIdentitySelection(db, input.companyId, {
+        agentId: input.agentId, responsibleUserId: "A",
+      });
+      expect(selection.grant?.connectionId).toBe(dedicated.connectionId);
+
+      const onPersonal = await previewGitHubAgentIdentities(db, {
+        companyId: input.companyId, connectionId: personal.connectionId, viewerUserId: "A", canViewPrivateIdentities: false,
+      });
+      expect(onPersonal.agents).toEqual([expect.objectContaining({
+        agentId: input.agentId, state: "selected_elsewhere", source: "dedicated",
+        selectedConnectionId: null, selectedConnectionName: null, selectedAccountLogin: null,
+      })]);
+      const asManager = await previewGitHubAgentIdentities(db, {
+        companyId: input.companyId, connectionId: personal.connectionId, viewerUserId: "A", canViewPrivateIdentities: true,
+      });
+      expect(asManager.agents[0]).toMatchObject({
+        state: "selected_elsewhere", selectedConnectionId: dedicated.connectionId, selectedAccountLogin: "B",
+      });
+      expect(onPersonal.dedicatedAgentIds).toEqual([]);
+
+      const onDedicated = await previewGitHubAgentIdentities(db, {
+        companyId: input.companyId, connectionId: dedicated.connectionId, viewerUserId: "A", canViewPrivateIdentities: false,
+      });
+      expect(onDedicated.agents[0]).toMatchObject({ state: "selected_here", source: "dedicated" });
+      expect(onDedicated.dedicatedAgentIds).toEqual([input.agentId]);
+      expect(JSON.stringify(onDedicated)).not.toContain("secret");
+    });
+
+    it("previews personal-only identities per viewer and refuses to guess without a user", async () => {
+      const input = await seed();
+      const personal = await grant(input, "A");
+      const forA = await previewGitHubAgentIdentities(db, {
+        companyId: input.companyId, connectionId: personal.connectionId, viewerUserId: "A", canViewPrivateIdentities: false,
+      });
+      expect(forA.agents[0]).toMatchObject({ state: "selected_here", source: "personal" });
+      const forB = await previewGitHubAgentIdentities(db, {
+        companyId: input.companyId, connectionId: personal.connectionId, viewerUserId: "B", canViewPrivateIdentities: false,
+      });
+      expect(forB.agents[0]).toMatchObject({ state: "unavailable" });
+      const anonymous = await previewGitHubAgentIdentities(db, {
+        companyId: input.companyId, connectionId: personal.connectionId, viewerUserId: null, canViewPrivateIdentities: false,
+      });
+      expect(anonymous.agents[0]).toMatchObject({ state: "no_context", selectedAccountLogin: null });
+    });
+
+    it("does not present incomplete or zero-access grants as selected, and loads once for any number of agents", async () => {
+      const input = await seed();
+      const personal = await grant(input, "A");
+      const selectedCalls = async () => {
+        const select = vi.spyOn(db, "select");
+        await previewGitHubAgentIdentities(db, {
+          companyId: input.companyId, connectionId: personal.connectionId, viewerUserId: "A", canViewPrivateIdentities: false,
+        });
+        const count = select.mock.calls.length;
+        select.mockRestore();
+        return count;
+      };
+      const oneAgent = await selectedCalls();
+      for (let index = 0; index < 4; index++) {
+        await db.insert(agents).values({
+          companyId: input.companyId, name: `Extra ${index}`, role: "engineer", adapterType: "codex_local",
+        });
+      }
+      expect(await selectedCalls()).toBe(oneAgent);
+
+      await db.update(connectionGrants).set({
+        providerTenant: { github: { userId: "A", login: "A", installationCount: 1, repositoryCount: 0,
+          repositorySelection: "selected", installationIds: ["1"], installationOwnerLogins: ["A"] } },
+      }).where(eq(connectionGrants.id, personal.id));
+      const zeroAccess = await previewGitHubAgentIdentities(db, {
+        companyId: input.companyId, connectionId: personal.connectionId, viewerUserId: "A", canViewPrivateIdentities: false,
+      });
+      expect(zeroAccess.agents.find((row) => row.agentId === input.agentId)?.state).toBe("unavailable");
+
+      await db.update(connectionGrants).set({ credentialSecretRefs: [] }).where(eq(connectionGrants.id, personal.id));
+      const incomplete = await previewGitHubAgentIdentities(db, {
+        companyId: input.companyId, connectionId: personal.connectionId, viewerUserId: "A", canViewPrivateIdentities: false,
+      });
+      expect(incomplete.agents.find((row) => row.agentId === input.agentId)?.state).toBe("unavailable");
+    });
+
+    it.each([
+      ["missing", async (grant: Awaited<ReturnType<typeof grant>>) => {
+        await db.delete(companySecrets).where(eq(companySecrets.id, grant.secretId));
+      }],
+      ["inactive", async (grant: Awaited<ReturnType<typeof grant>>) => {
+        await db.update(companySecrets).set({ status: "disabled" }).where(eq(companySecrets.id, grant.secretId));
+      }],
+      ["deleted", async (grant: Awaited<ReturnType<typeof grant>>) => {
+        await db.update(companySecrets).set({ deletedAt: new Date() }).where(eq(companySecrets.id, grant.secretId));
+      }],
+      ["wrong-scope", async (grant: Awaited<ReturnType<typeof grant>>) => {
+        await db.update(companySecrets).set({
+          scope: "user", ownerUserId: "A", userSecretDefinitionId: grant.definitionId,
+        }).where(eq(companySecrets.id, grant.secretId));
+      }],
+    ])("marks a dedicated grant with a %s credential unavailable", async (_case, mutate) => {
+      const input = await seed();
+      const dedicated = await grant(input, "A", true);
+      if (_case === "wrong-scope") {
+        await db.insert(userSecretDefinitions).values({
+          id: dedicated.definitionId, companyId: input.companyId, key: dedicated.definitionId, name: "Wrong scope",
+        });
+      }
+      await mutate(dedicated);
+      const preview = await previewGitHubAgentIdentities(db, {
+        companyId: input.companyId, connectionId: dedicated.connectionId,
+        viewerUserId: "A", canViewPrivateIdentities: false,
+      });
+      expect(preview.agents[0]).toMatchObject({ state: "unavailable", source: "dedicated" });
+    });
+
+    it.each([
+      ["missing secret", async (personal: Awaited<ReturnType<typeof grant>>) => {
+        await db.delete(companySecrets).where(eq(companySecrets.id, personal.secretId));
+      }],
+      ["inactive secret", async (personal: Awaited<ReturnType<typeof grant>>) => {
+        await db.update(companySecrets).set({ status: "disabled" }).where(eq(companySecrets.id, personal.secretId));
+      }],
+      ["deleted secret", async (personal: Awaited<ReturnType<typeof grant>>) => {
+        await db.update(companySecrets).set({ deletedAt: new Date() }).where(eq(companySecrets.id, personal.secretId));
+      }],
+      ["inactive definition", async (personal: Awaited<ReturnType<typeof grant>>) => {
+        await db.update(userSecretDefinitions).set({ status: "disabled" }).where(eq(userSecretDefinitions.id, personal.definitionId));
+      }],
+      ["deleted definition", async (personal: Awaited<ReturnType<typeof grant>>) => {
+        await db.update(userSecretDefinitions).set({ deletedAt: new Date() }).where(eq(userSecretDefinitions.id, personal.definitionId));
+      }],
+    ])("marks a personal grant with a %s unavailable", async (_case, mutate) => {
+      const input = await seed();
+      const personal = await grant(input, "A");
+      await mutate(personal);
+      const preview = await previewGitHubAgentIdentities(db, {
+        companyId: input.companyId, connectionId: personal.connectionId,
+        viewerUserId: "A", canViewPrivateIdentities: false,
+      });
+      expect(preview.agents[0]).toMatchObject({ state: "unavailable", source: "personal" });
+    });
+
     it("returns no credential for unconnected users, removed membership, or ambiguous personal accounts", async () => {
       const input = await seed();
       await grant(input, "A");

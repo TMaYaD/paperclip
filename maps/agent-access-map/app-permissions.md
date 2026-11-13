@@ -21,6 +21,8 @@ Review: `baseline`.
 API: `present` — representative operation IDs:
 
 - `PUT /api/tool-connections/{connectionId}/installs`.
+- `GET /api/tool-connections/{connectionId}/github-agent-identities` — read-only
+  preview of the GitHub identity each agent resolves to for the signed-in user.
 
 Agent access: `restricted` — Board management API; agents use their resulting assigned
 app tools.
