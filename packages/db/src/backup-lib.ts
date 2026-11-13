@@ -37,7 +37,21 @@ export type RunDatabaseBackupResult = {
   backupFile: string;
   sizeBytes: number;
   prunedCount: number;
+  /** The engine that produced the archive. */
+  engine: "pg_dump" | "javascript";
+  /**
+   * Set when `auto` selected pg_dump but it could not run, so the much slower
+   * JavaScript engine produced the archive. Callers should surface it: the
+   * usual cause is pg_dump missing from a service's PATH.
+   */
+  engineFallbackReason?: string;
 };
+
+function describeEngineFailure(error: unknown): string {
+  const message = (error instanceof Error ? error.message : String(error)).split(/\r?\n/, 1)[0]?.trim() ?? "";
+  // pg_dump errors can echo the connection string; never repeat credentials.
+  return message.replace(/(postgres(?:ql)?:\/\/)[^@\s/]*@/gi, "$1***@") || "unknown pg_dump failure";
+}
 
 export type RunDatabaseRestoreOptions = {
   connectionString: string;
@@ -534,6 +548,7 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
   const connectTimeout = Math.max(1, Math.trunc(opts.connectTimeoutSeconds ?? 5));
   const backupEngine = opts.backupEngine ?? "auto";
   let effectiveBackupEngine = backupEngine;
+  let engineFallbackReason: string | undefined;
   const canUsePgDump = !hasBackupTransforms(opts);
   const excludedTableNames = normalizeTableNameSet(opts.excludeTables);
   const nullifiedColumnsByTable = normalizeNullifyColumnMap(opts.nullifyColumns);
@@ -571,6 +586,7 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
         if (backupEngine === "pg_dump") {
           throw error;
         }
+        engineFallbackReason = describeEngineFailure(error);
         effectiveBackupEngine = "javascript";
         sql = postgres(opts.connectionString, { max: 1, connect_timeout: connectTimeout });
         sqlClosed = false;
@@ -583,7 +599,7 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
         const sizeBytes = statSync(backupFile).size;
         await opts.verifyBeforePrune?.(backupFile);
         const prunedCount = pruneOldBackups(opts.backupDir, retention, filenamePrefix);
-        return { backupFile, sizeBytes, prunedCount };
+        return { backupFile, sizeBytes, prunedCount, engine: "pg_dump" };
       }
     }
 
@@ -1073,6 +1089,8 @@ export async function runDatabaseBackup(opts: RunDatabaseBackupOptions): Promise
       backupFile,
       sizeBytes,
       prunedCount,
+      engine: "javascript",
+      ...(engineFallbackReason ? { engineFallbackReason } : {}),
     };
   } catch (error) {
     await writer.abort();
@@ -1129,5 +1147,8 @@ export async function runDatabaseRestore(opts: RunDatabaseRestoreOptions): Promi
 export function formatDatabaseBackupResult(result: RunDatabaseBackupResult): string {
   const size = formatBackupSize(result.sizeBytes);
   const pruned = result.prunedCount > 0 ? `; pruned ${result.prunedCount} old backup(s)` : "";
-  return `${result.backupFile} (${size}${pruned})`;
+  const fallback = result.engineFallbackReason
+    ? `; pg_dump unavailable, used the slower JavaScript engine: ${result.engineFallbackReason}`
+    : "";
+  return `${result.backupFile} (${size}${pruned}${fallback})`;
 }

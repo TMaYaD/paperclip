@@ -77,6 +77,11 @@ export async function dbBackupCommand(opts: DbBackupOptions): Promise<void> {
       filenamePrefix,
     });
     spinner.stop(`Backup saved: ${formatDatabaseBackupResult(result)}`);
+    if (result.engineFallbackReason) {
+      p.log.warn(
+        `pg_dump could not run (${result.engineFallbackReason}); the slower JavaScript engine made this backup. Put pg_dump on PATH or set PAPERCLIP_PG_DUMP_PATH.`,
+      );
+    }
 
     if (opts.json) {
       console.log(
@@ -85,6 +90,8 @@ export async function dbBackupCommand(opts: DbBackupOptions): Promise<void> {
             backupFile: result.backupFile,
             sizeBytes: result.sizeBytes,
             prunedCount: result.prunedCount,
+            engine: result.engine,
+            ...(result.engineFallbackReason ? { engineFallbackReason: result.engineFallbackReason } : {}),
             backupDir,
             retentionDays,
             connectionSource: connection.source,
