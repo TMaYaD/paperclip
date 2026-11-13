@@ -23,7 +23,26 @@ INSTALL_RETRY_DELAY="${PAPERCLIP_DEPLOY_INSTALL_RETRY_DELAY:-600}"
 # processes that mean an agent turn is in flight (all local adapter lanes)
 AGENT_PROCESS_PATTERN="${PAPERCLIP_DEPLOY_AGENT_PATTERN:-claude-agent-acp|acpx-runtime-sidecar|codex-acp|claude --print|codex exec}"
 
+# Native Paperclip Runner (paperclip-runnerd). `paperclipai install --ref` only
+# compiles the daemon when `cargo` is on PATH; without it the payload still
+# builds but ships no runner binary. So the script keeps a Rust toolchain that
+# matches the checkout's pin and exposes it to the installer.
+#   auto    = provision the toolchain if the checkout pins one; a failure is
+#             logged and the deploy continues without the runner (default)
+#   require = a missing toolchain or runner binary blocks the deploy
+#   off     = never touch Rust; the payload ships without the runner
+BUILD_RUNNER="${PAPERCLIP_DEPLOY_BUILD_RUNNER:-auto}"
+RUNNER_TOOLCHAIN_FILE="$REPO_ROOT/packages/paperclip-runner/rust-toolchain.toml"
+export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
+export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
+RUSTUP_DIST="${PAPERCLIP_DEPLOY_RUSTUP_DIST:-https://static.rust-lang.org/rustup/dist}"
+
 log() { printf '[%s] deploy: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
+
+case "$BUILD_RUNNER" in
+  auto|require|off) ;;
+  *) echo "deploy: PAPERCLIP_DEPLOY_BUILD_RUNNER must be auto, require or off" >&2; exit 2 ;;
+esac
 
 # Block until gitmon restarts us. `sleep` runs in the background and we `wait`
 # on it so the TERM trap fires promptly instead of after the sleep.
@@ -104,6 +123,76 @@ restart_daemon() {
   fi
 }
 
+# Install rustup (no toolchain yet) into CARGO_HOME/RUSTUP_HOME. The installer
+# binary is checked against the digest Rust publishes beside it.
+install_rustup() {
+  local triple tmp expected actual
+  case "$(uname -s)/$(uname -m)" in
+    Darwin/x86_64) triple=x86_64-apple-darwin ;;
+    Darwin/arm64) triple=aarch64-apple-darwin ;;
+    *) log "no rustup installer for $(uname -sm)"; return 1 ;;
+  esac
+  tmp=$(mktemp -d) || return 1
+  log "installing rustup from $RUSTUP_DIST/$triple"
+  if ! curl -fsSL --retry 3 -o "$tmp/rustup-init" "$RUSTUP_DIST/$triple/rustup-init" ||
+     ! curl -fsSL --retry 3 -o "$tmp/rustup-init.sha256" "$RUSTUP_DIST/$triple/rustup-init.sha256"; then
+    rm -rf "$tmp"; log "rustup download failed"; return 1
+  fi
+  expected=$(awk '{print $1; exit}' "$tmp/rustup-init.sha256")
+  actual=$(shasum -a 256 "$tmp/rustup-init" | awk '{print $1}')
+  if [ -z "$expected" ] || [ "$expected" != "$actual" ]; then
+    rm -rf "$tmp"; log "rustup-init checksum mismatch (expected ${expected:-none}, got $actual)"; return 1
+  fi
+  chmod 700 "$tmp/rustup-init"
+  if ! "$tmp/rustup-init" -y --no-modify-path --profile minimal --default-toolchain none; then
+    rm -rf "$tmp"; log "rustup-init failed"; return 1
+  fi
+  rm -rf "$tmp"
+}
+
+# Make `cargo` resolve to the checkout's pinned toolchain for the installer and
+# the builds it spawns. Idempotent: with the toolchain already present this
+# makes no network calls. Returns non-zero when no working toolchain results.
+ensure_runner_toolchain() {
+  local channel
+  if [ ! -f "$RUNNER_TOOLCHAIN_FILE" ]; then
+    log "checkout pins no runner toolchain; the runner build is not required"
+    return 0
+  fi
+  channel=$(sed -n 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$RUNNER_TOOLCHAIN_FILE" | head -1)
+  if [ -z "$channel" ]; then
+    log "cannot read the toolchain channel from $RUNNER_TOOLCHAIN_FILE"
+    return 1
+  fi
+  if ! command -v cc >/dev/null 2>&1; then
+    log "no C compiler/linker on PATH; install the Xcode command line tools"
+    return 1
+  fi
+  export PATH="$CARGO_HOME/bin:$PATH"
+  if ! command -v rustup >/dev/null 2>&1; then
+    install_rustup || return 1
+  fi
+  if ! rustup toolchain list | grep -q "^$channel-"; then
+    log "installing Rust $channel for the native runner"
+    rustup toolchain install "$channel" --profile minimal --component rustfmt --no-self-update || return 1
+  fi
+  # Selects the toolchain from any directory; the installer builds in a staging
+  # tree where the checkout's rust-toolchain.toml would not be found.
+  export RUSTUP_TOOLCHAIN="$channel"
+  if ! cargo --version >/dev/null 2>&1 || ! rustc --version >/dev/null 2>&1; then
+    log "Rust $channel is installed but cargo/rustc do not run"
+    return 1
+  fi
+  log "runner toolchain: $(cargo --version), $(rustc --version)"
+}
+
+# The staged payload keeps a marker instead of a binary when the build skipped it.
+runner_binary_present() {
+  local bin="$PAPERCLIP_HOME/cli/current/node_modules/@paperclipai/server/dist/vendor/paperclip-runner/bin"
+  [ -d "$bin" ] && [ ! -e "$bin/.paperclip-runnerd-skipped" ] &&
+    [ -n "$(find "$bin" -name paperclip-runnerd -type f 2>/dev/null | head -1)" ]
+}
+
 cd "$REPO_ROOT"
 target_sha=$(git rev-parse HEAD)
 current_sha=$(installed_sha)
@@ -123,6 +212,17 @@ if [ "$BUILD_WHEN" = idle ]; then
   wait_for_quiet
 fi
 
+# Cold Rust builds are CPU-heavy, so this runs after the quiet window.
+if [ "$BUILD_RUNNER" != off ]; then
+  [ "$BUILD_RUNNER" = require ] && export PAPERCLIP_RUNNER_REQUIRE_BINARY=1
+  if ! ensure_runner_toolchain; then
+    if [ "$BUILD_RUNNER" = require ]; then
+      park "runner toolchain unavailable and PAPERCLIP_DEPLOY_BUILD_RUNNER=require; payload unchanged; waiting for the next push"
+    fi
+    log "warning: continuing without a runner toolchain; the payload will ship without paperclip-runnerd"
+  fi
+fi
+
 log "database backup"
 "$PAPERCLIPAI" db:backup --json 2>/dev/null | grep -E '"backupFile"' || log "warning: backup did not report a file"
 
@@ -139,6 +239,14 @@ done
 new_sha=$(installed_sha)
 if [ "$new_sha" != "$target_sha" ]; then
   park "install finished but install.json records ${new_sha:-nothing}; not restarting"
+fi
+
+if [ "$BUILD_RUNNER" != off ] && [ -f "$RUNNER_TOOLCHAIN_FILE" ]; then
+  if runner_binary_present; then
+    log "payload includes paperclip-runnerd"
+  else
+    log "warning: payload has no paperclip-runnerd; native Runner agents cannot start until a build with a Rust toolchain is installed"
+  fi
 fi
 
 log "payload $target_sha installed; waiting for a quiet window to restart $DAEMON_LABEL"

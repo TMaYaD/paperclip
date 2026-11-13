@@ -50,6 +50,36 @@ plist supplies them from the private JSON. Other settings include
 `PAPERCLIP_DEPLOY_QUIET_MAX_WAIT`, `PAPERCLIP_DEPLOY_HEALTH_TIMEOUT`,
 `PAPERCLIP_DEPLOY_INSTALL_ATTEMPTS`, and `PAPERCLIP_DEPLOY_INSTALL_RETRY_DELAY`.
 
+### Native Runner build
+
+The installer compiles `paperclip-runnerd` only when `cargo` is on `PATH`. On a
+host without it the payload still builds but ships without the runner, so
+Runner-based agents cannot start. Before each install, `deploy.sh` therefore:
+
+1. reads the Rust version from `packages/paperclip-runner/rust-toolchain.toml`
+   in the checkout being deployed (no pin, no runner build);
+2. installs `rustup` into `~/.rustup` and `~/.cargo` if missing, verifying the
+   installer against the SHA-256 that Rust publishes beside it;
+3. installs the pinned toolchain if absent and selects it with
+   `RUSTUP_TOOLCHAIN` for the installer and its builds. A host that already has
+   the toolchain makes no network calls.
+
+This needs a C compiler/linker (the Xcode command line tools) and outbound
+HTTPS to `static.rust-lang.org`. It does not edit shell profiles. After the
+install it logs whether the payload contains `paperclip-runnerd`.
+
+`PAPERCLIP_DEPLOY_BUILD_RUNNER` (`build_runner` in the private JSON) controls it:
+
+- `auto` (default): provision the toolchain; if that fails, log a warning and
+  deploy without the runner.
+- `require`: a missing toolchain parks the deploy until the next push, and the
+  build fails instead of skipping the runner.
+- `off`: never touch Rust.
+
+The first compile is CPU-heavy. Use `build_when: "idle"` to run it in a quiet
+window. A new or rebuilt daemon binary is scanned on first launch, so add it
+to any prelaunch warm-up your host uses.
+
 Pause monitoring with `sudo launchctl bootout system/ing.paperclip.gitmon`.
 Reload the installed plist after configuration changes. Review the instance's
 `gitmon.log` and `gitmon.err.log` for deployment results.

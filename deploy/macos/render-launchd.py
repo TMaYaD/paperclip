@@ -38,6 +38,10 @@ def render(config):
         "PAPERCLIP_DEPLOY_BUILD_WHEN": config.get("build_when", "idle"),
         "PAPERCLIP_DEPLOY_DAEMON_LABEL": config.get("daemon_label", "ing.paperclip.paperclipai"),
     }
+    if "build_runner" in config:
+        if config["build_runner"] not in ("auto", "require", "off"):
+            raise ValueError("build_runner must be auto, require or off")
+        env["PAPERCLIP_DEPLOY_BUILD_RUNNER"] = config["build_runner"]
     if config.get("git_exec_path"):
         env["GIT_EXEC_PATH"] = config["git_exec_path"]
     if config.get("revision_map"):
