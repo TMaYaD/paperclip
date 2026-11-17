@@ -49,3 +49,45 @@ export async function materializeIsolatedTaskDirectory(input: {
   }
   return cwd;
 }
+
+/**
+ * A reused execution workspace that is this task's own repository-free directory
+ * (created by a clean task-directory attempt). Such a workspace has no Git base, so
+ * later turns must keep its directory transport instead of deriving `git_worktree`
+ * from the isolated mode alone. Explicit strategies still win.
+ */
+export async function isReusedIsolatedTaskDirectory(input: {
+  companyId: string;
+  issueId: string | null;
+  mode: string;
+  reuseExisting: boolean;
+  hasProjectWorkspace: boolean;
+  projectWorkspaceId: string | null;
+  workspaceStrategies: unknown[];
+  workspace: {
+    companyId: string;
+    sourceIssueId: string | null;
+    mode: string;
+    strategyType: string;
+    projectId: string | null;
+    projectWorkspaceId: string | null;
+    repoUrl: string | null;
+    cwd: string | null;
+  } | null;
+}): Promise<boolean> {
+  const { workspace } = input;
+  if (!input.reuseExisting || !input.issueId || !workspace?.cwd) return false;
+  if (input.mode !== "isolated_workspace" || input.hasProjectWorkspace || input.projectWorkspaceId) return false;
+  if (!input.workspaceStrategies.every((value) => Object.keys(parseObject(value)).length === 0)) return false;
+  if (workspace.companyId !== input.companyId || workspace.sourceIssueId !== input.issueId ||
+      workspace.mode !== "isolated_workspace" || workspace.strategyType !== "project_primary" ||
+      workspace.projectId || workspace.projectWorkspaceId || workspace.repoUrl) return false;
+  // Only directories materialized for this task qualify, never an arbitrary local path.
+  const root = await realpath(resolvePaperclipInstanceRoot()).catch(() => null);
+  if (!root) return false;
+  const cwd = path.resolve(workspace.cwd);
+  const retained = path.join(root, "isolated-workspaces", input.companyId, input.issueId);
+  const attempts = path.join(root, "isolated-workspace-attempts", input.companyId, input.issueId);
+  return cwd === retained ||
+    (path.dirname(cwd) === attempts && /^[a-zA-Z0-9_-]+$/.test(path.basename(cwd)));
+}

@@ -2602,6 +2602,7 @@ export function heartbeatService(
         materializeNativeChatWorktree,
         explicitTaskDirectory,
         useIsolatedTaskDirectory,
+        reusesIsolatedTaskDirectory,
       } = await timePreparation("environment_selection", () => selectHeartbeatEnvironment(db, {
         run, agent,
         task: { issueRef, issueContext, issueId, context, executionProjectId, workspaceProjectContext, boundSourceWorkspace,
@@ -2618,7 +2619,7 @@ export function heartbeatService(
         run, agent,
         task: { issueId, context, responsibleUserId, acceptedPlanContinuationWake, acceptedPlanWakeRoutingDecision, taskProjectContext, routineEnvContext },
         config: { sourceWorkspaceConfig, aiBinding },
-        policy: { trustPreset, useIsolatedTaskDirectory, explicitTaskDirectory },
+        policy: { trustPreset, useIsolatedTaskDirectory, explicitTaskDirectory, reusesIsolatedTaskDirectory },
         environment: { selectedEnvironmentId, selectedEnvironmentForConfig, resolvedInstanceSettings, persistedNativeExecutionInput },
         services: { secretsSvc, companySkills, appendRunEvent, finalizeAiConnectionBusyDeferral },
         onFailureSecretsResolved: (readSecrets) => { readFailureReportSecrets = () => [...readSecrets(), ...identityRedactor.values]; },

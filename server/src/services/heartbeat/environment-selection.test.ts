@@ -10,6 +10,7 @@ import { resolvePaperclipInstanceRoot } from "../../home-paths.js";
 import { environmentService } from "../environments.js";
 import { executionWorkspaceService } from "../execution-workspaces.js";
 import { instanceSettingsService } from "../instance-settings.js";
+import { materializeIsolatedTaskDirectory } from "../isolated-task-directory.js";
 import { buildNativeExecutionInput } from "../native-runtime/native-execution-input.js";
 import { nativeRuntimeContextFixture } from "../native-runtime/runtime-context.test-fixture.js";
 import { selectHeartbeatEnvironment, type HeartbeatEnvironmentSelectionInput } from "./environment-selection.js";
@@ -260,5 +261,46 @@ describe.skipIf(!support.supported)("heartbeat environment selection boundary", 
       expect(result.nativeChatWorkspaceScope?.projectId).toBe(project.id);
       expect((await db.select().from(issues).where(eq(issues.id, issue.id)))[0].executionWorkspaceId).toBeNull();
     }
+  });
+  describe("later turns on a clean task directory", () => {
+    // A board Retry on a project-free task creates a per-attempt directory and binds the
+    // issue to it with only `{ mode: "isolated_workspace" }`. The next ordinary turn must
+    // keep that directory's transport instead of deriving git_worktree from the mode.
+    async function projectFreeAttempt(strategyType: "project_primary" | "git_worktree" = "project_primary") {
+      const { input, issue } = await fixture();
+      await db.update(issues).set({ projectId: null }).where(eq(issues.id, issue.id));
+      const cwd = await materializeIsolatedTaskDirectory({ companyId: input.agent.companyId, issueId: issue.id, attemptId: input.run.id });
+      const saved = await executionWorkspaceService(db).create({ companyId: input.agent.companyId, projectId: null, sourceIssueId: issue.id,
+        name: "Clean attempt", mode: "isolated_workspace", strategyType, cwd, providerType: "local_fs" });
+      if (!saved) throw new Error("Workspace fixture was not created");
+      await db.update(issues).set({ executionWorkspaceId: saved.id, executionWorkspacePreference: "reuse_existing",
+        executionWorkspaceSettings: { mode: "isolated_workspace" } }).where(eq(issues.id, issue.id));
+      input.task.issueRef = { ...input.task.issueRef!, executionWorkspaceId: saved.id, executionWorkspacePreference: "reuse_existing" };
+      input.task.executionProjectId = null;
+      input.task.workspaceProjectContext = null;
+      input.policy.requestedExecutionWorkspaceMode = "isolated_workspace";
+      input.policy.issueExecutionWorkspaceSettings = { mode: "isolated_workspace" };
+      input.config.sourceWorkspaceConfig = { workspaceStrategy: { type: "git_worktree" } };
+      return { input, saved };
+    }
+
+    it("keeps directory transport when reusing the task's own clean attempt directory", async () => {
+      const { input, saved } = await projectFreeAttempt();
+      const result = await selectHeartbeatEnvironment(db, input);
+      expect(result.reusableExistingExecutionWorkspace?.id).toBe(saved.id);
+      expect(result.useIsolatedTaskDirectory).toBe(false);
+      expect(result.reusesIsolatedTaskDirectory).toBe(true);
+    });
+
+    it("honors an explicitly configured Git strategy", async () => {
+      const { input } = await projectFreeAttempt();
+      input.policy.issueExecutionWorkspaceSettings = { mode: "isolated_workspace", workspaceStrategy: { type: "git_worktree" } };
+      expect((await selectHeartbeatEnvironment(db, input)).reusesIsolatedTaskDirectory).toBe(false);
+    });
+
+    it("does not treat a Git workspace as a clean task directory", async () => {
+      const { input } = await projectFreeAttempt("git_worktree");
+      expect((await selectHeartbeatEnvironment(db, input)).reusesIsolatedTaskDirectory).toBe(false);
+    });
   });
 });

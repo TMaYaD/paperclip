@@ -4,7 +4,7 @@ import { promisify } from "node:util";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { materializeIsolatedTaskDirectory, shouldUseIsolatedTaskDirectory } from "./isolated-task-directory.js";
+import { isReusedIsolatedTaskDirectory, materializeIsolatedTaskDirectory, shouldUseIsolatedTaskDirectory } from "./isolated-task-directory.js";
 import { prepareSandboxManagedRuntime, type SandboxManagedRuntimeClient, type SandboxSyncOperation } from "@paperclipai/adapter-utils/sandbox-managed-runtime";
 
 const execFile = promisify(execFileCallback);
@@ -125,5 +125,60 @@ describe("isolated task directories", () => {
     const identity = await setup();
     await expect(materializeIsolatedTaskDirectory({ ...identity, issueId: "../outside" }))
       .rejects.toThrow("Invalid isolated task workspace identity");
+  });
+});
+
+describe("reused clean task directories", () => {
+  let root: string | undefined;
+  afterEach(async () => {
+    vi.unstubAllEnvs();
+    if (root) await rm(root, { recursive: true, force: true });
+  });
+
+  async function setup(attemptId?: string) {
+    root = await mkdtemp(path.join(os.tmpdir(), "paperclip-reused-task-"));
+    vi.stubEnv("PAPERCLIP_HOME", root);
+    const cwd = await materializeIsolatedTaskDirectory({ companyId: "company-1", issueId: "issue-1", ...(attemptId ? { attemptId } : {}) });
+    return {
+      companyId: "company-1", issueId: "issue-1", mode: "isolated_workspace", reuseExisting: true,
+      hasProjectWorkspace: false, projectWorkspaceId: null, workspaceStrategies: [undefined, null, {}],
+      workspace: { companyId: "company-1", sourceIssueId: "issue-1", mode: "isolated_workspace", strategyType: "project_primary",
+        projectId: null, projectWorkspaceId: null, repoUrl: null, cwd: cwd as string | null },
+    };
+  }
+
+  it.each([undefined, "attempt-1"])("recognizes the task's own directory (attempt %s)", async (attemptId) => {
+    expect(await isReusedIsolatedTaskDirectory(await setup(attemptId))).toBe(true);
+  });
+
+  it.each([
+    { reuseExisting: false },
+    { mode: "shared_workspace" },
+    { hasProjectWorkspace: true },
+    { projectWorkspaceId: "workspace-1" },
+    { issueId: "issue-2" },
+    { companyId: "company-2" },
+    { workspaceStrategies: [{ type: "git_worktree" }] },
+    { workspaceStrategies: [{ provisionCommand: "setup" }] },
+  ])("keeps configured requirements: %j", async (override) => {
+    expect(await isReusedIsolatedTaskDirectory({ ...await setup("attempt-1"), ...override })).toBe(false);
+  });
+
+  it.each([
+    { strategyType: "git_worktree" },
+    { projectId: "project-1" },
+    { repoUrl: "https://example.com/repo.git" },
+    { sourceIssueId: "issue-2" },
+    { cwd: null },
+  ])("rejects a workspace that is not a clean task directory: %j", async (override) => {
+    const input = await setup("attempt-1");
+    expect(await isReusedIsolatedTaskDirectory({ ...input, workspace: { ...input.workspace, ...override } })).toBe(false);
+  });
+
+  it("rejects a project-free directory outside the task's isolated roots", async () => {
+    const input = await setup("attempt-1");
+    for (const cwd of [root!, path.join(path.dirname(input.workspace.cwd!), "nested", "deeper"), "/tmp"]) {
+      expect(await isReusedIsolatedTaskDirectory({ ...input, workspace: { ...input.workspace, cwd } })).toBe(false);
+    }
   });
 });

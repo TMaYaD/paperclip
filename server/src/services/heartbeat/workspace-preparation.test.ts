@@ -278,6 +278,31 @@ describe.skipIf(!support.supported)("heartbeat workspace preparation boundary", 
     expect((await readIssue(issue.id)).executionWorkspaceId).toBe(prepared.persistedExecutionWorkspace!.id);
   });
 
+  it("reuses a clean task directory on the next ordinary turn with directory transport", async () => {
+    const { input } = await fixture();
+    input.policy.useIsolatedTaskDirectory = true;
+    input.policy.effectiveExecutionWorkspaceMode = "isolated_workspace";
+    input.policy.requestedExecutionWorkspaceMode = "isolated_workspace";
+    input.task.freshWorkspace = { mode: "fresh_isolated_workspace", retryIntentId: input.run.id,
+      sourceRunId: input.run.id, retainedSourceIds: [] };
+    const attempt = await prepareHeartbeatWorkspace(db, input);
+    expect(attempt.persistedExecutionWorkspace).toMatchObject({ mode: "isolated_workspace", strategyType: "project_primary" });
+    // The ordinary turn after the retry: no fresh attempt, the issue reuses the attempt.
+    input.task.freshWorkspace = null;
+    input.policy.useIsolatedTaskDirectory = false;
+    await reuse(input, attempt.persistedExecutionWorkspace!);
+    // Mode alone derives git_worktree, which cannot use a repository-free directory.
+    input.config.mergedConfig = buildExecutionWorkspaceAdapterConfig({ agentConfig: {}, projectPolicy: null,
+      issueSettings: { mode: "isolated_workspace" }, mode: "isolated_workspace", legacyUseProjectWorkspace: null });
+    await expect(prepareHeartbeatWorkspace(db, input)).rejects.toThrow("is not a git checkout");
+    // Execution configuration applies directory transport when reusing the task's own directory.
+    input.config.mergedConfig = { ...input.config.mergedConfig, workspaceStrategy: { type: "project_primary" } };
+    await reuse(input, attempt.persistedExecutionWorkspace!);
+    const next = await prepareHeartbeatWorkspace(db, input);
+    expect(next.executionWorkspace.cwd).toBe(attempt.executionWorkspace.cwd);
+    expect(next.persistedExecutionWorkspace?.id).toBe(attempt.persistedExecutionWorkspace!.id);
+  });
+
   async function reuse(input: HeartbeatWorkspacePreparationInput, workspace: NonNullable<Awaited<ReturnType<typeof prepareHeartbeatWorkspace>>["persistedExecutionWorkspace"]>) {
     input.reuse.requestedShouldReuseExisting = true;
     input.reuse.existingExecutionWorkspace = workspace;
