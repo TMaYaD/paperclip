@@ -46,6 +46,10 @@ Execution containment and file preservation are independent facts:
 - A fresh attempt uses a new execution workspace and the separate
   `isolated-workspace-attempts` namespace. It does not modify the original
   directory or satisfy that source's preservation/cleanup obligation.
+- When a fresh attempt on a task without a project creates a clean task
+  directory, later ordinary turns reuse that directory as a plain directory.
+  The isolated mode alone does not turn it into a Git worktree request; only an
+  explicitly configured workspace strategy does.
 
 A missing managed sandbox cannot answer another stop request. Core can request
 a signed absence observation from Cloud under a host-bound server capability.
