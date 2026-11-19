@@ -121,12 +121,21 @@ describe("composable pace and cap validation", () => {
     expect(upsertBudgetPolicySchema.safeParse({ ...base, pacePercent: 20, progressive: false }).success).toBe(false);
     expect(upsertBudgetPolicySchema.safeParse({ ...base, pacePercent: null, progressive: false, amount: 70 }).success).toBe(true);
   });
-  it("accepts a connection filter on money budgets only", () => {
+  it("accepts connection keys and requires a connection or provider on subscription rules", () => {
     const scopeId = "8e4f0f9c-0a1b-4c55-9b8a-2b6f5e1d7c11";
-    expect(upsertBudgetPolicySchema.parse({ scopeType: "company", scopeId, amount: 100, connectionFilter: "unmanaged" }).connectionFilter).toBe("unmanaged");
+    const week = { scopeType: "company", scopeId, metric: "subscription_percent", windowKind: "provider_week", amount: 50 } as const;
+    expect(upsertBudgetPolicySchema.parse({ scopeType: "company", scopeId, amount: 100, connectionFilter: "local:openai" }).connectionFilter).toBe("local:openai");
     expect(upsertBudgetPolicySchema.parse({ scopeType: "company", scopeId, amount: 100, connectionFilter: scopeId }).connectionFilter).toBe(scopeId);
-    expect(upsertBudgetPolicySchema.safeParse({ scopeType: "company", scopeId, amount: 100, connectionFilter: "minimax" }).success).toBe(false);
-    expect(upsertBudgetPolicySchema.safeParse({ scopeType: "company", scopeId, metric: "subscription_percent", provider: "anthropic",
-      windowKind: "provider_week", amount: 50, connectionFilter: scopeId }).success).toBe(false);
+    expect(upsertBudgetPolicySchema.safeParse({ scopeType: "company", scopeId, amount: 100, connectionFilter: "local:nobody" }).success).toBe(false);
+    expect(upsertBudgetPolicySchema.safeParse({ scopeType: "company", scopeId, amount: 100, connectionFilter: "unmanaged" }).success).toBe(false);
+    expect(upsertBudgetPolicySchema.safeParse({ ...week, connectionFilter: scopeId }).success).toBe(true);
+    expect(upsertBudgetPolicySchema.safeParse({ ...week, provider: "anthropic" }).success).toBe(true);
+    expect(upsertBudgetPolicySchema.safeParse(week).success).toBe(false);
+  });
+  it("accepts daily and monthly subscription windows", () => {
+    const scopeId = "8e4f0f9c-0a1b-4c55-9b8a-2b6f5e1d7c11";
+    for (const windowKind of ["provider_day", "provider_month"] as const) {
+      expect(upsertBudgetPolicySchema.safeParse({ scopeType: "company", scopeId, metric: "subscription_percent", windowKind, amount: 50, connectionFilter: scopeId }).success).toBe(true);
+    }
   });
 });

@@ -146,7 +146,7 @@ export function aiConnectionService(db: Db) {
           grantId: grant.id,
           companyId,
           ...metadata.data,
-          usageProbeSupported: supportsAiConnectionUsage(metadata.data.provider, metadata.data.method),
+          usageProbeSupported: supportsAiConnectionUsage(metadata.data.provider, metadata.data.method, metadata.data.routing),
           name: connection.name,
           accountLabel: grant.providerTenant?.name,
           ...(needsReconnect ? { unavailableReason: "Reconnect with a separate sign-in to protect your existing terminal login." } : {}),
@@ -230,7 +230,21 @@ export function aiConnectionService(db: Db) {
     const visible = candidates.filter(({ grant }) => canUseCredential(grant, userId, audience.filter((member) => member.grantId === grant.id)));
     if (!visible.length) throw notFound("AI connection not found");
     if (visible.length > 1) throw unprocessable("Choose a credential grant for this usage check");
-    const row = visible[0]!;
+    return usageForRow(visible[0]!);
+  }
+  /**
+   * Usage of one connection for budget enforcement, read as the system: the
+   * dispatch gate and budget summaries run without a viewing user. Only the
+   * usage endpoint sees the credential. With no grant named, the connection's
+   * single active grant is used, preferring an organization grant.
+   */
+  async function budgetUsage(companyId: string, connectionId: string, grantId?: string | null): Promise<AiConnectionUsage | null> {
+    const candidates = (await rows(companyId)).filter((row) => row.connection.id === connectionId && (!grantId || row.grant.id === grantId));
+    const active = candidates.filter((row) => row.grant.status === "active");
+    const row = active.find((candidate) => candidate.grant.kind === "organization") ?? active[0] ?? candidates[0];
+    return row ? usageForRow(row) : null;
+  }
+  async function usageForRow(row: Awaited<ReturnType<typeof rows>>[number]): Promise<AiConnectionUsage> {
     const metadata = aiConnectionMetadataSchema.safeParse(row.connection.config.ai);
     if (!metadata.success) throw notFound("AI connection not found");
     const identity = { connectionId: row.connection.id, grantId: row.grant.id, ...metadata.data };
@@ -239,7 +253,7 @@ export function aiConnectionService(db: Db) {
       row.connection.healthStatus !== "ok" || aiSubscriptionNeedsIsolatedLogin(row.connection.config)) {
       return { ...empty, status: "unavailable", errorCode: "connection_unavailable", message: "Reconnect or enable this AI connection before checking usage." };
     }
-    if (!supportsAiConnectionUsage(metadata.data.provider, metadata.data.method)) {
+    if (!supportsAiConnectionUsage(metadata.data.provider, metadata.data.method, metadata.data.routing)) {
       return { ...identity, ...await probeAiConnectionUsage(metadata.data, "") };
     }
     const value = await credential(row);
@@ -1157,5 +1171,5 @@ export function aiConnectionService(db: Db) {
       return [{ ...row, summary }];
     });
   }
-  return { list, selectDecision, selectFastResponse, selectPromptInjectionPrevention, quotaAccounts, subscriptionAccounts: (companyId: string, userId: string) => quotaAccounts(companyId, userId, true), refreshQuotaCredential, select, credential, runtimeCredential, probeUsage, save, setDefault, membership, markAuthenticationFailed };
+  return { list, selectDecision, selectFastResponse, selectPromptInjectionPrevention, quotaAccounts, budgetUsage, subscriptionAccounts: (companyId: string, userId: string) => quotaAccounts(companyId, userId, true), refreshQuotaCredential, select, credential, runtimeCredential, probeUsage, save, setDefault, membership, markAuthenticationFailed };
 }

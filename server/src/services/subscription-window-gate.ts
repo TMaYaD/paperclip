@@ -1,8 +1,11 @@
 import { and, eq, gt, inArray, or } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { budgetPolicies } from "@paperclipai/db";
+import { aiProviderDefaults, budgetPolicies, connectionGrants } from "@paperclipai/db";
 import {
-  aiConnectionBindingSchema,
+  aiRuntimeConnectionBindingSchema,
+  localConnectionKey,
+  localCredentialProviderForAdapter,
+  SUBSCRIPTION_BUDGET_PACE_UNIT,
   SUBSCRIPTION_BUDGET_WINDOW_DURATION_MS,
   SUBSCRIPTION_BUDGET_WINDOW_QUOTA_KEYS,
   isSubscriptionBudgetWindowKind,
@@ -11,11 +14,8 @@ import {
   type QuotaWindow,
   type SubscriptionBudgetWindowKind,
 } from "@paperclipai/shared";
-import {
-  providerSlugForAdapterType,
-  readQuotaSnapshot as readSharedQuotaSnapshot,
-  type QuotaSnapshotReader,
-} from "./quota-windows.js";
+import { type QuotaSnapshotReader } from "./quota-windows.js";
+import { createConnectionUsageReader, type ConnectionUsageReader } from "./connection-usage-windows.js";
 
 /**
  * Subscription window gate.
@@ -38,6 +38,12 @@ import {
 export const SUBSCRIPTION_WINDOW_WAIT_RETRY_REASON = "subscription_window_wait";
 /** `heartbeat_runs.error_code` for a timer heartbeat skipped by this gate. */
 export const SUBSCRIPTION_WINDOW_SKIPPED_ERROR_CODE = "subscription_window_skipped";
+
+/** A run held because its connection's money budget is reached. */
+export const CONNECTION_BUDGET_WAIT_RETRY_REASON = "connection_budget_wait";
+export const CONNECTION_BUDGET_SKIPPED_ERROR_CODE = "connection_budget_skipped";
+/** How often a held run re-checks a reached connection budget (it may be raised). */
+export const CONNECTION_BUDGET_RECHECK_MS = 10 * 60 * 1000;
 /** `heartbeat_runs.error_code` when a run was deferred too many times in a row. */
 export const SUBSCRIPTION_WINDOW_WAIT_EXHAUSTED_ERROR_CODE = "subscription_window_wait_exhausted";
 
@@ -281,7 +287,7 @@ export function releaseSubscriptionLimit(input: {
   return {
     releasedPercent: input.progressive
       ? Math.min(input.limitPercent, input.pacePercent != null
-        ? input.pacePercent * (elapsedFraction * (input.windowKind === "provider_week" ? 7 : 5))
+        ? input.pacePercent * (elapsedFraction * SUBSCRIPTION_BUDGET_PACE_UNIT[input.windowKind].unitsPerWindow)
         : input.limitPercent * elapsedFraction)
       : input.limitPercent,
     elapsedFraction,
@@ -326,7 +332,7 @@ export function evaluateSubscriptionRelease(input: {
   }
   const durationMs = SUBSCRIPTION_BUDGET_WINDOW_DURATION_MS[input.windowKind];
   const share = Math.min(1, Math.max(0, input.pacePercent != null
-    ? (input.usedPercent / input.pacePercent) / (input.windowKind === "provider_week" ? 7 : 5)
+    ? (input.usedPercent / input.pacePercent) / SUBSCRIPTION_BUDGET_PACE_UNIT[input.windowKind].unitsPerWindow
     : input.usedPercent / input.limitPercent));
   return {
     release,
@@ -396,7 +402,7 @@ export function decideSubscriptionWindowWait(input: {
 
   for (const policy of input.policies) {
     if (policy.amount <= 0 || (policy.provider && policy.provider !== input.provider)) continue;
-    const windowLabel = policy.windowKind === "provider_session" ? "session" : "weekly";
+    const windowLabel = SUBSCRIPTION_WINDOW_LABELS[policy.windowKind] ?? "subscription";
     const base = {
       policyId: policy.id,
       scopeType: policy.scopeType,
@@ -489,7 +495,7 @@ export function decideSubscriptionWindowWait(input: {
             : new Date(now.getTime() + defaultWaitMs),
         reason: releaseAt
           ? `${input.provider} ${windowLabel} subscription window is at ${usedPercent}%, ahead of the ` +
-            `${formatPercent(releasedPercent)}% released so far of the ${policy.pacePercent != null ? `${formatPercent(policy.pacePercent)}% per ${policy.windowKind === "provider_week" ? "day" : "hour"} pace` : `progressive ${policy.amount}% limit`} ` +
+            `${formatPercent(releasedPercent)}% released so far of the ${policy.pacePercent != null ? `${formatPercent(policy.pacePercent)}% per ${SUBSCRIPTION_BUDGET_PACE_UNIT[policy.windowKind].unit} pace` : `progressive ${policy.amount}% limit`} ` +
             `for ${policy.scopeType} scope; enough is released at ${releaseAt.toISOString()}`
           : `${input.provider} ${windowLabel} subscription window is at ${usedPercent}% ` +
             `(${policy.progressive ? "progressive " : ""}limit ${policy.amount}% for ${policy.scopeType} scope); ` +
@@ -537,6 +543,13 @@ export function boundSubscriptionWindowWait(input: {
   };
 }
 
+const SUBSCRIPTION_WINDOW_LABELS: Record<SubscriptionBudgetWindowKind, string> = {
+  provider_session: "session", provider_day: "daily", provider_week: "weekly", provider_month: "monthly",
+};
+
+/** The account a run will use, as a connection budget key. */
+export type RunConnection = { key: string; grantId: string | null; provider: string };
+
 export type SubscriptionWindowGateInput = {
   companyId: string;
   agentId: string;
@@ -544,31 +557,52 @@ export type SubscriptionWindowGateInput = {
   projectId?: string | null;
   /** The agent's stored AI connection binding (`runtimeConfig.aiConnection`). */
   aiConnection?: unknown;
+  /** The run's responsible user, who owns a responsible-user binding's account. */
+  responsibleUserId?: string | null;
+  /** Already resolved by the caller; skips resolution when present. */
+  connection?: RunConnection | null;
   now?: Date;
 };
 
 /**
- * True when the agent is pinned to an API-key AI connection. Such runs bill
- * the connection's account (an API key or an Anthropic-compatible gateway such
- * as MiniMax), never the provider subscription, so subscription window limits
- * do not apply to them. Responsible-user bindings resolve their method per run
- * and stay gated.
+ * Resolves the account a run will use before it starts: the pinned connection
+ * of a shared or delegated binding, the responsible user's provider default for
+ * a responsible-user binding, or the harness's local credentials when the agent
+ * has no managed binding. A connection pool chooses its member at run time, so
+ * it has no single account here (null), nor does a harness without one local
+ * provider.
  */
-export function bindingBypassesSubscriptionWindow(aiConnection: unknown) {
-  const binding = aiConnectionBindingSchema.safeParse(aiConnection);
-  return binding.success && binding.data.mode !== "responsible_user" && binding.data.method === "api_key";
+export async function resolveRunConnection(db: Db, input: Pick<SubscriptionWindowGateInput, "companyId" | "adapterType" | "aiConnection" | "responsibleUserId">): Promise<RunConnection | null> {
+  if (input.aiConnection == null) {
+    const provider = localCredentialProviderForAdapter(input.adapterType);
+    return provider ? { key: localConnectionKey(provider), grantId: null, provider } : null;
+  }
+  const binding = aiRuntimeConnectionBindingSchema.safeParse(input.aiConnection);
+  if (!binding.success || binding.data.mode === "router") return null;
+  if (binding.data.mode === "shared" || binding.data.mode === "delegated") {
+    return { key: binding.data.connectionId, grantId: binding.data.grantId, provider: binding.data.provider };
+  }
+  if (!input.responsibleUserId) return null;
+  const [selected] = await db.select({ grantId: connectionGrants.id, connectionId: connectionGrants.connectionId })
+    .from(aiProviderDefaults)
+    .innerJoin(connectionGrants, and(eq(connectionGrants.companyId, aiProviderDefaults.companyId), eq(connectionGrants.id, aiProviderDefaults.grantId)))
+    .where(and(eq(aiProviderDefaults.companyId, input.companyId), eq(aiProviderDefaults.userId, input.responsibleUserId),
+      eq(aiProviderDefaults.provider, binding.data.provider)));
+  return selected ? { key: selected.connectionId, grantId: selected.grantId, provider: binding.data.provider } : null;
 }
 
 export function subscriptionWindowGateService(
   db: Db,
-  deps: { readQuotaSnapshot?: QuotaSnapshotReader } = {},
+  deps: { readQuotaSnapshot?: QuotaSnapshotReader; readConnectionUsage?: ConnectionUsageReader } = {},
 ) {
-  const readQuotaSnapshot = deps.readQuotaSnapshot ?? readSharedQuotaSnapshot;
+  const readConnectionUsage = deps.readConnectionUsage ?? createConnectionUsageReader(db, { readQuotaSnapshot: deps.readQuotaSnapshot });
 
   async function listPolicies(input: {
     companyId: string;
     agentId: string;
     projectId?: string | null;
+    /** Only rules on this connection; omit to list every connection's rules. */
+    connectionKey?: string;
   }): Promise<SubscriptionWindowPolicy[]> {
     const scopeConditions = [
       and(eq(budgetPolicies.scopeType, "company"), eq(budgetPolicies.scopeId, input.companyId)),
@@ -596,6 +630,11 @@ export function subscriptionWindowGateService(
           eq(budgetPolicies.companyId, input.companyId),
           eq(budgetPolicies.isActive, true),
           eq(budgetPolicies.metric, "subscription_percent"),
+          input.connectionKey === undefined ? undefined : input.connectionKey.startsWith("local:")
+            // A provider-only row predates connection keys and means that provider's local credentials.
+            ? or(eq(budgetPolicies.connectionFilter, input.connectionKey),
+              and(eq(budgetPolicies.connectionFilter, ""), eq(budgetPolicies.provider, input.connectionKey.slice("local:".length))))
+            : eq(budgetPolicies.connectionFilter, input.connectionKey),
           gt(budgetPolicies.amount, 0),
           inArray(budgetPolicies.scopeType, ["company", "agent", "project"]),
           or(...scopeConditions),
@@ -627,14 +666,15 @@ export function subscriptionWindowGateService(
      * instead of letting it through (see decideSubscriptionWindowWait).
      */
     evaluate: async (input: SubscriptionWindowGateInput): Promise<SubscriptionWindowWait | null> => {
-      if (bindingBypassesSubscriptionWindow(input.aiConnection)) return null;
-      const provider = providerSlugForAdapterType(input.adapterType);
-      const policies = (await listPolicies(input)).filter((policy) => policy.provider === provider);
+      // Subscription rules belong to one connection and read that connection's
+      // usage, so agents on other accounts of the same provider are not held.
+      const connection = input.connection !== undefined ? input.connection : await resolveRunConnection(db, input);
+      if (!connection) return null;
+      const policies = await listPolicies({ ...input, connectionKey: connection.key });
       if (policies.length === 0) return null;
       const now = input.now ?? new Date();
-      const snapshot = await readQuotaSnapshot({ now });
-      const result = snapshot.results.find((row) => row.provider === provider) ?? null;
-      return decideSubscriptionWindowWait({ policies, result, provider, now });
+      const result = await readConnectionUsage(input.companyId, connection.key, connection.grantId);
+      return decideSubscriptionWindowWait({ policies, result, provider: connection.provider, now });
     },
   };
 }

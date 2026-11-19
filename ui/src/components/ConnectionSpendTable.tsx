@@ -1,23 +1,23 @@
-import { BUDGET_CONNECTION_FILTER_UNMANAGED, type CostByConnection } from "@paperclipai/shared";
+import { localCredentialsLabel, parseConnectionBudgetKey, type CostByConnection } from "@paperclipai/shared";
 import { formatCents, formatTokens, providerDisplayName } from "@/lib/utils";
 
-export const UNMANAGED_CONNECTION_LABEL = "Existing authentication — not managed by Connections";
-
-/** Display name for a connection spend row or a budget connection filter. */
-export function connectionLabel(input: { connectionId: string | null; connectionName?: string | null }) {
-  if (!input.connectionId || input.connectionId === BUDGET_CONNECTION_FILTER_UNMANAGED) return UNMANAGED_CONNECTION_LABEL;
+/** Display name for a connection budget key: the connection's name, or the
+ * harness's local credentials ("Claude Code local credentials"). */
+export function connectionLabel(input: { connectionKey: string | null | undefined; connectionName?: string | null }) {
+  const key = parseConnectionBudgetKey(input.connectionKey);
+  if (key?.kind === "local") return input.connectionName ?? localCredentialsLabel(key.provider);
   return input.connectionName ?? "Removed connection";
 }
 
 /** Spend per AI Connection for the selected range. */
 export function ConnectionSpendTable({ rows }: { rows: CostByConnection[] }) {
-  const visible = rows.filter((row) => row.eventCount > 0 || row.connectionId !== null);
+  const visible = rows;
   return (
     <section className="space-y-3" aria-label="Spend by connection">
       <div className="space-y-1">
         <h2 className="text-lg font-semibold">Spend by connection</h2>
         <p className="text-sm text-muted-foreground">
-          Usage grouped by the AI connection each run used. Agents on the same provider but different connections, such as an Anthropic subscription and an Anthropic-compatible gateway, are listed separately.
+          Usage grouped by the account each run used. Every AI connection is listed separately, even on the same provider; agents without a managed connection use their harness’s local credentials.
         </p>
       </div>
       <div className="overflow-hidden rounded-xl border border-border" role="table" aria-label="Connection spend">
@@ -29,11 +29,12 @@ export function ConnectionSpendTable({ rows }: { rows: CostByConnection[] }) {
         </div>
         <div role="rowgroup" className="divide-y divide-border">
           {visible.map((row) => (
-            <div role="row" key={row.connectionId ?? BUDGET_CONNECTION_FILTER_UNMANAGED} className="grid grid-cols-1 gap-2 bg-card px-5 py-4 md:grid-cols-12 md:items-center md:gap-6">
+            <div role="row" key={row.connectionKey} className="grid grid-cols-1 gap-2 bg-card px-5 py-4 md:grid-cols-12 md:items-center md:gap-6">
               <div role="cell" className="space-y-1 md:col-span-5">
                 <div className="font-medium">{connectionLabel(row)}</div>
                 <div className="text-xs text-muted-foreground">
                   {row.provider ? providerDisplayName(row.provider) : "Mixed providers"}
+                  {row.connectionId === null ? " · local credentials" : row.method === "subscription" ? " · subscription" : row.method === "api_key" ? " · API key" : ""}
                   {!row.connectionExists ? " · connection removed" : ""}
                 </div>
               </div>

@@ -161,6 +161,10 @@ import { isHeartbeatWakeOnDemandEnabled } from "../heartbeat-policy.js";
 import { isUuidLike } from "@paperclipai/shared";
 import { retryChatControlAdmission } from "../chat-control-admission-retry.js";
 import {
+  CONNECTION_BUDGET_RECHECK_MS,
+  CONNECTION_BUDGET_SKIPPED_ERROR_CODE,
+  CONNECTION_BUDGET_WAIT_RETRY_REASON,
+  resolveRunConnection,
   SUBSCRIPTION_WINDOW_SKIPPED_ERROR_CODE,
   SUBSCRIPTION_WINDOW_WAIT_EXHAUSTED_ERROR_CODE,
   SUBSCRIPTION_WINDOW_WAIT_RETRY_REASON,
@@ -212,7 +216,7 @@ export interface HeartbeatQueueDependencies extends Pick<HeartbeatRetryDependenc
   options: Pick<HeartbeatServiceOptions, "beforeChatControlRecoveryCheck">;
   issuesSvc: Pick<ReturnType<typeof issueService>, "getDependencyReadiness" | "listDependencyReadiness" | "listReadyUnassignedChildDependents">;
   treeControlSvc: Pick<ReturnType<typeof issueTreeControlService>, "getActivePauseHoldGate">;
-  budgets: Pick<ReturnType<typeof budgetService>, "getInvocationBlock">;
+  budgets: Pick<ReturnType<typeof budgetService>, "getInvocationBlock" | "getConnectionBlock">;
   subscriptionWindowGate: Pick<ReturnType<typeof subscriptionWindowGateService>, "evaluate">;
   instanceSettings: Pick<ReturnType<typeof instanceSettingsService>, "getExperimental">;
   runDispatch: Pick<ReturnType<typeof createRunDispatch>, "cancelStaleQueuedRun">;
@@ -705,6 +709,66 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       },
       "claimQueuedRun: deferred queued run for subscription window",
     );
+    return deferred;
+  }
+
+  /** The account this run will use, resolving a responsible-user default only when the binding needs it. */
+  async function resolveDispatchConnection(
+    run: typeof heartbeatRuns.$inferSelect,
+    agent: NonNullable<Awaited<ReturnType<typeof getAgent>>>,
+    context: Record<string, unknown>,
+  ) {
+    const binding = agent.runtimeConfig?.aiConnection;
+    const needsUser = binding != null && typeof binding === "object" && (binding as { mode?: unknown }).mode === "responsible_user";
+    const issueId = readNonEmptyString(context.issueId);
+    const responsibleUserId = needsUser ? await resolveResponsibleUserIdForRun({
+      run,
+      contextSnapshot: context,
+      issueContext: issueId ? await getIssueExecutionContext(run.companyId, issueId) : null,
+      routineEnvContext: { routineId: null, env: null, responsibleUserId: null },
+    }) : null;
+    return resolveRunConnection(db, { companyId: run.companyId, adapterType: agent.adapterType, aiConnection: binding, responsibleUserId });
+  }
+
+  async function holdQueuedRunForConnectionBudget(
+    run: typeof heartbeatRuns.$inferSelect,
+    block: NonNullable<Awaited<ReturnType<HeartbeatQueueDependencies["budgets"]["getConnectionBlock"]>>>,
+  ) {
+    const now = new Date();
+    const summary = { policyId: block.policyId, connectionKey: block.connectionKey, connectionName: block.connectionName,
+      reason: block.reason, windowEnd: block.windowEnd.toISOString() };
+    if (run.invocationSource === "timer") {
+      const reason = `Skipped timer heartbeat: ${block.reason}`;
+      const cancelled = await setRunStatus(run.id, "cancelled", {
+        finishedAt: now,
+        error: reason,
+        errorCode: CONNECTION_BUDGET_SKIPPED_ERROR_CODE,
+        resultJson: { ...parseObject(run.resultJson), stopReason: CONNECTION_BUDGET_SKIPPED_ERROR_CODE, connectionBudgetWait: summary },
+      });
+      if (!cancelled) return null;
+      await setWakeupStatus(run.wakeupRequestId, "skipped", { finishedAt: now, error: reason });
+      await appendRunEvent(cancelled, { eventType: "lifecycle", stream: "system", level: "info", message: reason, payload: summary });
+      await releaseIssueExecutionAndPromote(cancelled, { suppressImmediateRecovery: true });
+      return cancelled;
+    }
+    // Re-check periodically: the board can raise the budget at any time, and a
+    // monthly budget frees the connection when its window ends.
+    const resumeAt = new Date(Math.min(block.windowEnd.getTime(), now.getTime() + CONNECTION_BUDGET_RECHECK_MS));
+    const attempt = run.scheduledRetryReason === CONNECTION_BUDGET_WAIT_RETRY_REASON ? (run.scheduledRetryAttempt ?? 0) + 1 : 1;
+    const deferred = await setRunStatus(run.id, "scheduled_retry", {
+      scheduledRetryAt: resumeAt,
+      scheduledRetryAttempt: attempt,
+      scheduledRetryReason: CONNECTION_BUDGET_WAIT_RETRY_REASON,
+      resultJson: { ...parseObject(run.resultJson), connectionBudgetWait: { ...summary, resumeAt: resumeAt.toISOString() } },
+    });
+    if (!deferred) return null;
+    await appendRunEvent(deferred, {
+      eventType: "lifecycle", stream: "system", level: "info",
+      message: `Deferred while the connection budget is reached: ${block.reason}`,
+      payload: { ...summary, resumeAt: resumeAt.toISOString(), scheduledRetryAttempt: attempt },
+    });
+    logger.info({ runId: run.id, agentId: run.agentId, policyId: block.policyId, resumeAt: resumeAt.toISOString(), attempt },
+      "claimQueuedRun: deferred queued run for a reached connection budget");
     return deferred;
   }
 
@@ -1216,12 +1280,24 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       return null;
     }
 
+    // Connection budgets hold only runs on the connection that reached its
+    // budget or subscription limit; agents on other connections keep running.
+    const projectId = readNonEmptyString(context.projectId);
+    const connection = await resolveDispatchConnection(run, agent, context);
+    const connectionBlock = connection
+      ? await budgets.getConnectionBlock(run.companyId, run.agentId, projectId, connection.key)
+      : null;
+    if (connectionBlock) {
+      await holdQueuedRunForConnectionBudget(run, connectionBlock);
+      return null;
+    }
+
     const subscriptionWait = await subscriptionWindowGate.evaluate({
       companyId: run.companyId,
       agentId: run.agentId,
       adapterType: agent.adapterType,
-      projectId: readNonEmptyString(context.projectId),
-      aiConnection: agent.runtimeConfig?.aiConnection,
+      projectId,
+      connection,
     });
     if (subscriptionWait) {
       await holdQueuedRunForSubscriptionWindow(run, subscriptionWait);

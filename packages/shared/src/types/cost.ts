@@ -168,12 +168,18 @@ export interface CostByBiller {
   modelCount: number;
 }
 
-/** Spend per AI Connection. `connectionId` null is usage on host credentials
- * not managed by Connections ("Existing authentication"). */
+/** Spend per AI Connection. A row with `connectionId: null` is a provider's
+ * local credentials (the harness's host login), keyed `local:<provider>`. */
 export interface CostByConnection {
+  /** Connection budget key: the connection id, or `local:<provider>`. */
+  connectionKey: string;
   connectionId: string | null;
-  /** Null when the connection was removed after the usage was recorded. */
+  /** Connection name or local credentials label; null when the connection was removed. */
   connectionName: string | null;
+  /** Method of a managed connection; null for local credentials or a removed connection. */
+  method: string | null;
+  /** True when Paperclip can read this connection's plan usage windows. */
+  usageSupported: boolean;
   provider: string | null;
   /** False once the connection no longer exists; its ledger rows remain. */
   connectionExists: boolean;

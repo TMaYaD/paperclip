@@ -1,7 +1,7 @@
 import { exactCentsSchema } from "../accounting.js";
 import { z } from "zod";
+import { connectionBudgetKeySchema } from "../connection-budget-key.js";
 import {
-  BUDGET_CONNECTION_FILTER_UNMANAGED,
   BUDGET_INCIDENT_RESOLUTION_ACTIONS,
   BUDGET_METRICS,
   BUDGET_SCOPE_TYPES,
@@ -15,7 +15,8 @@ export const upsertBudgetPolicySchema = z.object({
   scopeId: z.string().guid(),
   metric: z.enum(BUDGET_METRICS).optional().default("billed_cents"),
   provider: z.enum(SUBSCRIPTION_BUDGET_PROVIDERS).nullable().optional(),
-  connectionFilter: z.union([z.literal(BUDGET_CONNECTION_FILTER_UNMANAGED), z.string().guid()]).nullable().optional(),
+  /** AI connection id or `local:<provider>`; required on new subscription rules (see `provider`). */
+  connectionFilter: connectionBudgetKeySchema.nullable().optional(),
   windowKind: z.enum(BUDGET_WINDOW_KINDS).optional().default("calendar_month_utc"),
   // Omitted fields keep the stored value on an existing policy.
   amount: z.number().int().nonnegative().max(2_147_483_647).optional(),
@@ -30,13 +31,14 @@ export const upsertBudgetPolicySchema = z.object({
 }).superRefine((value, ctx) => {
   const subscriptionWindow = isSubscriptionBudgetWindowKind(value.windowKind);
   if (value.metric === "subscription_percent") {
-    if (!value.provider) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Subscription rules require a provider", path: ["provider"] });
+    // Older clients name only the provider; that rule reads the provider's local credentials.
+    if (!value.provider && !value.connectionFilter) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Subscription rules require a connection", path: ["connectionFilter"] });
     }
     if (!subscriptionWindow) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "subscription_percent budgets require a provider_session or provider_week window",
+        message: "subscription_percent budgets require a provider session, day, week or month window",
         path: ["windowKind"],
       });
     }
@@ -50,7 +52,7 @@ export const upsertBudgetPolicySchema = z.object({
   } else if (subscriptionWindow) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
-      message: "provider_session and provider_week windows require the subscription_percent metric",
+      message: "Provider windows require the subscription_percent metric",
       path: ["windowKind"],
     });
   }
@@ -65,9 +67,6 @@ export const upsertBudgetPolicySchema = z.object({
   }
   if (value.metric !== "subscription_percent" && value.provider != null) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Money budgets cannot select a subscription provider", path: ["provider"] });
-  }
-  if (value.metric === "subscription_percent" && value.connectionFilter) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Connection filters apply to money budgets only", path: ["connectionFilter"] });
   }
   if (value.progressive === true && value.metric !== "subscription_percent") {
     ctx.addIssue({

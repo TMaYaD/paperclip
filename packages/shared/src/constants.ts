@@ -874,12 +874,6 @@ export type FinanceUnit = (typeof FINANCE_UNITS)[number];
 export const BUDGET_SCOPE_TYPES = ["company", "agent", "project"] as const;
 export type BudgetScopeType = (typeof BUDGET_SCOPE_TYPES)[number];
 
-/**
- * Money budget connection filter for usage on host credentials that are not
- * managed by Connections ("Existing authentication"). Any other non-empty
- * filter is an AI Connection id; the empty filter counts all usage.
- */
-export const BUDGET_CONNECTION_FILTER_UNMANAGED = "unmanaged" as const;
 
 export const BUDGET_METRICS = ["billed_cents", "subscription_percent"] as const;
 export type BudgetMetric = (typeof BUDGET_METRICS)[number];
@@ -888,7 +882,9 @@ export const BUDGET_WINDOW_KINDS = [
   "calendar_month_utc",
   "lifetime",
   "provider_session",
+  "provider_day",
   "provider_week",
+  "provider_month",
 ] as const;
 export type BudgetWindowKind = (typeof BUDGET_WINDOW_KINDS)[number];
 
@@ -897,7 +893,7 @@ export type BudgetWindowKind = (typeof BUDGET_WINDOW_KINDS)[number];
  * (for example the Claude "current session" and "current week" windows). Their
  * bounds come from the provider quota snapshot, not from the calendar.
  */
-export const SUBSCRIPTION_BUDGET_WINDOW_KINDS = ["provider_session", "provider_week"] as const;
+export const SUBSCRIPTION_BUDGET_WINDOW_KINDS = ["provider_session", "provider_day", "provider_week", "provider_month"] as const;
 export const SUBSCRIPTION_BUDGET_PROVIDERS = ["anthropic", "openai"] as const;
 export type SubscriptionBudgetProvider = (typeof SUBSCRIPTION_BUDGET_PROVIDERS)[number];
 export type SubscriptionBudgetWindowKind = (typeof SUBSCRIPTION_BUDGET_WINDOW_KINDS)[number];
@@ -905,7 +901,9 @@ export type SubscriptionBudgetWindowKind = (typeof SUBSCRIPTION_BUDGET_WINDOW_KI
 /** Stable machine keys for provider quota windows, independent of display labels. */
 export const QUOTA_WINDOW_KEYS = [
   "five_hour",
+  "one_day",
   "seven_day",
+  "thirty_day",
   "seven_day_sonnet",
   "seven_day_opus",
   "extra_usage",
@@ -916,7 +914,9 @@ export type QuotaWindowKey = (typeof QUOTA_WINDOW_KEYS)[number];
 /** Maps a subscription budget window kind to the provider quota window it reads. */
 export const SUBSCRIPTION_BUDGET_WINDOW_QUOTA_KEYS: Record<SubscriptionBudgetWindowKind, QuotaWindowKey> = {
   provider_session: "five_hour",
+  provider_day: "one_day",
   provider_week: "seven_day",
+  provider_month: "thirty_day",
 };
 
 /**
@@ -926,8 +926,35 @@ export const SUBSCRIPTION_BUDGET_WINDOW_QUOTA_KEYS: Record<SubscriptionBudgetWin
  */
 export const SUBSCRIPTION_BUDGET_WINDOW_DURATION_MS: Record<SubscriptionBudgetWindowKind, number> = {
   provider_session: 5 * 60 * 60 * 1000,
+  provider_day: 24 * 60 * 60 * 1000,
   provider_week: 7 * 24 * 60 * 60 * 1000,
+  provider_month: 30 * 24 * 60 * 60 * 1000,
 };
+
+/**
+ * Pace units per window for progressive rules: a pace is percent per hour for
+ * session and daily windows, and percent per day for weekly and monthly ones.
+ */
+export const SUBSCRIPTION_BUDGET_PACE_UNIT: Record<SubscriptionBudgetWindowKind, { unit: "hour" | "day"; unitsPerWindow: number }> = {
+  provider_session: { unit: "hour", unitsPerWindow: 5 },
+  provider_day: { unit: "hour", unitsPerWindow: 24 },
+  provider_week: { unit: "day", unitsPerWindow: 7 },
+  provider_month: { unit: "day", unitsPerWindow: 30 },
+};
+
+/**
+ * The quota window a provider-reported allowance of this length belongs to,
+ * or null for a length no subscription rule targets. Monthly allowances span
+ * 28 to 31 days.
+ */
+export function quotaWindowKeyForDuration(seconds: number | null | undefined): QuotaWindowKey | null {
+  if (seconds == null || !Number.isFinite(seconds)) return null;
+  if (seconds === 5 * 3600) return "five_hour";
+  if (seconds === 86_400) return "one_day";
+  if (seconds === 7 * 86_400) return "seven_day";
+  if (seconds >= 28 * 86_400 && seconds <= 31 * 86_400) return "thirty_day";
+  return null;
+}
 
 export function isSubscriptionBudgetWindowKind(value: string): value is SubscriptionBudgetWindowKind {
   return (SUBSCRIPTION_BUDGET_WINDOW_KINDS as readonly string[]).includes(value);

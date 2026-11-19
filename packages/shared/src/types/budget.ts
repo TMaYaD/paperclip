@@ -12,9 +12,10 @@ export interface BudgetPolicy {
   /** Subscription provider; null for money budgets. */
   provider?: string | null;
   /**
-   * Money budgets only. Empty counts all spend in the scope;
-   * `BUDGET_CONNECTION_FILTER_UNMANAGED` counts only usage on host credentials
-   * not managed by Connections; an AI Connection id counts only that connection.
+   * Connection budget key: an AI Connection id or `local:<provider>` (the
+   * harness's local credentials). Empty counts all spend in the scope. A rule
+   * with a key holds only runs on that connection and never pauses its scope;
+   * subscription rules always have one.
    */
   connectionFilter?: string;
   id: string;
@@ -163,7 +164,7 @@ export interface BudgetOverview {
 
 export interface BudgetPolicyUpsertInput {
   provider?: string | null;
-  /** Money budgets only; see `BudgetPolicy.connectionFilter`. Null or omitted counts all spend. */
+  /** See `BudgetPolicy.connectionFilter`. Required on new subscription rules (or name `provider` for its local credentials). */
   connectionFilter?: string | null;
   scopeType: BudgetScopeType;
   scopeId: string;

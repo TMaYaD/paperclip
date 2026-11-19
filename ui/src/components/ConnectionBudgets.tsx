@@ -1,8 +1,8 @@
 import { useState } from "react";
-import { BUDGET_CONNECTION_FILTER_UNMANAGED, type BudgetPolicySummary, type CostByConnection } from "@paperclipai/shared";
+import type { BudgetPolicySummary, CostByConnection } from "@paperclipai/shared";
 import { CheckCircle2, PauseCircle, Plus, TriangleAlert } from "lucide-react";
 import { BudgetUsageBar } from "./BudgetPolicyCard";
-import { connectionLabel, UNMANAGED_CONNECTION_LABEL } from "./ConnectionSpendTable";
+import { connectionLabel } from "./ConnectionSpendTable";
 import { cn, formatCents } from "../lib/utils";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
@@ -11,27 +11,27 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 
 export type ConnectionBudgetInput = { connectionFilter: string; amount: number };
 
-const filterKey = (connectionId: string | null) => connectionId ?? BUDGET_CONNECTION_FILTER_UNMANAGED;
 const scopeLabel = (rule: BudgetPolicySummary) => rule.scopeType === "company" ? "Organization" : rule.scopeName;
-const ruleLabel = (rule: BudgetPolicySummary) => connectionLabel({ connectionId: rule.connectionFilter ?? null, connectionName: rule.connectionName });
+const ruleLabel = (rule: BudgetPolicySummary) => connectionLabel({ connectionKey: rule.connectionFilter, connectionName: rule.connectionName });
 
 /**
- * Monthly money budgets that count only the spend on one AI Connection. A rule
- * is enforced on its scope: a hard stop pauses the organization (or the agent
- * or project the rule belongs to) as an unfiltered budget would.
+ * Monthly money budgets that count only the spend on one AI connection (or a
+ * harness's local credentials). A hard stop holds new runs on that connection
+ * until the budget is raised or the month resets; agents on other connections
+ * keep running, and runs already in progress finish.
  */
 export function ConnectionBudgets({ policies, connections, onSave, onDelete }: {
   policies: BudgetPolicySummary[];
-  /** Every AI connection in the company (and host credentials), for the picker. */
+  /** Every AI connection in the company and each harness's local credentials, for the picker. */
   connections: CostByConnection[];
   onSave: (input: ConnectionBudgetInput, policyId?: string) => Promise<unknown>;
   onDelete: (policyId: string) => Promise<unknown>;
 }) {
-  const rows = policies.filter((policy) => policy.metric === "billed_cents" && policy.connectionFilter)
+  const rows = policies.filter((policy) => policy.metric === "billed_cents" && Boolean(policy.connectionFilter))
     .toSorted((a, b) => ruleLabel(a).localeCompare(ruleLabel(b)) || a.scopeType.localeCompare(b.scopeType));
   const companyRuleFilters = new Set(rows.filter((row) => row.scopeType === "company").map((row) => row.connectionFilter));
   const options = connections.filter((connection) => connection.connectionExists)
-    .map((connection) => ({ value: filterKey(connection.connectionId), label: connection.connectionId ? connection.connectionName ?? "Connection" : UNMANAGED_CONNECTION_LABEL }));
+    .map((connection) => ({ value: connection.connectionKey, label: connectionLabel(connection) }));
   const [editing, setEditing] = useState<BudgetPolicySummary | "new" | null>(null);
   const [deleting, setDeleting] = useState<BudgetPolicySummary | null>(null);
   const [connectionFilter, setConnectionFilter] = useState("");
@@ -80,7 +80,7 @@ export function ConnectionBudgets({ policies, connections, onSave, onDelete }: {
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="space-y-1">
           <h2 className="text-lg font-semibold">Connection budgets</h2>
-          <p className="text-sm text-muted-foreground">Monthly spend limits that count only usage on one AI connection, across every agent that uses it. A hard stop pauses the rule’s scope, like any money budget.</p>
+          <p className="text-sm text-muted-foreground">Monthly spend limits for one AI connection, across every agent that uses it. When a budget is reached, new runs on that connection wait; agents on other connections keep running.</p>
         </div>
         <Button variant="outline" size="sm" onClick={() => openEditor("new")} disabled={pending || options.length === 0}><Plus />Add connection budget</Button>
       </div>
@@ -95,7 +95,7 @@ export function ConnectionBudgets({ policies, connections, onSave, onDelete }: {
           {rows.map((rule) => {
             const active = rule.isActive && rule.amount > 0;
             const observed = rule.observedAmountExact ? Number(rule.observedAmountExact) : rule.observedAmount;
-            const status = !active ? "Disabled" : rule.status === "hard_stop" ? (rule.paused ? "Hard stop · scope paused" : "Hard stop") : rule.status === "warning" ? "Near limit" : "Within budget";
+            const status = !active ? "Disabled" : rule.status === "hard_stop" ? "Budget reached · runs on this connection wait" : rule.status === "warning" ? "Near limit" : "Within budget";
             const StatusIcon = rule.status === "hard_stop" ? PauseCircle : rule.status === "warning" ? TriangleAlert : CheckCircle2;
             return <div role="row" key={rule.policyId} className="grid grid-cols-1 items-center gap-5 bg-card px-5 py-5 lg:grid-cols-12 lg:gap-6">
               <div role="cell" className="space-y-1 lg:col-span-3">
@@ -125,7 +125,7 @@ export function ConnectionBudgets({ policies, connections, onSave, onDelete }: {
               </div>
             </div>;
           })}
-          {rows.length === 0 && <div role="row"><div role="cell" className="px-5 py-8 text-sm text-muted-foreground">No connection budgets. Add one to cap the monthly spend of a single AI connection, such as an API-key gateway shared by several agents.</div></div>}
+          {rows.length === 0 && <div role="row"><div role="cell" className="px-5 py-8 text-sm text-muted-foreground">No connection budgets. Add one to cap the monthly spend of a single connection that several agents share.</div></div>}
         </div>
       </div>
       <Dialog open={editing !== null} onOpenChange={(open) => { if (!open && !pending) setEditing(null); }}>
@@ -142,7 +142,7 @@ export function ConnectionBudgets({ policies, connections, onSave, onDelete }: {
             <div className="space-y-2">
               <Label htmlFor="connection-budget-amount">Monthly budget (USD)</Label>
               <Input id="connection-budget-amount" type="number" min={0.01} step={0.01} value={amount} disabled={pending} onChange={(event) => setAmount(event.target.value)} />
-              <p className="text-xs text-muted-foreground">Enter a positive amount. Reaching it pauses the organization until the budget is raised or the month resets.</p>
+              <p className="text-xs text-muted-foreground">Enter a positive amount. When it is reached, new runs on this connection wait until you raise the budget or the month resets. Runs in progress finish.</p>
             </div>
             {(error || duplicate) && <p role="alert" className="text-sm text-destructive">{error ?? "This connection already has an organization budget. Edit that budget instead."}</p>}
             <DialogFooter><Button type="button" variant="outline" disabled={pending} onClick={() => setEditing(null)}>Cancel</Button><Button type="submit" disabled={pending || !validAmount || duplicate || !connectionFilter}>{pending ? "Saving…" : "Save budget"}</Button></DialogFooter>
@@ -150,7 +150,7 @@ export function ConnectionBudgets({ policies, connections, onSave, onDelete }: {
         </DialogContent>
       </Dialog>
       <Dialog open={deleting !== null} onOpenChange={(open) => { if (!open && !pending) setDeleting(null); }}>
-        <DialogContent><DialogHeader><DialogTitle>Remove connection budget?</DialogTitle><DialogDescription>Spend on {deleting ? ruleLabel(deleting) : "this connection"} will no longer be limited by this budget. If it paused the scope, the scope resumes unless another budget still blocks it.</DialogDescription></DialogHeader>
+        <DialogContent><DialogHeader><DialogTitle>Remove connection budget?</DialogTitle><DialogDescription>Spend on {deleting ? ruleLabel(deleting) : "this connection"} will no longer be limited by this budget. Runs waiting on it start at their next check.</DialogDescription></DialogHeader>
           {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
           <DialogFooter><Button variant="outline" disabled={pending} onClick={() => setDeleting(null)}>Cancel</Button><Button variant="destructive" disabled={pending} onClick={() => void remove()}>{pending ? "Removing…" : "Remove budget"}</Button></DialogFooter>
         </DialogContent>

@@ -248,6 +248,8 @@ describeEmbeddedPostgres("heartbeat subscription window wait", () => {
       scopeId: companyId,
       metric: "subscription_percent",
       provider: "openai",
+      // Agents without a managed binding run on their harness's local credentials.
+      connectionFilter: "local:openai",
       windowKind: "provider_session",
       amount,
       progressive: options.progressive ?? false,
@@ -328,7 +330,7 @@ describeEmbeddedPostgres("heartbeat subscription window wait", () => {
     }).where(eq(heartbeatRuns.id, runId));
     await db.insert(budgetPolicies).values({
       companyId, scopeType: "company", scopeId: companyId, metric: "subscription_percent",
-      windowKind: "provider_session", provider: "anthropic", amount: 80,
+      windowKind: "provider_session", provider: "anthropic", connectionFilter: "local:anthropic", amount: 80,
     });
     currentQuota = [...currentQuota, {
       ...quotaResults({ fiveHourUsedPercent: saturated ? 90 : 10 })[0]!, provider: "anthropic",

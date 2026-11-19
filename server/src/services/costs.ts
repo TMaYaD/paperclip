@@ -1,5 +1,6 @@
 import { receiptFingerprint } from "./receipt-fingerprint.js";
-import { agentAvatarUrl, resolveAgentAppearance, createCostEventSchema, createServiceCostEventSchema, normalizeCents, isUuidLike, type MoneyInput, type CostByUserReport, type CostByConnection } from "@paperclipai/shared";
+import { agentAvatarUrl, resolveAgentAppearance, createCostEventSchema, createServiceCostEventSchema, normalizeCents, isUuidLike, type MoneyInput, type CostByUserReport, type CostByConnection,
+  AI_PROVIDERS, aiConnectionMetadataSchema, localConnectionKey, localCredentialProviderForAdapter, localCredentialsLabel, supportsAiConnectionUsage, type AiProvider } from "@paperclipai/shared";
 import { and, desc, eq, gte, inArray, isNotNull, isNull, lt, lte, ne, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import type { Db } from "@paperclipai/db";
@@ -571,9 +572,13 @@ export function costService(db: Db, _budgetHooks: BudgetServiceHooks = {}) {
       const conditions: ReturnType<typeof eq>[] = [eq(costEvents.companyId, companyId)];
       if (range?.from) conditions.push(gte(costEvents.occurredAt, range.from));
       if (range?.to) conditions.push(lte(costEvents.occurredAt, range.to));
-      const [spend, connections] = await Promise.all([
+      // Usage without a managed connection is grouped by provider: Claude Code
+      // and Codex local credentials are separate accounts.
+      const localProvider = sql<string | null>`case when ${costEvents.aiConnectionId} is null then ${costEvents.provider} else null end`;
+      const [spend, connections, localAgents] = await Promise.all([
         db.select({
           connectionId: costEvents.aiConnectionId,
+          localProvider,
           costCents: sumAsNumber(costEvents.costCents),
           costCentsExact: sql<string>`coalesce(sum(${costEvents.costCents}), 0)::text`,
           eventCount: sql<number>`count(*)::int`,
@@ -583,22 +588,43 @@ export function costService(db: Db, _budgetHooks: BudgetServiceHooks = {}) {
           outputTokens: sumAsNumber(costEvents.outputTokens),
           agentCount: sql<number>`count(distinct ${costEvents.agentId})::int`,
           provider: sql<string | null>`case when count(distinct ${costEvents.provider}) = 1 then min(${costEvents.provider}) else null end`,
-        }).from(costEvents).where(and(...conditions)).groupBy(costEvents.aiConnectionId),
-        db.select({ id: toolConnections.id, name: toolConnections.name, provider: sql<string | null>`${toolConnections.config}->'ai'->>'provider'` })
+        }).from(costEvents).where(and(...conditions)).groupBy(costEvents.aiConnectionId, localProvider),
+        db.select({ id: toolConnections.id, name: toolConnections.name, config: toolConnections.config })
           .from(toolConnections).where(and(eq(toolConnections.companyId, companyId), eq(toolConnections.connectionPurpose, "ai"))),
+        db.select({ adapterType: agents.adapterType }).from(agents)
+          .where(and(eq(agents.companyId, companyId), sql`${agents.runtimeConfig}->'aiConnection' is null`)),
       ]);
       const empty = { costCents: 0, costCentsExact: "0", eventCount: 0, unpricedEventCount: 0, inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, agentCount: 0 };
-      const spendById = new Map(spend.map((row) => [row.connectionId, row]));
+      const totals = (row: (typeof spend)[number] | undefined) => row ? {
+        costCents: row.costCents, costCentsExact: row.costCentsExact, eventCount: row.eventCount, unpricedEventCount: row.unpricedEventCount,
+        inputTokens: row.inputTokens, cachedInputTokens: row.cachedInputTokens, outputTokens: row.outputTokens, agentCount: row.agentCount,
+      } : empty;
       const rows: CostByConnection[] = [];
-      const unmanaged = spendById.get(null);
-      rows.push({ ...empty, ...unmanaged, connectionId: null, connectionName: null, connectionExists: true, provider: unmanaged?.provider ?? null });
+      // Local credentials: providers with usage, plus harnesses whose agents use them today.
+      const localProviders = new Set<string>(spend.flatMap((row) => row.connectionId == null && row.localProvider ? [row.localProvider] : []));
+      for (const agent of localAgents) {
+        const provider = localCredentialProviderForAdapter(agent.adapterType);
+        if (provider) localProviders.add(provider);
+      }
+      for (const provider of localProviders) {
+        const row = spend.find((candidate) => candidate.connectionId == null && candidate.localProvider === provider);
+        const usageProvider = (AI_PROVIDERS as readonly string[]).includes(provider) ? provider as AiProvider : null;
+        rows.push({ ...totals(row), connectionKey: usageProvider ? localConnectionKey(usageProvider) : `local:${provider}`, connectionId: null,
+          connectionName: localCredentialsLabel(provider), provider, method: null, connectionExists: true,
+          // Host logins report Claude Code and Codex subscription windows.
+          usageSupported: provider === "anthropic" || provider === "openai" });
+      }
       for (const connection of connections) {
-        const row = spendById.get(connection.id);
-        rows.push({ ...empty, ...row, connectionId: connection.id, connectionName: connection.name, connectionExists: true, provider: connection.provider ?? row?.provider ?? null });
+        const row = spend.find((candidate) => candidate.connectionId === connection.id);
+        const metadata = aiConnectionMetadataSchema.safeParse(connection.config.ai);
+        rows.push({ ...totals(row), connectionKey: connection.id, connectionId: connection.id, connectionName: connection.name, connectionExists: true,
+          provider: metadata.success ? metadata.data.provider : row?.provider ?? null, method: metadata.success ? metadata.data.method : null,
+          usageSupported: metadata.success && supportsAiConnectionUsage(metadata.data.provider, metadata.data.method, metadata.data.routing) });
       }
       const known = new Set(connections.map((connection) => connection.id));
       for (const row of spend) {
-        if (row.connectionId && !known.has(row.connectionId)) rows.push({ ...row, connectionId: row.connectionId, connectionName: null, connectionExists: false });
+        if (row.connectionId && !known.has(row.connectionId)) rows.push({ ...totals(row), connectionKey: row.connectionId, connectionId: row.connectionId,
+          connectionName: null, provider: row.provider, method: null, connectionExists: false, usageSupported: false });
       }
       return rows.sort((a, b) => b.costCents - a.costCents);
     },

@@ -385,7 +385,7 @@ export function Costs({
     staleTime: 10_000,
   });
 
-  // The budget editor lists every AI connection; spend amounts are not shown.
+  // Budget editors list every connection and each harness's local credentials.
   const { data: budgetConnectionData } = useQuery({
     queryKey: queryKeys.usageByConnection(companyId),
     queryFn: () => costsApi.byConnection(companyId),
@@ -963,7 +963,7 @@ export function Costs({
                 <CardHeader className="px-5 pt-5 pb-3">
                   <CardTitle className="text-base">Budget control plane</CardTitle>
                   <CardDescription>
-                    Hard-stop spend limits for agents and projects, plus subscription usage limits that defer new runs until the provider window resets.
+                    Hard-stop spend limits for agents and projects, plus per-connection spend and subscription usage limits that hold only the runs on that connection.
                   </CardDescription>
                 </CardHeader>
                 <CardContent className="grid gap-3 px-5 pb-5 pt-0 md:grid-cols-4">
@@ -1023,6 +1023,7 @@ export function Costs({
 
               <SubscriptionWindowBudgets
                 policies={subscriptionBudgetPolicies}
+                connections={budgetConnectionData ?? []}
                 onSave={async (input, policyId) => {
                   const data = { ...input, scopeType: "company" as const, scopeId: companyId, metric: "subscription_percent" as const };
                   if (policyId) await budgetsApi.updatePolicy(companyId, policyId, data);

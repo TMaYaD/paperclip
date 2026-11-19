@@ -1,6 +1,6 @@
-import { addCents, normalizeCents, usdToUnits, unitsToCents } from "@paperclipai/shared";
+import { addCents, normalizeCents, parseConnectionBudgetKey, usdToUnits, unitsToCents } from "@paperclipai/shared";
 import { and, eq, gte, inArray, lt, or, sql, type SQL } from "drizzle-orm";
-import { budgetPolicies, budgetReservations, browserUseRuns, browserUseSessions, costEvents, heartbeatRuns, issues, nativeRunFinalizations, type Db } from "@paperclipai/db";
+import { agents, budgetPolicies, budgetReservations, browserUseRuns, browserUseSessions, costEvents, heartbeatRuns, issues, nativeRunFinalizations, type Db } from "@paperclipai/db";
 import { withBudgetSpan } from "./budget-tracing.js";
 
 export interface BudgetExposure {
@@ -16,25 +16,32 @@ export interface BudgetExposure {
 export type SpendPolicy = Pick<typeof budgetPolicies.$inferSelect, "companyId" | "scopeType" | "scopeId" | "windowKind" | "metric">
   & Partial<Pick<typeof budgetPolicies.$inferSelect, "connectionFilter">>;
 
-const UNMANAGED_CONNECTION_FILTER = "unmanaged";
-
 /** The AI Connection a run executed under, as recorded at execution time. */
 const runConnectionId = sql`${heartbeatRuns.contextSnapshot}->'aiConnection'->>'connectionId'`;
 
+/** Provider of the local credentials an agent's harness uses (see
+ * `localCredentialProviderForAdapter`), for runs with no managed connection. */
+const runLocalProvider = sql`(select case ${agents.adapterType}
+  when 'claude_local' then 'anthropic' when 'codex_local' then 'openai'
+  when 'gemini_local' then 'google' when 'grok_local' then 'xai' else null end
+  from ${agents} where ${agents.id} = ${heartbeatRuns.agentId})`;
+
 /** Connection predicates for a filtered money budget. Usage is matched on the
- * connection recorded with it: ledger rows carry `ai_connection_id`; live runs
- * and held reservations read the run's execution-time attribution. Hosted
- * browser work is not AI Connection usage, so filtered budgets exclude it. */
+ * connection recorded with it: ledger rows carry `ai_connection_id` (null with
+ * the usage's provider for local credentials); live runs and held reservations
+ * read the run's execution-time attribution. Hosted browser work is not AI
+ * Connection usage, so filtered budgets exclude it. */
 function connectionPredicates(filter: string | undefined) {
-  if (!filter) return null;
-  if (filter === UNMANAGED_CONNECTION_FILTER) {
-    // Decision and other service reservations have no run; they always name
-    // a connection, so they never count as unmanaged host-credential usage.
-    return { ledger: sql`${costEvents.aiConnectionId} is null`, run: sql`${runConnectionId} is null`,
-      held: sql`${heartbeatRuns.id} is not null and ${runConnectionId} is null` };
+  const parsed = parseConnectionBudgetKey(filter);
+  if (!parsed) return null;
+  if (parsed.kind === "local") {
+    const run = sql`${runConnectionId} is null and ${runLocalProvider} = ${parsed.provider}`;
+    return { ledger: and(sql`${costEvents.aiConnectionId} is null`, eq(costEvents.provider, parsed.provider))!,
+      // Decision and other service reservations have no run and always name a connection.
+      run, held: sql`${heartbeatRuns.id} is not null and ${run}` };
   }
-  const run = sql`${runConnectionId} = ${filter}`;
-  return { ledger: eq(costEvents.aiConnectionId, filter), run, held: run };
+  const run = sql`${runConnectionId} = ${parsed.connectionId}`;
+  return { ledger: eq(costEvents.aiConnectionId, parsed.connectionId), run, held: run };
 }
 export type ObservedSpend = BudgetExposure & {
   windowStart: Date; windowEnd: Date; total: number; totalExact: string;

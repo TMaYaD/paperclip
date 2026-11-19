@@ -76,7 +76,7 @@ export function AiConnectionUsagePanel({ account, observation, cachedOnly = fals
   const probe = useMutation({
     mutationFn: () => aiConnectionsApi.probeUsage(account.companyId, account.id, account.grantId),
   });
-  const supported = supportsAiConnectionUsage(account.provider, account.method);
+  const supported = account.usageProbeSupported ?? supportsAiConnectionUsage(account.provider, account.method);
   const usage = cachedOnly ? observation : probe.isSuccess ? probe.data : undefined;
   return (
     <section aria-label="Account usage limits" className="space-y-3">

@@ -10,13 +10,15 @@ import { ConnectionSpendTable } from "./ConnectionSpendTable";
 const MINIMAX = "8e4f0f9c-0a1b-4c55-9b8a-2b6f5e1d7c11";
 const CLAUDE_API = "1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f";
 const spend = (overrides: Partial<CostByConnection>): CostByConnection => ({
-  connectionId: null, connectionName: null, provider: "anthropic", connectionExists: true, costCents: 0, costCentsExact: "0",
+  connectionKey: "local:anthropic", connectionId: null, connectionName: "Claude Code local credentials", provider: "anthropic", method: null,
+  usageSupported: true, connectionExists: true, costCents: 0, costCentsExact: "0",
   eventCount: 0, unpricedEventCount: 0, inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, agentCount: 0, ...overrides,
 });
 const connections = [
   spend({ costCents: 300, eventCount: 3, agentCount: 1 }),
-  spend({ connectionId: MINIMAX, connectionName: "my api.minimax.io", costCents: 120, eventCount: 2, agentCount: 1 }),
-  spend({ connectionId: CLAUDE_API, connectionName: "My Claude API" }),
+  spend({ connectionKey: "local:openai", connectionName: "Codex local credentials", provider: "openai", costCents: 50, eventCount: 1, agentCount: 1 }),
+  spend({ connectionKey: MINIMAX, connectionId: MINIMAX, connectionName: "my api.minimax.io", method: "subscription", costCents: 120, eventCount: 2, agentCount: 1 }),
+  spend({ connectionKey: CLAUDE_API, connectionId: CLAUDE_API, connectionName: "My Claude API", method: "api_key", usageSupported: false }),
 ];
 const rule: BudgetPolicySummary = {
   policyId: "minimax-rule", companyId: "company", scopeType: "company", scopeId: "company", scopeName: "Company",
@@ -54,17 +56,23 @@ describe("connection budgets", () => {
     expect(rows[0].textContent).toContain("Near limit");
   });
 
+  it("says a reached budget holds only that connection's runs", async () => {
+    await render([{ ...rule, status: "hard_stop", observedAmount: 1000, observedAmountExact: "1000.0000000" }]);
+    expect(container.textContent).toContain("Budget reached · runs on this connection wait");
+    expect(container.textContent).not.toContain("paused");
+  });
+
   it("adds a budget for an unbudgeted connection, in cents", async () => {
     const { onSave } = await render();
     await act(async () => button("Add connection budget").click());
     const select = document.querySelector<HTMLSelectElement>("#connection-budget-connection")!;
     expect([...select.options].map((option) => option.textContent)).toEqual([
-      "Existing authentication — not managed by Connections", "my api.minimax.io", "My Claude API",
+      "Claude Code local credentials", "Codex local credentials", "my api.minimax.io", "My Claude API",
     ]);
-    expect(select.value).toBe("unmanaged");
+    expect(select.value).toBe("local:anthropic");
     await typeAmount("25.5");
     await submit();
-    expect(onSave).toHaveBeenCalledWith({ connectionFilter: "unmanaged", amount: 2550 }, undefined);
+    expect(onSave).toHaveBeenCalledWith({ connectionFilter: "local:anthropic", amount: 2550 }, undefined);
   });
 
   it("edits an existing rule by ID without changing its connection", async () => {
@@ -85,18 +93,15 @@ describe("connection budgets", () => {
 });
 
 describe("connection spend table", () => {
-  it("lists connections separately and labels host credentials", async () => {
+  it("lists every connection separately, with local credentials per harness", async () => {
     await act(async () => root.render(<ConnectionSpendTable rows={connections} />));
     const rows = [...container.querySelectorAll('[role="rowgroup"] [role="row"]')].map((row) => row.textContent);
-    expect(rows[0]).toContain("Existing authentication — not managed by Connections");
+    expect(rows[0]).toContain("Claude Code local credentials");
     expect(rows[0]).toContain("$3.00");
-    expect(rows[1]).toContain("my api.minimax.io");
-    expect(rows[1]).toContain("$1.20");
-    expect(rows[2]).toContain("My Claude API");
-  });
-
-  it("hides the host-credential row when it has no usage", async () => {
-    await act(async () => root.render(<ConnectionSpendTable rows={[spend({}), connections[1]]} />));
-    expect(container.textContent).not.toContain("Existing authentication");
+    expect(rows[1]).toContain("Codex local credentials");
+    expect(rows[2]).toContain("my api.minimax.io");
+    expect(rows[2]).toContain("subscription");
+    expect(rows[2]).toContain("$1.20");
+    expect(rows[3]).toContain("My Claude API");
   });
 });

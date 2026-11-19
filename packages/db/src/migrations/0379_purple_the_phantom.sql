@@ -21,3 +21,8 @@ UPDATE "cost_events" AS ce SET "ai_connection_id" = fr."connection_id"
 FROM "fast_response_requests" AS fr
 WHERE ce."usage_kind" = 'fast_response' AND ce."ai_connection_id" IS NULL AND ce."company_id" = fr."company_id"
   AND fr."connection_id" IS NOT NULL AND ce."idempotency_key" = 'fast-response:' || fr."id"::text;
+--> statement-breakpoint
+-- Subscription rules belong to one connection. A provider rule read the host
+-- login's usage, so it becomes a rule on that provider's local credentials.
+UPDATE "budget_policies" SET "connection_filter" = 'local:' || "provider"
+WHERE "metric" = 'subscription_percent' AND "connection_filter" = '' AND "provider" <> '';

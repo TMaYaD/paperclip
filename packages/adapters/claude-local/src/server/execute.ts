@@ -1,5 +1,4 @@
 import { isOpenRouterUrl, openRouterClaudeHeaders } from "@paperclipai/shared/openrouter-attribution";
-import { resolveClaudeBillingIdentity } from "./billing.js";
 import { applyObservabilityEnvironment } from "@paperclipai/adapter-utils/agent-observability";
 import { createProviderStoppedBoundary } from "@paperclipai/adapter-utils/provider-stopped-boundary";
 import { createUsageCheckpointLog } from "@paperclipai/adapter-utils/usage-checkpoint";
@@ -170,6 +169,10 @@ function isBedrockAuth(env: Record<string, string>): boolean {
   );
 }
 
+function resolveClaudeBillingType(env: Record<string, string>): "api" | "subscription" | "metered_api" {
+  if (isBedrockAuth(env)) return "metered_api";
+  return hasNonEmptyEnvValue(env, "ANTHROPIC_API_KEY") ? "api" : "subscription";
+}
 
 async function buildClaudeRuntimeConfig(input: ClaudeExecutionInput): Promise<ClaudeRuntimeConfig> {
   const { runId, agent, config, context, runtimeCommandSpec, executionTarget, authToken } = input;
@@ -503,8 +506,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   );
   const modelEnv = executionTargetIsRemote ? env : effectiveEnv;
   const model = resolveClaudeModel(config.model, modelEnv);
-  const billingIdentity = resolveClaudeBillingIdentity((key) => effectiveEnv[key]);
-  const billingType = billingIdentity.billingType;
+  const billingType = resolveClaudeBillingType(effectiveEnv);
   const claudeSkillEntries = await readPaperclipRuntimeSkillEntries(config, __moduleDir);
   const desiredSkillNames = new Set(resolveClaudeDesiredSkillNames(config, claudeSkillEntries));
   // Keep per-run working-copy paths out of the content-addressed system prompt.
@@ -959,7 +961,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const accountingLog = createUsageCheckpointLog(onLog, ctx.onUsage, stdout => {
       const parsed = consumeAccounting(stdout);
       return { usage: parsed.usage ?? undefined, usageBasis: "per_run", costUsd: parsed.costUsd,
-        provider: "anthropic", biller: billingIdentity.biller,
+        provider: "anthropic", biller: isBedrockAuth(effectiveEnv) ? "aws_bedrock" : "anthropic",
         billingType, model: Object.keys(parseObject(parsed.resultJson?.modelUsage)).length > 1 ? "mixed" : parsed.model || model,
           usageByModel: claudeModelReceipts(parsed.resultJson?.modelUsage), complete: parsed.resultJson !== null };
     });
@@ -1018,7 +1020,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         usage: parsedStream.usage ?? undefined,
         usageBasis: "per_run",
         provider: "anthropic",
-        biller: billingIdentity.biller,
+        biller: isBedrockAuth(effectiveEnv) ? "aws_bedrock" : "anthropic",
         model: Object.keys(parseObject(parsedStream.resultJson?.modelUsage)).length > 1 ? "mixed" : parsedStream.model || model,
         usageByModel: claudeModelReceipts(parsedStream.resultJson?.modelUsage),
         billingType,
@@ -1088,7 +1090,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         usage: parsedStream.usage ?? undefined,
         usageBasis: "per_run",
         provider: "anthropic",
-        biller: billingIdentity.biller,
+        biller: isBedrockAuth(effectiveEnv) ? "aws_bedrock" : "anthropic",
         model: Object.keys(parseObject(parsedStream.resultJson?.modelUsage)).length > 1 ? "mixed" : parsedStream.model || model,
         usageByModel: claudeModelReceipts(parsedStream.resultJson?.modelUsage),
         billingType,
@@ -1275,7 +1277,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       sessionParams: resolvedSessionParams,
       sessionDisplayId: resolvedSessionId,
       provider: "anthropic",
-      biller: billingIdentity.biller,
+      biller: isBedrockAuth(effectiveEnv) ? "aws_bedrock" : "anthropic",
       model: Object.keys(parseObject(parsed.modelUsage)).length > 1 ? "mixed" : parsedStream.model || asString(parsed.model, model),
       billingType,
       costUsd: parsedStream.costUsd,
@@ -1335,7 +1337,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           errorMessage,
           errorCode: "claude_cli_version_incompatible",
           provider: "anthropic",
-          biller: billingIdentity.biller,
+          biller: isBedrockAuth(effectiveEnv) ? "aws_bedrock" : "anthropic",
           model,
           billingType,
           resultJson: {

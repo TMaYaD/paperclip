@@ -61,7 +61,7 @@ export function BudgetIncidentCard({
                 {stateLabel}
               </Badge>
             </div>
-            <CardTitle className={isWarning ? "mt-1 text-base" : "mt-1 text-base text-red-950 dark:text-red-50"}>{incident.scopeName}{incident.connectionFilter ? ` · ${connectionLabel({ connectionId: incident.connectionFilter, connectionName: incident.connectionName })}` : ""}</CardTitle>
+            <CardTitle className={isWarning ? "mt-1 text-base" : "mt-1 text-base text-red-950 dark:text-red-50"}>{incident.scopeName}{incident.connectionFilter ? ` · ${connectionLabel({ connectionKey: incident.connectionFilter, connectionName: incident.connectionName })}` : ""}</CardTitle>
             <CardDescription className={isWarning ? "mt-1" : "mt-1 text-red-900/75 dark:text-red-100/70"}>
               {incident.thresholdType === "hard" && incident.amountObserved < incident.amountLimit
                 ? `Accounting is incomplete. Known spend is ${formatCents(incident.amountObserved)}; review pending or unpriced usage in the budget policy.`
@@ -117,7 +117,7 @@ export function BudgetIncidentCard({
               }}
             >
               <ArrowUpRight className="h-4 w-4" />
-              {isMutating ? "Applying..." : isWarning ? "Raise budget" : "Raise budget & resume"}
+              {isMutating ? "Applying..." : isWarning || incident.connectionFilter ? "Raise budget" : "Raise budget & resume"}
             </Button>
           </div>
           {parsed !== null && parsed <= incident.amountObserved ? (
@@ -129,7 +129,7 @@ export function BudgetIncidentCard({
 
         <div className="flex justify-end">
           <Button variant="ghost" className="text-muted-foreground" disabled={isMutating} onClick={onKeepPaused}>
-            {isWarning ? "Dismiss warning" : "Keep paused"}
+            {isWarning ? "Dismiss warning" : incident.connectionFilter ? "Keep runs waiting" : "Keep paused"}
           </Button>
         </div>
       </CardContent>

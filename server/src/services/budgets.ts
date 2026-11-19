@@ -15,9 +15,11 @@ import {
   toolConnections,
 } from "@paperclipai/db";
 import {
-  BUDGET_CONNECTION_FILTER_UNMANAGED,
+  localConnectionKey,
+  localCredentialsLabel,
+  parseConnectionBudgetKey,
+  type AiProvider,
   SUBSCRIPTION_BUDGET_WINDOW_DURATION_MS,
-  SUBSCRIPTION_BUDGET_PROVIDERS,
   isSubscriptionBudgetWindowKind,
   type BudgetIncident,
   type BudgetIncidentResolutionInput,
@@ -46,6 +48,7 @@ import {
   type SubscriptionWindowObservation,
 } from "./subscription-window-gate.js";
 import { computeObservedSpend, computeObservedSpends, type ObservedSpend } from "./budget-exposure.js";
+import { createConnectionUsageReader } from "./connection-usage-windows.js";
 import { notifyDeliveryWork, DELIVERY_QUEUES } from "./delivery-work-notifications.js";
 import { listPendingBudgetCancellationScopes } from "./heartbeat/budget-cancellation.js";
 import { withBudgetSpan } from "./budget-tracing.js";
@@ -71,6 +74,15 @@ export type BudgetEnforcementScope = {
   createdBefore?: Date;
   /** Revalidated at the durable cancellation write, under the admission lock. */
   enforcement?: { policyId: string; version: number };
+};
+
+export type ConnectionBudgetBlock = {
+  policyId: string;
+  connectionKey: string;
+  connectionName: string;
+  /** When the budget window ends; a monthly budget frees the connection then. */
+  windowEnd: Date;
+  reason: string;
 };
 
 export type BudgetServiceHooks = {
@@ -201,13 +213,14 @@ async function resolveScopeRecord(db: Db, scopeType: BudgetScopeType, scopeId: s
   };
 }
 
-/** Display name for a money budget's connection filter. "Existing
- * authentication" is the board's label for host credentials. */
+/** Display name for a policy's connection: the AI connection's name, or the
+ * harness's local credentials ("Claude Code local credentials"). */
 async function resolveConnectionFilterName(db: Db, companyId: string, filter: string): Promise<string | null> {
-  if (!filter) return null;
-  if (filter === BUDGET_CONNECTION_FILTER_UNMANAGED) return "Existing authentication";
+  const key = parseConnectionBudgetKey(filter);
+  if (!key) return null;
+  if (key.kind === "local") return localCredentialsLabel(key.provider);
   const [row] = await db.select({ name: toolConnections.name }).from(toolConnections)
-    .where(and(eq(toolConnections.id, filter), eq(toolConnections.companyId, companyId)));
+    .where(and(eq(toolConnections.id, key.connectionId), eq(toolConnections.companyId, companyId)));
   return row?.name ?? null;
 }
 
@@ -219,6 +232,11 @@ async function mapBudgetReads<T, R>(rows: T[], read: (row: T) => Promise<R>): Pr
   }
   return result;
 }
+
+/** Connection rules hold only the runs on their connection (see the
+ * connection budget gate); they never pause, admit or cancel a whole scope. */
+export const scopeEnforcedPolicy = eq(budgetPolicies.connectionFilter, "");
+const isConnectionRule = (policy: Pick<PolicyRow, "connectionFilter">) => policy.connectionFilter !== "";
 
 /** Filter in PostgreSQL so one run never loads unrelated agents' policies. */
 export function budgetPoliciesForRun(companyId: string, agentId: string | null, projectId: string | null) {
@@ -238,8 +256,9 @@ function observedBlocks(policy: PolicyRow, observed: Awaited<ReturnType<typeof c
   if (!policy.isActive || !policy.hardStopEnabled || policy.amount <= 0) return false;
   return compareCents(observed.totalExact, policy.amount) >= 0 || (observed.pendingRunCount - observed.recoveringRunCount) > 0 || unpricedUsageBlocks(policy, observed);
 }
+/** Whether the policy holds its whole scope. Connection rules never do. */
 export async function policyBlocks(db: Db, policy: PolicyRow) {
-  if (!policy.isActive || !policy.hardStopEnabled || policy.amount <= 0) return false;
+  if (!policy.isActive || !policy.hardStopEnabled || policy.amount <= 0 || isConnectionRule(policy)) return false;
   return observedBlocks(policy, await computeObservedSpend(db, policy));
 }
 
@@ -260,7 +279,7 @@ export async function recheckAdmittedRunBudgetReadOnly(db: Db, input: {
     if (!reservation) return "Provider dispatch no longer owns a held budget reservation";
     const policies = await db.select().from(budgetPolicies).where(and(eq(budgetPolicies.companyId, input.companyId),
       eq(budgetPolicies.isActive, true), eq(budgetPolicies.hardStopEnabled, true), eq(budgetPolicies.metric, "billed_cents"),
-      sql`${budgetPolicies.amount} > 0`, budgetPoliciesForRun(input.companyId, input.agentId, input.projectId)));
+      sql`${budgetPolicies.amount} > 0`, scopeEnforcedPolicy, budgetPoliciesForRun(input.companyId, input.agentId, input.projectId)));
     const observations = await computeObservedSpends(db, policies);
     for (const [index, policy] of policies.entries()) {
       const observed = observations[index];
@@ -296,7 +315,10 @@ function buildApprovalPayload(input: {
     windowStart: input.windowStart.toISOString(),
     windowEnd: input.windowEnd.toISOString(),
     policyId: input.policy.id,
-    guidance: "Resolve pending or unpriced accounting, raise the budget, or keep the scope paused.",
+    guidance: input.policy.connectionFilter
+      ? "Resolve pending or unpriced accounting, raise the budget, or keep runs on this connection waiting."
+      : "Resolve pending or unpriced accounting, raise the budget, or keep the scope paused.",
+    connectionFilter: input.policy.connectionFilter || null,
   };
 }
 
@@ -327,6 +349,7 @@ export function budgetServiceInTransaction(
   readQuotaSnapshot: QuotaSnapshotReader = readSharedQuotaSnapshot,
 ) {
   const recordActivity = (input: LogActivityInput) => logActivity(db, input, publications);
+  const readConnectionUsage = createConnectionUsageReader(db, { readQuotaSnapshot });
   async function pauseScopeForBudget(policy: PolicyRow) {
     const now = new Date();
     if (policy.scopeType === "agent") {
@@ -380,6 +403,7 @@ export function budgetServiceInTransaction(
     const policies = await db.select().from(budgetPolicies).where(and(
       eq(budgetPolicies.companyId, policy.companyId), eq(budgetPolicies.scopeType, policy.scopeType),
       eq(budgetPolicies.scopeId, policy.scopeId), eq(budgetPolicies.isActive, true), eq(budgetPolicies.hardStopEnabled, true),
+      scopeEnforcedPolicy,
     ));
     const observations = await computeObservedSpends(db, policies);
     if (policies.some((candidate, index) => observedBlocks(candidate, observations[index]))) return;
@@ -436,15 +460,17 @@ export function budgetServiceInTransaction(
   }
 
   /**
-   * Reads the current provider window for a `subscription_percent` policy. Each
-   * rule reads only its selected provider, matching the dispatch gate. Provider
-   * windows have independent reset times and must never share a summary.
+   * Reads the current window for a `subscription_percent` policy from the
+   * policy's own connection, matching the dispatch gate. Connections have
+   * independent reset times and never share a summary.
    */
   async function observeSubscriptionPolicy(policy: PolicyRow): Promise<SubscriptionWindowObservation | null> {
     const windowKind = policy.windowKind;
     if (policy.metric !== "subscription_percent" || !isSubscriptionBudgetWindowKind(windowKind)) return null;
-    const snapshot = await readQuotaSnapshot();
-    const result = snapshot.results.find((row) => row.provider === policy.provider);
+    // Each rule reads its own connection's usage; accounts never share a summary.
+    // A provider-only row predates connection keys and reads that provider's local credentials.
+    const key = policy.connectionFilter || (policy.provider ? `local:${policy.provider}` : "");
+    const result = await readConnectionUsage(policy.companyId, key);
     return observeSubscriptionWindow(result, windowKind);
   }
 
@@ -545,8 +571,9 @@ export function budgetServiceInTransaction(
       status: observed && observedBlocks(policy, observed) ? "hard_stop" : policy.isActive && !usageUnavailable
         ? budgetStatusFromObserved(observedAmountExact ?? String(observedAmount), amount, policy.warnPercent)
         : "ok",
-      paused: scope.paused,
-      pauseReason: scope.pauseReason,
+      // A connection rule holds only its connection's runs, never its scope.
+      paused: isConnectionRule(policy) ? false : scope.paused,
+      pauseReason: isConnectionRule(policy) ? null : scope.pauseReason,
       windowStart: start,
       windowEnd: end,
     };
@@ -717,6 +744,7 @@ export function budgetServiceInTransaction(
     if (scope.companyId !== companyId) throw notFound("Budget scope not found");
     const policies = prepared?.policies ?? await db.select().from(budgetPolicies).where(and(
       eq(budgetPolicies.companyId, companyId), eq(budgetPolicies.scopeType, scopeType), eq(budgetPolicies.scopeId, scopeId),
+      scopeEnforcedPolicy,
     ));
     let recoveringPolicy: PolicyRow | undefined;
     const observations = prepared?.observations ?? await computeObservedSpends(db, policies);
@@ -802,7 +830,9 @@ export function budgetServiceInTransaction(
       if (observedBlocks(policy, observed)) {
         await resolveOpenSoftIncidents(policy.id);
         const hardIncident = await createIncidentIfNeeded(policy, "hard", observed);
-        await pauseAndCancelScopeForBudget(policy);
+        // A connection rule records the incident; the connection budget gate
+        // holds that connection's runs while other connections keep running.
+        if (!isConnectionRule(policy)) await pauseAndCancelScopeForBudget(policy);
         if (hardIncident?.created) {
           await recordActivity({
             companyId: policy.companyId,
@@ -826,6 +856,11 @@ export function budgetServiceInTransaction(
     // Release only this scope's budget-owned hold after all its policies agree.
     const healthyScopes = new Map<string, PolicyRow>();
     for (const [index, policy] of policies.entries()) {
+      if (isConnectionRule(policy)) {
+        // A lower final price can bring a connection back under its budget.
+        if (!observedBlocks(policy, observations[index])) await resolveOpenIncidentsForPolicy(policy.id, null, null, "hard");
+        continue;
+      }
       if (!observedBlocks(policy, observations[index])) healthyScopes.set(`${policy.scopeType}:${policy.scopeId}`, policy);
     }
     for (const policy of healthyScopes.values()) {
@@ -843,7 +878,7 @@ export function budgetServiceInTransaction(
     const records = await Promise.all(scopes.map(scope => resolveScopeRecord(db, scope.scopeType, scope.scopeId)));
     if (records.some(scope => scope.companyId !== companyId)) throw notFound("Budget scope not found");
     const policies = await db.select().from(budgetPolicies).where(and(eq(budgetPolicies.companyId, companyId),
-      budgetPoliciesForRun(companyId, agentId, context?.projectId ?? null)));
+      scopeEnforcedPolicy, budgetPoliciesForRun(companyId, agentId, context?.projectId ?? null)));
     const observations = await computeObservedSpends(db, policies);
     const reservationIndexes = policies.map((policy, i) => policy.isActive && policy.hardStopEnabled && policy.metric === "billed_cents" && policy.amount > 0 ? i : -1).filter(i => i >= 0);
     const admission = (block: Awaited<ReturnType<typeof reconcileScope>>) => ({ block,
@@ -855,6 +890,33 @@ export function budgetServiceInTransaction(
       if (block) return admission(block);
     }
     return admission(null);
+  }
+
+  /**
+   * Read only: the money rule on this connection that holds a run of this
+   * agent/project, or null. Connection rules hold only runs on their
+   * connection; other connections in the same scope keep running.
+   */
+  async function getConnectionBlock(companyId: string, agentId: string | null, projectId: string | null, connectionKey: string): Promise<ConnectionBudgetBlock | null> {
+    return withBudgetSpan("budget.connection.evaluate", async () => {
+      const policies = await db.select().from(budgetPolicies).where(and(eq(budgetPolicies.companyId, companyId),
+        eq(budgetPolicies.isActive, true), eq(budgetPolicies.hardStopEnabled, true), eq(budgetPolicies.metric, "billed_cents"),
+        sql`${budgetPolicies.amount} > 0`, eq(budgetPolicies.connectionFilter, connectionKey), budgetPoliciesForRun(companyId, agentId, projectId)));
+      if (!policies.length) return null;
+      const observations = await computeObservedSpends(db, policies);
+      for (const [index, policy] of policies.entries()) {
+        const observed = observations[index];
+        if (!observedBlocks(policy, observed)) continue;
+        const name = await resolveConnectionFilterName(db, companyId, policy.connectionFilter) ?? "This connection";
+        const cause = compareCents(observed.totalExact, policy.amount) >= 0
+          ? `spent ${(Number(observed.totalExact) / 100).toFixed(2)} USD of its ${(policy.amount / 100).toFixed(2)} USD budget`
+          : unpricedUsageBlocks(policy, observed) ? "has unpriced usage under a budget that blocks it"
+          : "has runs awaiting cost accounting under its budget";
+        return { policyId: policy.id, connectionKey, connectionName: name, windowEnd: observed.windowEnd,
+          reason: `${name} ${cause}` };
+      }
+      return null;
+    });
   }
 
   const evaluateAdmission = (...args: Parameters<typeof evaluateAdmissionInTransaction>) =>
@@ -887,32 +949,42 @@ export function budgetServiceInTransaction(
       if (input.reservationCents !== undefined && compareCents(input.reservationCents, 0) < 0) throw unprocessable("Reservation cannot be negative");
       const metric = input.metric ?? "billed_cents";
       const windowKind = input.windowKind ?? (input.scopeType === "project" ? "lifetime" : "calendar_month_utc");
-      const provider = input.provider ?? "";
-      if (metric === "subscription_percent") {
-        if (!(SUBSCRIPTION_BUDGET_PROVIDERS as readonly string[]).includes(provider) || !isSubscriptionBudgetWindowKind(windowKind) || (input.amount ?? 0) > 100) {
-          throw unprocessable("Subscription rules require a supported provider, provider window, and a limit no greater than 100%");
-        }
-      } else if (provider) {
-        throw unprocessable("Money budgets cannot select a subscription provider");
-      }
       const editing = policyId ? await getPolicyRow(policyId) : null;
       if (editing && editing.companyId !== companyId) throw notFound("Budget policy not found");
-      // An edit by ID keeps the rule's connection unless the caller restates it.
-      const connectionFilter = input.connectionFilter === undefined ? editing?.connectionFilter ?? "" : input.connectionFilter ?? "";
-      if (connectionFilter && metric !== "billed_cents") throw unprocessable("Connection filters apply to money budgets only");
+      // Older clients name only a provider: that subscription rule reads the
+      // provider's local credentials. An edit by ID otherwise keeps the rule's
+      // connection unless the caller names one.
+      const legacyKey = metric === "subscription_percent" && input.provider && !input.connectionFilter ? localConnectionKey(input.provider as AiProvider) : null;
+      let connectionFilter = legacyKey ?? (input.connectionFilter === undefined ? editing?.connectionFilter ?? "" : input.connectionFilter ?? "");
+      if (metric === "subscription_percent") {
+        if (!connectionFilter || !isSubscriptionBudgetWindowKind(windowKind) || (input.amount ?? 0) > 100) {
+          throw unprocessable("Subscription rules require a connection, a provider window, and a limit no greater than 100%");
+        }
+      } else if (input.provider) {
+        throw unprocessable("Money budgets cannot select a subscription provider");
+      }
+      const key = connectionFilter ? parseConnectionBudgetKey(connectionFilter) : null;
+      if (connectionFilter && !key) throw unprocessable("Budget connection must be an AI connection id or local:<provider>");
+      if (key) connectionFilter = key.kind === "managed" ? key.connectionId : localConnectionKey(key.provider);
+      // Subscription rules record the provider whose usage they read.
+      let connectionProvider: string = key?.kind === "local" ? key.provider : editing?.provider ?? "";
       // A removed connection keeps its existing rule editable; new rules need a live AI connection.
-      if (connectionFilter && connectionFilter !== BUDGET_CONNECTION_FILTER_UNMANAGED && connectionFilter !== editing?.connectionFilter) {
-        const [connection] = await db.select({ id: toolConnections.id }).from(toolConnections).where(and(
-          eq(toolConnections.id, connectionFilter), eq(toolConnections.companyId, companyId), eq(toolConnections.connectionPurpose, "ai"),
+      if (key?.kind === "managed" && connectionFilter !== editing?.connectionFilter) {
+        const [connection] = await db.select({ provider: sql<string | null>`${toolConnections.config}->'ai'->>'provider'` }).from(toolConnections).where(and(
+          eq(toolConnections.id, key.connectionId), eq(toolConnections.companyId, companyId), eq(toolConnections.connectionPurpose, "ai"),
         ));
         if (!connection) throw unprocessable("Budget connection must be an AI connection in this company");
+        connectionProvider = connection.provider ?? "";
       }
+      const provider = metric === "subscription_percent" ? connectionProvider : "";
       // Subscription and connection rules are separate rows per scope, so they
       // are addressed by ID; the scope's base money budget is upserted by scope.
       const editableById = editing && (editing.metric === "subscription_percent" || editing.connectionFilter !== "");
+      // A money rule keeps its connection; a subscription rule may move to
+      // another connection unless that connection already has the same rule.
       if (editing && (!editableById || metric !== editing.metric || editing.scopeType !== input.scopeType || editing.scopeId !== input.scopeId
-        || editing.connectionFilter !== connectionFilter)) {
-        throw unprocessable("Only subscription and connection rules can be edited by ID, within their existing scope and connection");
+        || (metric === "billed_cents" && editing.connectionFilter !== connectionFilter))) {
+        throw unprocessable("Only subscription and connection rules can be edited by ID, within their existing scope");
       }
       const progressive = metric === "subscription_percent" ? input.progressive ?? editing?.progressive ?? false : false;
       const pacePercent = progressive ? input.pacePercent ?? editing?.pacePercent ?? null : null;
@@ -955,6 +1027,7 @@ export function budgetServiceInTransaction(
           .update(budgetPolicies)
           .set({
             provider,
+            connectionFilter,
             windowKind,
             amount,
             progressive,
@@ -1030,10 +1103,11 @@ export function budgetServiceInTransaction(
 
       if (!isEnforcedByIncidents(row)) {
         // Subscription window policies are enforced at dispatch time only.
+        // Connection rules record incidents; the connection gate holds runs.
       } else if (row.isActive && amount > 0) {
         const observed = await computeObservedSpend(db, row);
         if (!observedBlocks(row, observed)) {
-          await resumeScopeFromBudget(row);
+          if (!isConnectionRule(row)) await resumeScopeFromBudget(row);
           await resolveOpenIncidentsForPolicy(row.id, "approved", actorUserId ?? "budget_service", "hard");
           if (row.notifyEnabled && compareCents(observed.totalExact, Math.ceil(row.amount * row.warnPercent / 100)) >= 0) {
             await createIncidentIfNeeded(row, "soft", observed);
@@ -1048,11 +1122,11 @@ export function budgetServiceInTransaction(
           if (observedBlocks(row, observed)) {
             await resolveOpenSoftIncidents(row.id);
             await createIncidentIfNeeded(row, "hard", observed);
-            await pauseAndCancelScopeForBudget(row);
+            if (!isConnectionRule(row)) await pauseAndCancelScopeForBudget(row);
           }
         }
       } else {
-        await resumeScopeFromBudget(row);
+        if (!isConnectionRule(row)) await resumeScopeFromBudget(row);
         await resolveOpenIncidentsForPolicy(row.id, "approved", actorUserId ?? "budget_service");
       }
 
@@ -1094,7 +1168,6 @@ export function budgetServiceInTransaction(
         } else {
           await db.delete(budgetPolicies).where(and(eq(budgetPolicies.id, policyId), eq(budgetPolicies.companyId, companyId)));
         }
-        await resumeScopeFromBudget(policy);
       } else {
         await db.delete(budgetPolicies).where(and(eq(budgetPolicies.id, policyId), eq(budgetPolicies.companyId, companyId)));
       }
@@ -1130,6 +1203,7 @@ export function budgetServiceInTransaction(
     },
 
     evaluateAffectedScopes,
+    getConnectionBlock,
     evaluateCostEvent: (event: typeof costEvents.$inferSelect) => evaluateAffectedScopes(event.companyId, event.agentId, event.projectId),
 
     evaluateAdmission,
@@ -1175,21 +1249,23 @@ export function budgetServiceInTransaction(
           })
           .where(eq(budgetPolicies.id, policy.id));
 
-        if (policy.scopeType === "company" && policy.windowKind === "calendar_month_utc") {
+        // The scope's monthly budget field mirrors only its unfiltered budget.
+        if (policy.scopeType === "company" && policy.windowKind === "calendar_month_utc" && !isConnectionRule(policy)) {
           await db
             .update(companies)
             .set({ budgetMonthlyCents: nextAmount, updatedAt: now })
             .where(eq(companies.id, policy.scopeId));
         }
 
-        if (policy.scopeType === "agent" && policy.windowKind === "calendar_month_utc") {
+        if (policy.scopeType === "agent" && policy.windowKind === "calendar_month_utc" && !isConnectionRule(policy)) {
           await db
             .update(agents)
             .set({ budgetMonthlyCents: nextAmount, updatedAt: now })
             .where(eq(agents.id, policy.scopeId));
         }
 
-        await resumeScopeFromBudget(policy);
+        // A connection rule never paused its scope; its held runs start at their next check.
+        if (!isConnectionRule(policy)) await resumeScopeFromBudget(policy);
         await db
           .update(budgetIncidents)
           .set({

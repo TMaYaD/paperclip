@@ -2987,17 +2987,32 @@ state. See DATABASE.md for the stored units and migration details.
 ### Connection budgets and spend
 
 `GET /api/companies/:companyId/costs/by-connection` (CLI `cost by-connection`)
-returns spend per AI connection for a date range, including unused connections
-and a `connectionId: null` row for host credentials. Create a connection budget
-with `POST /api/companies/:companyId/budgets/policies` and
-`connectionFilter: "<connection id>" | "unmanaged"` on a `billed_cents` policy;
-edit it by ID with `PATCH` and remove it with `DELETE`. The Costs page shows
-spend in the Connections tab and the rules under Budgets → Connection budgets.
+returns spend per account for a date range: each AI connection (including
+unused ones) and each provider's local credentials, with a `connectionKey`
+(`<connection id>` or `local:<provider>`) and whether its usage can be read.
 
-The Claude adapter bills a run whose `ANTHROPIC_BASE_URL` points at a known
-Anthropic-compatible gateway (MiniMax, OpenRouter) to that gateway as metered
-usage. Other base URLs keep Anthropic billing because they are usually a proxy
-in front of Anthropic.
+Create connection rules with `POST /api/companies/:companyId/budgets/policies`
+and `connectionFilter: "<key>"`: a `billed_cents` rule for a monthly spend
+limit, or a `subscription_percent` rule with `windowKind: "provider_session" |
+"provider_day" | "provider_week" | "provider_month"`. A subscription rule that
+names only `provider` (older clients) targets `local:<provider>`. Edit by ID with
+`PATCH`; remove with `DELETE`. The Costs page shows spend in the Connections tab
+and the rules under Budgets → Subscription budget rules and Connection budgets.
+
+Dispatch (`heartbeat/queue.ts`) resolves the run's account with
+`resolveRunConnection`: the binding's connection, the responsible user's
+provider default, or the harness's local credentials. A reached money rule
+defers the run with `scheduledRetryReason: "connection_budget_wait"` and
+re-checks every 10 minutes; the subscription gate reads that account's usage
+through `createConnectionUsageReader`.
+
+Usage probes live in `server/src/services/ai-connection-usage.ts`. A connection
+routed to a gateway listed in `AI_GATEWAY_USAGE_PROBES` (shared) uses that
+gateway's probe with its inference key: MiniMax (`/v1/token_plan/remains`;
+`*_usage_count` is the remaining count), Z.ai (`/api/monitor/usage/quota/limit`,
+key without `Bearer`) and Kimi (`/coding/v1/usages`). Their response shapes are
+not officially documented; add a gateway by listing its domains and adding a
+probe that reports limits with `windowDurationSeconds`.
 
 ### Provider changes during subscription waits
 
