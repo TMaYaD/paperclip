@@ -2227,6 +2227,31 @@ same selected provider's usage/reset observation. Company budget rows retain
 usage bars, limit and released markers, and the reason/timing for a hold. A
 missing provider window remains unknown and holds matching runs under a limit.
 
+### Connection budgets
+
+Every cost event records the AI Connection it ran under. Usage without a managed
+connection runs on the harness's local credentials ("Local credentials"), which
+are a separate account per provider: Claude Code local credentials and Codex
+local credentials never share a row or a budget. Costs lists spend per
+connection, including unused connections.
+
+A connection budget key is an AI connection id or `local:<provider>`. A money
+budget on a key counts only that account's ledger spend, live run exposure and
+held reservations. Subscription percentage rules also belong to one key and
+read that account's own plan usage: a managed connection's usage probe, a
+gateway probe for supported Anthropic- or OpenAI-compatible gateways, or the
+host login for local credentials. Rules cover session, daily, weekly and
+monthly windows, matched to the provider's reported window length.
+
+A connection rule never pauses, admits or cancels its scope. When a money rule
+is reached, dispatch holds new runs on that connection (re-checked periodically,
+released by a raised budget or the window reset), timer heartbeats on it are
+skipped, runs already in progress finish, and agents on other connections keep
+running. It still opens soft and hard incidents. Removing a fired rule retires
+it (amount 0, inactive) so the audit trail stays. A scope's monthly budget field
+mirrors only its unfiltered budget. Connection pools choose their member at run
+time and are not held per connection.
+
 ### In-app announcements
 
 A versioned remote JSON manifest supplies one optional board announcement.

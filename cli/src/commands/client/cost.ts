@@ -29,6 +29,7 @@ export function registerCostCommands(program: Command): void {
     ["by-agent-model", "costs/by-agent-model"],
     ["by-provider", "costs/by-provider"],
     ["by-biller", "costs/by-biller"],
+    ["by-connection", "costs/by-connection"],
     ["by-project", "costs/by-project"],
     ["window-spend", "costs/window-spend"],
     ["quota-windows", "costs/quota-windows"],

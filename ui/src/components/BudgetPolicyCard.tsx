@@ -1,7 +1,7 @@
 import { centsToUsd, usdToCents } from "@paperclipai/shared";
 import { useEffect, useId, useState } from "react";
 import type { BudgetPolicySummary } from "@paperclipai/shared";
-import { SUBSCRIPTION_BUDGET_WINDOW_DURATION_MS, isSubscriptionBudgetWindowKind } from "@paperclipai/shared";
+import { SUBSCRIPTION_BUDGET_PACE_UNIT, SUBSCRIPTION_BUDGET_WINDOW_DURATION_MS, isSubscriptionBudgetWindowKind } from "@paperclipai/shared";
 import { AlertTriangle, HelpCircle, Hourglass, PauseCircle, ShieldAlert, Wallet } from "lucide-react";
 import { cn, formatCents, formatDurationMs, relativeTime } from "../lib/utils";
 import { Button } from "@/components/ui/button";
@@ -40,11 +40,11 @@ function formatPercent(value: number) {
 
 /**
  * How fast a progressive limit is released, in the unit an operator thinks
- * in: per hour for the session window, per day for the week.
+ * in: per hour for session and daily windows, per day for weekly and monthly ones.
  */
 export function progressiveReleaseRate(windowKind: BudgetPolicySummary["windowKind"], amount: number) {
   if (!isSubscriptionBudgetWindowKind(windowKind) || amount <= 0) return null;
-  const perHour = windowKind === "provider_session";
+  const perHour = SUBSCRIPTION_BUDGET_PACE_UNIT[windowKind].unit === "hour";
   const unitMs = (perHour ? 1 : 24) * 60 * 60 * 1000;
   const perUnit = (amount * unitMs) / SUBSCRIPTION_BUDGET_WINDOW_DURATION_MS[windowKind];
   return `${formatPercent(perUnit)} per ${perHour ? "hour" : "day"}`;
@@ -61,8 +61,12 @@ export function windowLabel(windowKind: BudgetPolicySummary["windowKind"]) {
       return "Lifetime budget";
     case "provider_session":
       return "Provider session window";
+    case "provider_day":
+      return "Provider daily window";
     case "provider_week":
       return "Provider weekly window";
+    case "provider_month":
+      return "Provider monthly window";
     default:
       return "Monthly UTC budget";
   }

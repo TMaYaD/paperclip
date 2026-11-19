@@ -41,7 +41,7 @@ export function createHeartbeatQueueTestDependencies(db: Db): QueueTestDependenc
       listReadyUnassignedChildDependents: vi.fn(async () => []),
     },
     treeControlSvc: { getActivePauseHoldGate: vi.fn(async () => null) },
-    budgets: { getInvocationBlock: vi.fn(async () => null) },
+    budgets: { getInvocationBlock: vi.fn(async () => null), getConnectionBlock: vi.fn(async () => null) },
     subscriptionWindowGate: { evaluate: vi.fn(async () => null) },
     instanceSettings: { getExperimental: vi.fn<HeartbeatQueueDependencies["instanceSettings"]["getExperimental"]>() },
     runDispatch: createRunDispatch(db),

@@ -606,6 +606,7 @@ export function fastResponseService(
             ...links,
             heartbeatRunId: null,
             idempotencyKey: `fast-response:${request.id}`,
+            aiConnectionId: request.connectionId,
             provider: request.provider!,
             biller: request.provider!,
             model: request.model!,

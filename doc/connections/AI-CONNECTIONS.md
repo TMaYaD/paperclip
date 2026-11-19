@@ -159,7 +159,16 @@ does not establish usage access. This probe cannot add scopes to a stored token.
 | Claude subscription | `GET https://api.anthropic.com/api/oauth/usage`, with stored OAuth token and `anthropic-beta: oauth-2025-04-20` | Legacy and structured session/weekly/scoped windows, monthly extra usage, structured spend when legacy extra usage is absent |
 | Grok subscription | `GET https://cli-chat-proxy.grok.com/v1/billing?format=credits`, with stored token and `x-xai-token-auth: xai-grok-cli` | Included-plan utilization/period when reported, separately reported on-demand allowance and prepaid balance in USD cents |
 | OpenRouter API key | `GET https://openrouter.ai/api/v1/key` | Key credit cap, reset cadence, free-model daily request cap when returned |
+| MiniMax gateway (`minimax.io`, `minimaxi.com`) | `GET /v1/token_plan/remains` on the matching regional API host, with the connection key as Bearer | 5-hour and weekly plan windows per model; `*_usage_count` is the remaining count; `*_remaining_percent` preferred when present |
+| Z.ai gateway (`z.ai`, `bigmodel.cn`) | `GET /api/monitor/usage/quota/limit`, key without `Bearer` | First two `TOKENS_LIMIT` entries as 5-hour and weekly windows |
+| Kimi gateway (`kimi.com`) | `GET https://api.kimi.com/coding/v1/usages`, Bearer key | Weekly quota and shorter windows from `limits[].window` |
 | Other API-key methods | No supported single-key allowance endpoint | Explicit `unsupported`; no provider or secret read |
+
+A connection routed to a listed gateway (`AI_GATEWAY_USAGE_PROBES`) uses the
+gateway probe whatever its sign-in method. The gateway response shapes come
+from provider FAQs and community clients, not published schemas. Subscription
+budget rules read these windows per connection; see Connection budgets in
+`doc/SPEC-implementation.md`.
 
 These subscription sources are provider-client endpoints, not a promise of a
 stable public API. Codex's current endpoint/shape is grounded in the official

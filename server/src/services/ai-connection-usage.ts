@@ -1,5 +1,7 @@
 import {
+  aiGatewayUsageProbe,
   supportsAiConnectionUsage,
+  type AiGatewayUsageProbeId,
   type AiConnectionMetadata,
   type AiConnectionUsage,
   type AiConnectionUsageLimit,
@@ -316,6 +318,87 @@ async function openrouter(credential: string, request: typeof fetch): Promise<Ob
 }
 
 const probes = { openai: codex, anthropic: claude, xai: grok, openrouter };
+
+/** Milliseconds since the epoch, as these gateways report times. */
+function epochMs(value: unknown): string | null {
+  const ms = typeof value === "string" && /^\d+$/.test(value) ? Number(value) : number(value);
+  if (ms == null || ms <= 0) return null;
+  const date = new Date(ms);
+  return Number.isFinite(date.getTime()) ? date.toISOString() : null;
+}
+const count = (value: unknown): number | null =>
+  typeof value === "string" && /^\d+(?:\.\d+)?$/.test(value) ? Number(value) : number(value);
+/** Used percent from a remaining percent, or from a total and remaining count. */
+function usedFromRemaining(remainingPercent: unknown, total: unknown, remaining: unknown): number | null {
+  const percent = number(remainingPercent);
+  if (percent != null) return Math.max(0, 100 - percent);
+  const all = count(total), left = count(remaining);
+  return all != null && all > 0 && left != null ? Math.max(0, all - left) / all * 100 : null;
+}
+
+/**
+ * MiniMax token/coding plan. `*_usage_count` fields hold the REMAINING count,
+ * and percentage-metered plans report counts as 0 with `*_remaining_percent`.
+ * A wrong-region host answers 200 with a non-zero `base_resp.status_code`.
+ */
+async function minimaxGateway(credential: string, request: typeof fetch, domain: string): Promise<Observation> {
+  const origin = domain === "minimaxi.com" ? "https://api.minimaxi.com" : "https://api.minimax.io";
+  const body = await readUsage(`${origin}/v1/token_plan/remains`, { Authorization: `Bearer ${requireToken(credential)}` }, request);
+  const status = number(object(body.base_resp).status_code);
+  if (status != null && status !== 0) throw new ProbeFailure(status === 1004 ? "authentication_required" : "provider_unavailable");
+  const entries = Array.isArray(body.model_remains) ? body.model_remains.map(object) : [];
+  const limits: AiConnectionUsageLimit[] = [];
+  for (const [index, entry] of entries.entries()) {
+    const scope = index === 0 ? null : string(entry.model_name);
+    const name = string(entry.model_name);
+    limits.push(limit({ id: `minimax_interval_${index}`, label: name ? `5-hour usage · ${name}` : "5-hour usage", scope,
+      windowDurationSeconds: 18000, resetsAt: epochMs(entry.end_time),
+      usedPercent: usedFromRemaining(entry.current_interval_remaining_percent, entry.current_interval_total_count, entry.current_interval_usage_count) }));
+    if (entry.current_weekly_total_count != null || entry.current_weekly_remaining_percent != null) {
+      limits.push(limit({ id: `minimax_weekly_${index}`, label: name ? `Weekly usage · ${name}` : "Weekly usage", scope,
+        windowDurationSeconds: 604800, resetsAt: epochMs(entry.weekly_end_time),
+        usedPercent: usedFromRemaining(entry.current_weekly_remaining_percent, entry.current_weekly_total_count, entry.current_weekly_usage_count) }));
+    }
+  }
+  return { source: "minimax_token_plan", planType: null, limits, overage: null };
+}
+
+/** Z.ai GLM coding plan. The key is sent without a Bearer prefix. The first
+ * token limit is the 5-hour window and the second the weekly window. */
+async function zaiGateway(credential: string, request: typeof fetch, domain: string): Promise<Observation> {
+  const origin = domain === "bigmodel.cn" ? "https://open.bigmodel.cn" : "https://api.z.ai";
+  const body = await readUsage(`${origin}/api/monitor/usage/quota/limit`, { Authorization: requireToken(credential) }, request);
+  if (body.success === false) throw new ProbeFailure("provider_unavailable");
+  const data = object(body.data);
+  const tokens = (Array.isArray(data.limits) ? data.limits.map(object) : []).filter((entry) => entry.type === "TOKENS_LIMIT");
+  const limits = tokens.slice(0, 2).map((entry, index) => limit({
+    id: index === 0 ? "zai_five_hour" : "zai_weekly", label: index === 0 ? "5-hour usage" : "Weekly usage",
+    windowDurationSeconds: index === 0 ? 18000 : 604800, resetsAt: epochMs(entry.nextResetTime), usedPercent: number(entry.percentage),
+  }));
+  return { source: "zai_quota_limit", planType: string(data.level), limits, overage: null };
+}
+
+const KIMI_UNIT_SECONDS: Record<string, number> = { TIME_UNIT_SECOND: 1, TIME_UNIT_MINUTE: 60, TIME_UNIT_HOUR: 3600, TIME_UNIT_DAY: 86400 };
+/** Kimi For Coding. Top-level usage is the weekly quota; `limits` carry shorter windows. */
+async function kimiGateway(credential: string, request: typeof fetch): Promise<Observation> {
+  const body = await readUsage("https://api.kimi.com/coding/v1/usages", { Authorization: `Bearer ${requireToken(credential)}` }, request);
+  const quota = (detail: ObjectValue) => ({ used: count(detail.used), limit: count(detail.limit), remaining: count(detail.remaining), resetsAt: timestamp(detail.resetTime) });
+  const limits: AiConnectionUsageLimit[] = [];
+  const weekly = object(body.usage);
+  if (Object.keys(weekly).length) limits.push(limit({ id: "kimi_weekly", label: "Weekly usage", windowDurationSeconds: 604800, ...quota(weekly) }));
+  for (const [index, entry] of (Array.isArray(body.limits) ? body.limits.map(object) : []).entries()) {
+    const window = object(entry.window);
+    const unit = KIMI_UNIT_SECONDS[string(window.timeUnit) ?? ""];
+    const duration = number(window.duration);
+    const seconds = unit != null && duration != null ? unit * duration : null;
+    limits.push(limit({ id: `kimi_window_${index}`, label: seconds === 18000 ? "5-hour usage" : "Usage window", windowDurationSeconds: seconds, ...quota(object(entry.detail)) }));
+  }
+  return { source: "kimi_usages", planType: null, limits, overage: null };
+}
+
+const gatewayProbes: Record<AiGatewayUsageProbeId, (credential: string, request: typeof fetch, domain: string) => Promise<Observation>> = {
+  minimax: minimaxGateway, zai: zaiGateway, kimi: kimiGateway,
+};
 const messages: Record<NonNullable<AiConnectionUsage["errorCode"]>, string> = {
   unsupported: "This provider does not expose usage limits through this sign-in method.",
   connection_unavailable: "Reconnect or enable this AI connection before checking usage.",
@@ -332,11 +415,16 @@ export async function probeAiConnectionUsage(
   options: { request?: typeof fetch } = {},
 ): Promise<Omit<AiConnectionUsage, "connectionId" | "grantId">> {
   const base = { ...metadata, checkedAt: new Date().toISOString(), source: null, planType: null, limits: [], overage: null };
-  if (metadata.provider === "google" || metadata.provider === "github" || !supportsAiConnectionUsage(metadata.provider, metadata.method)) {
+  const gateway = aiGatewayUsageProbe(metadata.routing);
+  if (!gateway && (metadata.provider === "google" || metadata.provider === "github" || !supportsAiConnectionUsage(metadata.provider, metadata.method, metadata.routing))) {
     return { ...base, status: "unsupported", errorCode: "unsupported", message: messages.unsupported };
   }
   try {
-    const observation = await probes[metadata.provider](credential, options.request ?? fetch);
+    const request = options.request ?? fetch;
+    // A gateway's plan usage comes from the gateway, not the protocol's provider.
+    const observation = gateway
+      ? await gatewayProbes[gateway.id](credential, request, gateway.domain)
+      : await probes[metadata.provider as keyof typeof probes](credential, request);
     if (!observation.limits.some((entry) => entry.usedPercent != null || entry.used != null || entry.limit != null || entry.limitReached != null || entry.allowed != null)
       && !Object.values(observation.overage ?? {}).some((value) => typeof value === "number" || typeof value === "boolean")) throw new ProbeFailure("invalid_response");
     return { ...base, ...observation, status: "ok", checkedAt: new Date().toISOString() };

@@ -812,6 +812,19 @@ company, scope type/id, metric, window kind, provider and progressive kind. Migr
 each legacy subscription rule to an OpenAI rule and copies its settings to an
 Anthropic rule, retaining inactive rules and leaving billed-cents policies alone.
 
+Migration 0379 adds `cost_events.ai_connection_id` (nullable, no foreign key, so
+the ledger keeps attribution after a connection is removed) and
+`budget_policies.connection_filter`, which joins the policy unique key. Run usage
+is attributed from the connection recorded in the run's
+`context_snapshot.aiConnection`; decision, fast-response and prompt-injection
+charges copy their invocation's `connection_id`. A null connection is host
+credentials not managed by Connections (the harness's local credentials; the
+row's `provider` separates Claude Code from Codex). The migration backfills
+existing rows from those same sources. A policy's `connection_filter` is empty
+(all spend in the scope), `local:<provider>` or an AI connection id. The
+migration moves each provider subscription rule to `local:<provider>`, the host
+login it already read.
+
 Migration 0291 adds `pace_percent`: percent per day for a weekly window, or per
 hour for a session. Pace rules use `amount = 100` as the provider ceiling. Fixed
 caps retain their amount and have no pace. Existing progressive rules retain

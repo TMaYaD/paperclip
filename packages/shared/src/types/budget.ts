@@ -11,6 +11,13 @@ import type {
 export interface BudgetPolicy {
   /** Subscription provider; null for money budgets. */
   provider?: string | null;
+  /**
+   * Connection budget key: an AI Connection id or `local:<provider>` (the
+   * harness's local credentials). Empty counts all spend in the scope. A rule
+   * with a key holds only runs on that connection and never pauses its scope;
+   * subscription rules always have one.
+   */
+  connectionFilter?: string;
   id: string;
   companyId: string;
   scopeType: BudgetScopeType;
@@ -40,6 +47,10 @@ export interface BudgetPolicy {
 export interface BudgetPolicySummary {
   /** All usage, reset and release values in this row belong to this provider. */
   provider?: string | null;
+  /** See `BudgetPolicy.connectionFilter`; null when the rule counts all spend. */
+  connectionFilter?: string | null;
+  /** Display name of the filtered connection, or null when it no longer exists. */
+  connectionName?: string | null;
   policyId: string;
   companyId: string;
   scopeType: BudgetScopeType;
@@ -118,6 +129,9 @@ export interface BudgetPolicySummary {
 }
 
 export interface BudgetIncident {
+  /** The incident policy's connection filter; null when it counts all spend. */
+  connectionFilter?: string | null;
+  connectionName?: string | null;
   id: string;
   companyId: string;
   policyId: string;
@@ -150,6 +164,8 @@ export interface BudgetOverview {
 
 export interface BudgetPolicyUpsertInput {
   provider?: string | null;
+  /** See `BudgetPolicy.connectionFilter`. Required on new subscription rules (or name `provider` for its local credentials). */
+  connectionFilter?: string | null;
   scopeType: BudgetScopeType;
   scopeId: string;
   metric?: BudgetMetric;

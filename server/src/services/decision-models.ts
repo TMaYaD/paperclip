@@ -156,7 +156,7 @@ export function decisionModelService(db: Db, options: { provider?: typeof runDec
       const event = await createCostEventInTransaction(tx, invocation.companyId, {
         usageKind: "decision", responsibleUserId: invocation.responsibleUserId, ...links,
         // Run attribution lives on the invocation. Run receipt reconciliation must not ingest this independent charge.
-        heartbeatRunId: null, idempotencyKey: `decision:${invocation.id}`,
+        heartbeatRunId: null, idempotencyKey: `decision:${invocation.id}`, aiConnectionId: invocation.connectionId,
         provider: invocation.provider === "openrouter" ? "typesafe" : "openai", biller: invocation.provider,
         billingType: "metered_api", costStatus: receipt.costStatus, model: invocation.model,
         inputTokens: receipt.inputTokens ?? 0, outputTokens: receipt.outputTokens ?? 0, costCents: receipt.costCents ?? "0",

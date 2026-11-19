@@ -466,6 +466,8 @@ export {
   SUBSCRIPTION_BUDGET_WINDOW_QUOTA_KEYS,
   SUBSCRIPTION_BUDGET_WINDOW_DURATION_MS,
   QUOTA_WINDOW_KEYS,
+  quotaWindowKeyForDuration,
+  SUBSCRIPTION_BUDGET_PACE_UNIT,
   isSubscriptionBudgetWindowKind,
   BUDGET_THRESHOLD_TYPES,
   BUDGET_INCIDENT_STATUSES,
@@ -1243,6 +1245,7 @@ export type {
   CostByUserReport,
   CostByProviderModel,
   CostByBiller,
+  CostByConnection,
   CostByAgentModel,
   CostWindowSpendRow,
   CostByProject,
@@ -2774,6 +2777,7 @@ export * from "./validators/voice-sessions.js";
 
 export * from "./agent-appearance.js";
 export * from "./ai-connections.js";
+export * from "./connection-budget-key.js";
 export * from "./ai-connection-router.js";
 export * from "./ai-connection-usage.js";
 export * from "./subscriptions.js";
