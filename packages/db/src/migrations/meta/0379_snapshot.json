@@ -1,6 +1,6 @@
 {
-  "id": "945c31ed-f39f-4272-a91d-85de925f5361",
-  "prevId": "406521f8-5352-415b-805d-786854381e03",
+  "id": "2324effe-86d8-48ba-bf68-92ccacd4b0bc",
+  "prevId": "9a8b8734-9588-48c0-a503-88ab2c81af94",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -3901,6 +3901,50 @@
           "method": "btree",
           "with": {}
         },
+        "agent_wakeup_requests_child_ready_delivery_uq": {
+          "name": "agent_wakeup_requests_child_ready_delivery_uq",
+          "columns": [
+            {
+              "expression": "company_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "idempotency_key",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"agent_wakeup_requests\".\"idempotency_key\" LIKE 'issue_child_ready_for_assignment:%' AND \"agent_wakeup_requests\".\"requested_by_actor_id\" IS DISTINCT FROM 'native-status-committer' AND \"agent_wakeup_requests\".\"status\" NOT IN ('skipped', 'failed', 'cancelled')",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "agent_wakeup_requests_child_ready_native_intent_uq": {
+          "name": "agent_wakeup_requests_child_ready_native_intent_uq",
+          "columns": [
+            {
+              "expression": "company_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "idempotency_key",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"agent_wakeup_requests\".\"idempotency_key\" LIKE 'issue_child_ready_for_assignment:%' AND \"agent_wakeup_requests\".\"requested_by_actor_id\" = 'native-status-committer' AND \"agent_wakeup_requests\".\"status\" NOT IN ('skipped', 'failed', 'cancelled')",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
         "agent_wakeup_requests_company_payload_issue_idx": {
           "name": "agent_wakeup_requests_company_payload_issue_idx",
           "columns": [
@@ -7254,6 +7298,20 @@
           "notNull": true,
           "default": "'billed_cents'"
         },
+        "provider": {
+          "name": "provider",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "''"
+        },
+        "connection_filter": {
+          "name": "connection_filter",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "''"
+        },
         "window_kind": {
           "name": "window_kind",
           "type": "text",
@@ -7266,6 +7324,19 @@
           "primaryKey": false,
           "notNull": true,
           "default": 0
+        },
+        "progressive": {
+          "name": "progressive",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "pace_percent": {
+          "name": "pace_percent",
+          "type": "double precision",
+          "primaryKey": false,
+          "notNull": false
         },
         "reservation_cents": {
           "name": "reservation_cents",
@@ -7440,6 +7511,24 @@
             },
             {
               "expression": "window_kind",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "provider",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "connection_filter",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "progressive",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -21121,6 +21210,12 @@
           "primaryKey": false,
           "notNull": false
         },
+        "ai_connection_id": {
+          "name": "ai_connection_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
         "billing_code": {
           "name": "billing_code",
           "type": "text",
@@ -21368,6 +21463,33 @@
           "columns": [
             {
               "expression": "company_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "occurred_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "cost_events_company_ai_connection_occurred_idx": {
+          "name": "cost_events_company_ai_connection_occurred_idx",
+          "columns": [
+            {
+              "expression": "company_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "ai_connection_id",
               "isExpression": false,
               "asc": true,
               "nulls": "last"

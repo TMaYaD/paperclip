@@ -120,7 +120,7 @@ export function promptInjectionPreventionService(db: Db, options: {
       const event = await createCostEventInTransaction(tx, invocation.companyId, {
         usageKind: "prompt_injection", responsibleUserId: invocation.responsibleUserId, ...links,
         // Run attribution lives on the invocation. Run receipt reconciliation must not ingest this independent charge.
-        heartbeatRunId: null, idempotencyKey: `prompt-injection:${invocation.id}`,
+        heartbeatRunId: null, idempotencyKey: `prompt-injection:${invocation.id}`, aiConnectionId: invocation.connectionId,
         provider: invocation.model.split("/")[0] || "openrouter", biller: "openrouter",
         billingType: "metered_api", costStatus: receipt.costStatus, model: invocation.model,
         inputTokens: receipt.inputTokens ?? 0, outputTokens: receipt.outputTokens ?? 0, costCents: receipt.costCents ?? "0",

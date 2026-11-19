@@ -13,7 +13,29 @@ export interface BudgetExposure {
   unknownBrowserRunCount: number;
 }
 
-export type SpendPolicy = Pick<typeof budgetPolicies.$inferSelect, "companyId" | "scopeType" | "scopeId" | "windowKind" | "metric">;
+export type SpendPolicy = Pick<typeof budgetPolicies.$inferSelect, "companyId" | "scopeType" | "scopeId" | "windowKind" | "metric">
+  & Partial<Pick<typeof budgetPolicies.$inferSelect, "connectionFilter">>;
+
+const UNMANAGED_CONNECTION_FILTER = "unmanaged";
+
+/** The AI Connection a run executed under, as recorded at execution time. */
+const runConnectionId = sql`${heartbeatRuns.contextSnapshot}->'aiConnection'->>'connectionId'`;
+
+/** Connection predicates for a filtered money budget. Usage is matched on the
+ * connection recorded with it: ledger rows carry `ai_connection_id`; live runs
+ * and held reservations read the run's execution-time attribution. Hosted
+ * browser work is not AI Connection usage, so filtered budgets exclude it. */
+function connectionPredicates(filter: string | undefined) {
+  if (!filter) return null;
+  if (filter === UNMANAGED_CONNECTION_FILTER) {
+    // Decision and other service reservations have no run; they always name
+    // a connection, so they never count as unmanaged host-credential usage.
+    return { ledger: sql`${costEvents.aiConnectionId} is null`, run: sql`${runConnectionId} is null`,
+      held: sql`${heartbeatRuns.id} is not null and ${runConnectionId} is null` };
+  }
+  const run = sql`${runConnectionId} = ${filter}`;
+  return { ledger: eq(costEvents.aiConnectionId, filter), run, held: run };
+}
 export type ObservedSpend = BudgetExposure & {
   windowStart: Date; windowEnd: Date; total: number; totalExact: string;
   pendingRunCount: number; recoveringRunCount: number;
@@ -77,11 +99,14 @@ async function readObservedSpends(db: Db, policies: SpendPolicy[], now: Date): P
   const ledgerPredicates: SQL[] = [], heldPredicates: SQL[] = [], runPredicates: SQL[] = [], browserPredicates: SQL[] = [];
   for (const { policy, index } of billable) {
     const { start, end } = windows[index];
-    const ledger = and(eq(costEvents.companyId, policy.companyId),
+    const connection = connectionPredicates(policy.connectionFilter);
+    const ledger = and(eq(costEvents.companyId, policy.companyId), connection?.ledger,
       policy.scopeType === "agent" ? eq(costEvents.agentId, policy.scopeId) : undefined,
       policy.scopeType === "project" ? eq(costEvents.projectId, policy.scopeId) : undefined,
       policy.windowKind === "calendar_month_utc" ? and(gte(costEvents.occurredAt, start), lt(costEvents.occurredAt, end)) : undefined)!;
-    const held = and(eq(budgetReservations.companyId, policy.companyId), eq(budgetReservations.state, "held"),
+    // A reservation joins its run (left join below); a filtered budget only
+    // counts reservations whose run is attributed to the filtered connection.
+    const held = and(eq(budgetReservations.companyId, policy.companyId), eq(budgetReservations.state, "held"), connection?.held,
       policy.scopeType === "agent" ? eq(budgetReservations.agentId, policy.scopeId) : undefined,
       policy.scopeType === "project" ? eq(budgetReservations.projectId, policy.scopeId) : undefined)!;
     // Hosted browser work is a separate paid operation from its parent run.
@@ -94,6 +119,7 @@ async function readObservedSpends(db: Db, policies: SpendPolicy[], now: Date): P
     const legacyBrowserPending = sql`not ${hasBrowserHold} and ${browserUseRuns.eventsDrained} = 0
       and (${browserUseRuns.providerRunId} is not null or ${browserUseRuns.status} in ('creating', 'unknown', 'queued', 'dispatching', 'running'))`;
     const browser = and(eq(browserUseRuns.companyId, policy.companyId), eq(browserUseSessions.companyId, policy.companyId),
+      connection ? sql`false` : undefined,
       sql`((${hasBrowserHold} and ${browserHold}->>'state' = 'held') or (${legacyBrowserPending}))`,
       policy.scopeType === "agent" ? eq(browserUseSessions.agentId, policy.scopeId) : undefined,
       policy.scopeType === "project" ? sql`case when ${hasBrowserHold} then ${browserHold}->>'projectId'
@@ -113,7 +139,7 @@ async function readObservedSpends(db: Db, policies: SpendPolicy[], now: Date): P
     const inWindow = policy.windowKind === "calendar_month_utc"
       ? sql`coalesce(${heartbeatRuns.finishedAt}, ${now.toISOString()}::timestamptz) >= ${start.toISOString()}::timestamptz
         and coalesce(${heartbeatRuns.finishedAt}, ${now.toISOString()}::timestamptz) < ${end.toISOString()}::timestamptz` : sql`true`;
-    const run = and(eq(heartbeatRuns.companyId, policy.companyId), eq(heartbeatRuns.costAccountingPending, true),
+    const run = and(eq(heartbeatRuns.companyId, policy.companyId), eq(heartbeatRuns.costAccountingPending, true), connection?.run,
       policy.scopeType === "agent" ? eq(heartbeatRuns.agentId, policy.scopeId) : undefined,
       policy.scopeType === "project" ? sql`${usage}->'ledgerScope'->>'projectId' = ${policy.scopeId}` : undefined)!;
     const terminal = and(run, inArray(heartbeatRuns.status, ["succeeded", "failed", "timed_out", "cancelled", "interrupted"]), inWindow)!;

@@ -11,6 +11,12 @@ import type {
 export interface BudgetPolicy {
   /** Subscription provider; null for money budgets. */
   provider?: string | null;
+  /**
+   * Money budgets only. Empty counts all spend in the scope;
+   * `BUDGET_CONNECTION_FILTER_UNMANAGED` counts only usage on host credentials
+   * not managed by Connections; an AI Connection id counts only that connection.
+   */
+  connectionFilter?: string;
   id: string;
   companyId: string;
   scopeType: BudgetScopeType;
@@ -40,6 +46,10 @@ export interface BudgetPolicy {
 export interface BudgetPolicySummary {
   /** All usage, reset and release values in this row belong to this provider. */
   provider?: string | null;
+  /** See `BudgetPolicy.connectionFilter`; null when the rule counts all spend. */
+  connectionFilter?: string | null;
+  /** Display name of the filtered connection, or null when it no longer exists. */
+  connectionName?: string | null;
   policyId: string;
   companyId: string;
   scopeType: BudgetScopeType;
@@ -118,6 +128,9 @@ export interface BudgetPolicySummary {
 }
 
 export interface BudgetIncident {
+  /** The incident policy's connection filter; null when it counts all spend. */
+  connectionFilter?: string | null;
+  connectionName?: string | null;
   id: string;
   companyId: string;
   policyId: string;
@@ -150,6 +163,8 @@ export interface BudgetOverview {
 
 export interface BudgetPolicyUpsertInput {
   provider?: string | null;
+  /** Money budgets only; see `BudgetPolicy.connectionFilter`. Null or omitted counts all spend. */
+  connectionFilter?: string | null;
   scopeType: BudgetScopeType;
   scopeId: string;
   metric?: BudgetMetric;

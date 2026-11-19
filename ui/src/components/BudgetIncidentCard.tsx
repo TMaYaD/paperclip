@@ -5,6 +5,7 @@ import { formatCents } from "../lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { connectionLabel } from "./ConnectionSpendTable";
 import { Input } from "@/components/ui/input";
 
 function centsInputValue(value: number) {
@@ -60,7 +61,7 @@ export function BudgetIncidentCard({
                 {stateLabel}
               </Badge>
             </div>
-            <CardTitle className={isWarning ? "mt-1 text-base" : "mt-1 text-base text-red-950 dark:text-red-50"}>{incident.scopeName}</CardTitle>
+            <CardTitle className={isWarning ? "mt-1 text-base" : "mt-1 text-base text-red-950 dark:text-red-50"}>{incident.scopeName}{incident.connectionFilter ? ` · ${connectionLabel({ connectionId: incident.connectionFilter, connectionName: incident.connectionName })}` : ""}</CardTitle>
             <CardDescription className={isWarning ? "mt-1" : "mt-1 text-red-900/75 dark:text-red-100/70"}>
               {incident.thresholdType === "hard" && incident.amountObserved < incident.amountLimit
                 ? `Accounting is incomplete. Known spend is ${formatCents(incident.amountObserved)}; review pending or unpriced usage in the budget policy.`

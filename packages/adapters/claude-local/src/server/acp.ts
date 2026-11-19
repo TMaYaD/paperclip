@@ -56,6 +56,7 @@ import { buildLocalAdapterTestProbeEnv } from "./probe-env.js";
 import { detectClaudeLoginRequired, extractClaudeRetryNotBefore, isClaudeProviderQuotaError, parseClaudeStreamJson } from "./parse.js";
 import { buildClaudeProbePermissionArgs, claudeSandboxPermissionEnv } from "./permissions.js";
 import { ADAPTER_AUTH_MISSING_CHECK_CODE } from "./auth-check.js";
+import { resolveClaudeBillingIdentity } from "./billing.js";
 import { resolveClaudeModel, SANDBOX_INSTALL_COMMAND } from "../index.js";
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
@@ -178,18 +179,7 @@ export function resolveClaudeAcpBillingIdentity(
     const fromHost = considerHostEnv ? process.env[key] : undefined;
     return typeof fromHost === "string" ? fromHost.trim() : "";
   };
-  const bedrockFlag = readEnvValue("CLAUDE_CODE_USE_BEDROCK");
-  const bedrock = bedrockFlag === "1" || bedrockFlag === "true" || Boolean(readEnvValue("ANTHROPIC_BEDROCK_BASE_URL"));
-  const billingType: AdapterBillingType = bedrock
-    ? "metered_api"
-    : readEnvValue("ANTHROPIC_API_KEY")
-    ? "api"
-    : "subscription";
-  return {
-    provider: "anthropic",
-    biller: bedrock ? "aws_bedrock" : "anthropic",
-    billingType,
-  };
+  return resolveClaudeBillingIdentity(readEnvValue);
 }
 
 /**

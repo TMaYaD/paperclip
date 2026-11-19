@@ -12,6 +12,10 @@ export const budgetPolicies = pgTable(
     metric: text("metric").notNull().default("billed_cents"),
     // Empty for money budgets; subscription rules always name their provider.
     provider: text("provider").notNull().default(""),
+    // Money budgets only: "" counts all spend in the scope, "unmanaged" counts
+    // only usage on host credentials not managed by Connections, and an AI
+    // Connection id counts only usage that ran on that connection.
+    connectionFilter: text("connection_filter").notNull().default(""),
     windowKind: text("window_kind").notNull(),
     amount: integer("amount").notNull().default(0),
     // subscription_percent only: release quota at `pacePercent` per day/hour.
@@ -51,6 +55,7 @@ export const budgetPolicies = pgTable(
       table.metric,
       table.windowKind,
       table.provider,
+      table.connectionFilter,
       table.progressive,
     ),
   }),

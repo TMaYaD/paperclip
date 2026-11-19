@@ -283,6 +283,14 @@ export function costRoutes(
     res.json(rows);
   });
 
+  router.get("/companies/:companyId/costs/by-connection", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+    if (!(await assertCompanyCostReadAllowed(req, res, companyId))) return;
+    const range = parseCostDateRange(req.query);
+    res.json(await costs.byConnection(companyId, range));
+  });
+
   router.get("/companies/:companyId/costs/finance-summary", async (req, res) => {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);

@@ -1,6 +1,7 @@
 import { exactCentsSchema } from "../accounting.js";
 import { z } from "zod";
 import {
+  BUDGET_CONNECTION_FILTER_UNMANAGED,
   BUDGET_INCIDENT_RESOLUTION_ACTIONS,
   BUDGET_METRICS,
   BUDGET_SCOPE_TYPES,
@@ -14,6 +15,7 @@ export const upsertBudgetPolicySchema = z.object({
   scopeId: z.string().guid(),
   metric: z.enum(BUDGET_METRICS).optional().default("billed_cents"),
   provider: z.enum(SUBSCRIPTION_BUDGET_PROVIDERS).nullable().optional(),
+  connectionFilter: z.union([z.literal(BUDGET_CONNECTION_FILTER_UNMANAGED), z.string().guid()]).nullable().optional(),
   windowKind: z.enum(BUDGET_WINDOW_KINDS).optional().default("calendar_month_utc"),
   // Omitted fields keep the stored value on an existing policy.
   amount: z.number().int().nonnegative().max(2_147_483_647).optional(),
@@ -63,6 +65,9 @@ export const upsertBudgetPolicySchema = z.object({
   }
   if (value.metric !== "subscription_percent" && value.provider != null) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Money budgets cannot select a subscription provider", path: ["provider"] });
+  }
+  if (value.metric === "subscription_percent" && value.connectionFilter) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Connection filters apply to money budgets only", path: ["connectionFilter"] });
   }
   if (value.progressive === true && value.metric !== "subscription_percent") {
     ctx.addIssue({

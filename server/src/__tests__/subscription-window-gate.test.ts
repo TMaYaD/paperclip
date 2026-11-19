@@ -2,6 +2,7 @@ import { mapCodexRpcQuota } from "../../../packages/adapters/codex-local/src/ser
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ProviderQuotaResult, QuotaWindow } from "@paperclipai/shared";
 import {
+  bindingBypassesSubscriptionWindow,
   boundSubscriptionWindowWait,
   decideSubscriptionWindowWait,
   evaluateSubscriptionRelease,
@@ -41,6 +42,20 @@ function policy(overrides: Partial<SubscriptionWindowPolicy> = {}): Subscription
 function ok(windows: QuotaWindow[]): ProviderQuotaResult {
   return { provider: "anthropic", ok: true, windows };
 }
+
+describe("bindingBypassesSubscriptionWindow", () => {
+  const connection = { connectionId: "8e4f0f9c-0a1b-4c55-9b8a-2b6f5e1d7c11", grantId: "1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f" };
+  it("skips subscription limits for agents pinned to an API-key connection", () => {
+    expect(bindingBypassesSubscriptionWindow({ provider: "anthropic", method: "api_key", mode: "shared", ...connection })).toBe(true);
+    expect(bindingBypassesSubscriptionWindow({ provider: "anthropic", method: "api_key", mode: "delegated", ...connection })).toBe(true);
+  });
+  it("keeps subscription, responsible-user and unmanaged agents gated", () => {
+    expect(bindingBypassesSubscriptionWindow({ provider: "anthropic", method: "subscription", mode: "shared", ...connection })).toBe(false);
+    expect(bindingBypassesSubscriptionWindow({ provider: "anthropic", method: "api_key", mode: "responsible_user" })).toBe(false);
+    expect(bindingBypassesSubscriptionWindow(undefined)).toBe(false);
+    expect(bindingBypassesSubscriptionWindow({ mode: "router", connectionId: connection.connectionId })).toBe(false);
+  });
+});
 
 describe("decideSubscriptionWindowWait", () => {
   it("returns null while usage is below every policy limit", () => {

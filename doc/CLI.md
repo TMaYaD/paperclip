@@ -1061,6 +1061,7 @@ npx paperclipai cost by-agent --company-id <company-id>
 npx paperclipai cost by-agent-model --company-id <company-id>
 npx paperclipai cost by-provider --company-id <company-id>
 npx paperclipai cost by-biller --company-id <company-id>
+npx paperclipai cost by-connection --company-id <company-id>
 npx paperclipai cost by-project --company-id <company-id>
 npx paperclipai cost window-spend --company-id <company-id>
 npx paperclipai cost quota-windows --company-id <company-id>

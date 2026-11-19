@@ -2640,6 +2640,13 @@
       "when": 1794191908432,
       "tag": "0378_magenta_lady_mastermind",
       "breakpoints": true
+    },
+    {
+      "idx": 379,
+      "version": "7",
+      "when": 1795094868541,
+      "tag": "0379_purple_the_phantom",
+      "breakpoints": true
     }
   ]
 }

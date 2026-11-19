@@ -2227,6 +2227,19 @@ same selected provider's usage/reset observation. Company budget rows retain
 usage bars, limit and released markers, and the reason/timing for a hold. A
 missing provider window remains unknown and holds matching runs under a limit.
 
+### Connection budgets
+
+Every cost event records the AI Connection it ran under, or none for host
+credentials not managed by Connections ("Existing authentication"). Costs lists
+spend per connection. A money budget may filter on one connection (or on
+unmanaged credentials): it counts only that connection's ledger spend, live
+run exposure and held reservations, and is otherwise enforced like any money
+budget on its scope, including hard-stop pause, incidents and resume. A scope's
+monthly budget field mirrors only its unfiltered budget. Removing a connection
+rule that has incidents retires it (amount 0, inactive) so the audit trail stays.
+Agents pinned to an API-key connection are not held by provider subscription
+window rules, because their runs never use that subscription.
+
 ### In-app announcements
 
 A versioned remote JSON manifest supplies one optional board announcement.

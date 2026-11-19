@@ -2984,6 +2984,21 @@ Migration 0291 converts progressive limits to explicit pace and, for old limits
 below 100%, a separate cap. It preserves their combined release curve and active
 state. See DATABASE.md for the stored units and migration details.
 
+### Connection budgets and spend
+
+`GET /api/companies/:companyId/costs/by-connection` (CLI `cost by-connection`)
+returns spend per AI connection for a date range, including unused connections
+and a `connectionId: null` row for host credentials. Create a connection budget
+with `POST /api/companies/:companyId/budgets/policies` and
+`connectionFilter: "<connection id>" | "unmanaged"` on a `billed_cents` policy;
+edit it by ID with `PATCH` and remove it with `DELETE`. The Costs page shows
+spend in the Connections tab and the rules under Budgets → Connection budgets.
+
+The Claude adapter bills a run whose `ANTHROPIC_BASE_URL` points at a known
+Anthropic-compatible gateway (MiniMax, OpenRouter) to that gateway as metered
+usage. Other base URLs keep Anthropic billing because they are usually a proxy
+in front of Anthropic.
+
 ### Provider changes during subscription waits
 
 The scheduled-retry sweep rechecks a subscription wait when the agent's current

@@ -12,8 +12,10 @@ import {
   costEvents,
   heartbeatRuns,
   projects,
+  toolConnections,
 } from "@paperclipai/db";
 import {
+  BUDGET_CONNECTION_FILTER_UNMANAGED,
   SUBSCRIPTION_BUDGET_WINDOW_DURATION_MS,
   SUBSCRIPTION_BUDGET_PROVIDERS,
   isSubscriptionBudgetWindowKind,
@@ -197,6 +199,16 @@ async function resolveScopeRecord(db: Db, scopeType: BudgetScopeType, scopeId: s
     pauseReason: (row.pauseReason as ScopeRecord["pauseReason"]) ?? null,
     budgetHeld: row.pauseReason === "budget",
   };
+}
+
+/** Display name for a money budget's connection filter. "Existing
+ * authentication" is the board's label for host credentials. */
+async function resolveConnectionFilterName(db: Db, companyId: string, filter: string): Promise<string | null> {
+  if (!filter) return null;
+  if (filter === BUDGET_CONNECTION_FILTER_UNMANAGED) return "Existing authentication";
+  const [row] = await db.select({ name: toolConnections.name }).from(toolConnections)
+    .where(and(eq(toolConnections.id, filter), eq(toolConnections.companyId, companyId)));
+  return row?.name ?? null;
 }
 
 // Keep a large dashboard from filling the database pool with queued reads.
@@ -504,6 +516,8 @@ export function budgetServiceInTransaction(
       scopeId: policy.scopeId,
       scopeName: normalizeScopeName(policy.scopeType as BudgetScopeType, scope.name),
       provider: policy.provider || null,
+      connectionFilter: policy.connectionFilter || null,
+      connectionName: await resolveConnectionFilterName(db, policy.companyId, policy.connectionFilter),
       metric: policy.metric as BudgetMetric,
       windowKind: policy.windowKind as BudgetWindowKind,
       amount,
@@ -662,10 +676,18 @@ export function budgetServiceInTransaction(
         .where(inArray(approvals.id, approvalIds))
       : [];
     const approvalStatusById = new Map(approvalRows.map((row) => [row.id, row.status]));
+    const policyIds = [...new Set(rows.map((row) => row.policyId))];
+    const filterRows = policyIds.length > 0
+      ? await db.select({ id: budgetPolicies.id, connectionFilter: budgetPolicies.connectionFilter }).from(budgetPolicies).where(inArray(budgetPolicies.id, policyIds))
+      : [];
+    const connectionFilterByPolicy = new Map(filterRows.map((row) => [row.id, row.connectionFilter]));
 
     return mapBudgetReads(rows, async (row) => {
       const scope = await resolveScopeRecord(db, row.scopeType as BudgetScopeType, row.scopeId);
+      const connectionFilter = connectionFilterByPolicy.get(row.policyId) ?? "";
       return {
+        connectionFilter: connectionFilter || null,
+        connectionName: await resolveConnectionFilterName(db, row.companyId, connectionFilter),
         id: row.id,
         companyId: row.companyId,
         policyId: row.policyId,
@@ -875,8 +897,22 @@ export function budgetServiceInTransaction(
       }
       const editing = policyId ? await getPolicyRow(policyId) : null;
       if (editing && editing.companyId !== companyId) throw notFound("Budget policy not found");
-      if (editing && (editing.metric !== "subscription_percent" || metric !== editing.metric || editing.scopeType !== input.scopeType || editing.scopeId !== input.scopeId)) {
-        throw unprocessable("Only subscription rules can be edited by ID, within their existing scope");
+      // An edit by ID keeps the rule's connection unless the caller restates it.
+      const connectionFilter = input.connectionFilter === undefined ? editing?.connectionFilter ?? "" : input.connectionFilter ?? "";
+      if (connectionFilter && metric !== "billed_cents") throw unprocessable("Connection filters apply to money budgets only");
+      // A removed connection keeps its existing rule editable; new rules need a live AI connection.
+      if (connectionFilter && connectionFilter !== BUDGET_CONNECTION_FILTER_UNMANAGED && connectionFilter !== editing?.connectionFilter) {
+        const [connection] = await db.select({ id: toolConnections.id }).from(toolConnections).where(and(
+          eq(toolConnections.id, connectionFilter), eq(toolConnections.companyId, companyId), eq(toolConnections.connectionPurpose, "ai"),
+        ));
+        if (!connection) throw unprocessable("Budget connection must be an AI connection in this company");
+      }
+      // Subscription and connection rules are separate rows per scope, so they
+      // are addressed by ID; the scope's base money budget is upserted by scope.
+      const editableById = editing && (editing.metric === "subscription_percent" || editing.connectionFilter !== "");
+      if (editing && (!editableById || metric !== editing.metric || editing.scopeType !== input.scopeType || editing.scopeId !== input.scopeId
+        || editing.connectionFilter !== connectionFilter)) {
+        throw unprocessable("Only subscription and connection rules can be edited by ID, within their existing scope and connection");
       }
       const progressive = metric === "subscription_percent" ? input.progressive ?? editing?.progressive ?? false : false;
       const pacePercent = progressive ? input.pacePercent ?? editing?.pacePercent ?? null : null;
@@ -894,6 +930,7 @@ export function budgetServiceInTransaction(
             eq(budgetPolicies.metric, metric),
             eq(budgetPolicies.windowKind, windowKind),
             eq(budgetPolicies.provider, provider),
+            eq(budgetPolicies.connectionFilter, connectionFilter),
             eq(budgetPolicies.progressive, progressive),
           ),
         )
@@ -943,6 +980,7 @@ export function budgetServiceInTransaction(
             scopeId: input.scopeId,
             metric,
             provider,
+            connectionFilter,
             windowKind,
             amount,
             progressive,
@@ -969,7 +1007,8 @@ export function budgetServiceInTransaction(
 
       if (!row) throw notFound("Budget policy not found");
 
-      if (input.scopeType === "company" && windowKind === "calendar_month_utc") {
+      // The scope's monthly budget mirrors only its unfiltered money budget.
+      if (input.scopeType === "company" && windowKind === "calendar_month_utc" && metric === "billed_cents" && !connectionFilter) {
         await db
           .update(companies)
           .set({
@@ -979,7 +1018,7 @@ export function budgetServiceInTransaction(
           .where(eq(companies.id, input.scopeId));
       }
 
-      if (input.scopeType === "agent" && windowKind === "calendar_month_utc") {
+      if (input.scopeType === "agent" && windowKind === "calendar_month_utc" && metric === "billed_cents" && !connectionFilter) {
         await db
           .update(agents)
           .set({
@@ -1030,6 +1069,7 @@ export function budgetServiceInTransaction(
           amount: row.amount,
           windowKind: row.windowKind,
           provider: row.provider || null,
+          connectionFilter: row.connectionFilter || null,
           progressive: row.progressive,
           pacePercent: row.pacePercent,
         },
@@ -1041,8 +1081,23 @@ export function budgetServiceInTransaction(
     deletePolicy: async (companyId: string, policyId: string, actorUserId: string | null): Promise<void> => {
       const policy = await getPolicyRow(policyId);
       if (policy.companyId !== companyId) throw notFound("Budget policy not found");
-      if (policy.metric !== "subscription_percent") throw unprocessable("Only subscription rules can be deleted");
-      await db.delete(budgetPolicies).where(and(eq(budgetPolicies.id, policyId), eq(budgetPolicies.companyId, companyId)));
+      if (policy.metric !== "subscription_percent" && !policy.connectionFilter) throw unprocessable("Only subscription and connection rules can be deleted");
+      if (isEnforcedByIncidents(policy)) {
+        // Incidents keep their policy for audit. A connection rule that has
+        // fired is retired (a saved zero, which disables enforcement) instead
+        // of deleted; re-adding the same rule reactivates that row.
+        await resolveOpenIncidentsForPolicy(policy.id, "approved", actorUserId ?? "budget_service");
+        const [incident] = await db.select({ id: budgetIncidents.id }).from(budgetIncidents).where(eq(budgetIncidents.policyId, policy.id)).limit(1);
+        if (incident) {
+          await db.update(budgetPolicies).set({ amount: 0, isActive: false, updatedByUserId: actorUserId, updatedAt: new Date() })
+            .where(and(eq(budgetPolicies.id, policyId), eq(budgetPolicies.companyId, companyId)));
+        } else {
+          await db.delete(budgetPolicies).where(and(eq(budgetPolicies.id, policyId), eq(budgetPolicies.companyId, companyId)));
+        }
+        await resumeScopeFromBudget(policy);
+      } else {
+        await db.delete(budgetPolicies).where(and(eq(budgetPolicies.id, policyId), eq(budgetPolicies.companyId, companyId)));
+      }
       await recordActivity({
         companyId,
         actorType: "user",
@@ -1050,12 +1105,13 @@ export function budgetServiceInTransaction(
         action: "budget.policy_deleted",
         entityType: "budget_policy",
         entityId: policyId,
-        details: { scopeType: policy.scopeType, scopeId: policy.scopeId, provider: policy.provider, windowKind: policy.windowKind, amount: policy.amount, progressive: policy.progressive, pacePercent: policy.pacePercent },
+        details: { scopeType: policy.scopeType, scopeId: policy.scopeId, provider: policy.provider, connectionFilter: policy.connectionFilter || null, windowKind: policy.windowKind, amount: policy.amount, progressive: policy.progressive, pacePercent: policy.pacePercent },
       });
     },
 
     overview: async (companyId: string): Promise<BudgetOverview> => {
-      const rows = await listPolicyRows(companyId);
+      // Retired connection rules (deleted after an incident) stay for audit only.
+      const rows = (await listPolicyRows(companyId)).filter((row) => !(row.connectionFilter && !row.isActive && row.amount === 0));
       const policies = await mapBudgetReads(rows, buildPolicySummary);
       const activeIncidentRows = await db
         .select()

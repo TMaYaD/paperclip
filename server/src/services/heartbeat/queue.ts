@@ -1221,6 +1221,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       agentId: run.agentId,
       adapterType: agent.adapterType,
       projectId: readNonEmptyString(context.projectId),
+      aiConnection: agent.runtimeConfig?.aiConnection,
     });
     if (subscriptionWait) {
       await holdQueuedRunForSubscriptionWindow(run, subscriptionWait);

@@ -874,6 +874,13 @@ export type FinanceUnit = (typeof FINANCE_UNITS)[number];
 export const BUDGET_SCOPE_TYPES = ["company", "agent", "project"] as const;
 export type BudgetScopeType = (typeof BUDGET_SCOPE_TYPES)[number];
 
+/**
+ * Money budget connection filter for usage on host credentials that are not
+ * managed by Connections ("Existing authentication"). Any other non-empty
+ * filter is an AI Connection id; the empty filter counts all usage.
+ */
+export const BUDGET_CONNECTION_FILTER_UNMANAGED = "unmanaged" as const;
+
 export const BUDGET_METRICS = ["billed_cents", "subscription_percent"] as const;
 export type BudgetMetric = (typeof BUDGET_METRICS)[number];
 

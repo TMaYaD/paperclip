@@ -1,9 +1,9 @@
 import { receiptFingerprint } from "./receipt-fingerprint.js";
-import { agentAvatarUrl, resolveAgentAppearance, createCostEventSchema, createServiceCostEventSchema, normalizeCents, isUuidLike, type MoneyInput, type CostByUserReport } from "@paperclipai/shared";
+import { agentAvatarUrl, resolveAgentAppearance, createCostEventSchema, createServiceCostEventSchema, normalizeCents, isUuidLike, type MoneyInput, type CostByUserReport, type CostByConnection } from "@paperclipai/shared";
 import { and, desc, eq, gte, inArray, isNotNull, isNull, lt, lte, ne, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import type { Db } from "@paperclipai/db";
-import { activityLog, agents, agentRuntimeState, authUsers, companies, companyMemberships, costEvents, heartbeatRuns, issues, projects, goals, aiSubscriptions } from "@paperclipai/db";
+import { activityLog, agents, agentRuntimeState, authUsers, companies, companyMemberships, costEvents, heartbeatRuns, issues, projects, goals, aiSubscriptions, toolConnections } from "@paperclipai/db";
 import { notFound, unprocessable, conflict } from "../errors.js";
 import { budgetServiceInTransaction, type BudgetServiceHooks } from "./budgets.js";
 import { logActivity, type LogActivityInput, type ActivityPublication } from "./activity-log.js";
@@ -126,10 +126,16 @@ export async function createCostEventInTransaction(db: Db, companyId: string, da
     if (row.companyId !== companyId) throw unprocessable(`${label} does not belong to company`);
   }
   let subscriptionId: string | null = null;
+  // Service charges (decisions, fast responses, prompt-injection checks) name
+  // their connection explicitly. Run usage is attributed from the connection
+  // recorded on the run at execution time; a run without one ran on host
+  // credentials that Connections does not manage.
+  let aiConnectionId: string | null = typeof data.aiConnectionId === "string" && isUuidLike(data.aiConnectionId) ? data.aiConnectionId : null;
   if (values.heartbeatRunId) {
     const [run] = await db.select({ agentId: heartbeatRuns.agentId, context: heartbeatRuns.contextSnapshot }).from(heartbeatRuns).where(eq(heartbeatRuns.id, values.heartbeatRunId));
     if (run.agentId !== values.agentId) throw unprocessable("Heartbeat run does not belong to agent");
-    const attribution = run.context?.aiConnection as { subscriptionId?: unknown; provider?: unknown } | undefined;
+    const attribution = run.context?.aiConnection as { subscriptionId?: unknown; provider?: unknown; connectionId?: unknown } | undefined;
+    aiConnectionId = typeof attribution?.connectionId === "string" && isUuidLike(attribution.connectionId) ? attribution.connectionId : null;
     if (SUBSCRIPTION_BILLING_TYPES.includes(values.billingType as typeof SUBSCRIPTION_BILLING_TYPES[number]) && attribution?.provider === values.provider && typeof attribution.subscriptionId === "string" && isUuidLike(attribution.subscriptionId)) {
       const [account] = await db.select({ id: aiSubscriptions.id }).from(aiSubscriptions).where(and(eq(aiSubscriptions.id, attribution.subscriptionId), eq(aiSubscriptions.companyId, companyId), eq(aiSubscriptions.provider, values.provider)));
       subscriptionId = account?.id ?? null;
@@ -137,7 +143,7 @@ export async function createCostEventInTransaction(db: Db, companyId: string, da
   }
   // Server-derived attribution stays outside the immutable receipt fingerprint;
   // replaying a receipt must not depend on later account metadata changes.
-  const [event] = await db.insert(costEvents).values({ ...values, subscriptionId, costCents: sql`${values.costCents}::numeric`, reportedCostCents: values.costCents, id: data.id, companyId, receiptHash }).returning();
+  const [event] = await db.insert(costEvents).values({ ...values, subscriptionId, aiConnectionId, costCents: sql`${values.costCents}::numeric`, reportedCostCents: values.costCents, id: data.id, companyId, receiptHash }).returning();
   await updateMonthlySpendProjections(db, companyId, event.agentId, values.costCents, event.occurredAt);
   // Separately reported charges linked to an already-accounted run contribute
   // to lifetime totals too. Before acknowledgement, accountRunCost includes
@@ -552,6 +558,49 @@ export function costService(db: Db, _budgetHooks: BudgetServiceHooks = {}) {
         .where(and(...conditions))
         .groupBy(costEvents.biller)
         .orderBy(desc(sumAsNumber(costEvents.costCents)));
+    },
+
+    /**
+     * Spend per AI Connection in the range. Every AI connection in the company
+     * is listed, with zero spend when unused, so the board can budget one
+     * before it is used. The `connectionId: null` row is host credentials not
+     * managed by Connections; connections removed after use keep their spend.
+     */
+    byConnection: async (companyId: string, range?: CostDateRange): Promise<CostByConnection[]> => {
+      range = resolveCostDateRange(range);
+      const conditions: ReturnType<typeof eq>[] = [eq(costEvents.companyId, companyId)];
+      if (range?.from) conditions.push(gte(costEvents.occurredAt, range.from));
+      if (range?.to) conditions.push(lte(costEvents.occurredAt, range.to));
+      const [spend, connections] = await Promise.all([
+        db.select({
+          connectionId: costEvents.aiConnectionId,
+          costCents: sumAsNumber(costEvents.costCents),
+          costCentsExact: sql<string>`coalesce(sum(${costEvents.costCents}), 0)::text`,
+          eventCount: sql<number>`count(*)::int`,
+          unpricedEventCount: sql<number>`count(*) filter (where ${costEvents.costStatus} = 'unpriced' and ${costEvents.billingType} <> 'subscription_included')::int`,
+          inputTokens: sumAsNumber(ordinaryInputTokens),
+          cachedInputTokens: sumAsNumber(costEvents.cachedInputTokens),
+          outputTokens: sumAsNumber(costEvents.outputTokens),
+          agentCount: sql<number>`count(distinct ${costEvents.agentId})::int`,
+          provider: sql<string | null>`case when count(distinct ${costEvents.provider}) = 1 then min(${costEvents.provider}) else null end`,
+        }).from(costEvents).where(and(...conditions)).groupBy(costEvents.aiConnectionId),
+        db.select({ id: toolConnections.id, name: toolConnections.name, provider: sql<string | null>`${toolConnections.config}->'ai'->>'provider'` })
+          .from(toolConnections).where(and(eq(toolConnections.companyId, companyId), eq(toolConnections.connectionPurpose, "ai"))),
+      ]);
+      const empty = { costCents: 0, costCentsExact: "0", eventCount: 0, unpricedEventCount: 0, inputTokens: 0, cachedInputTokens: 0, outputTokens: 0, agentCount: 0 };
+      const spendById = new Map(spend.map((row) => [row.connectionId, row]));
+      const rows: CostByConnection[] = [];
+      const unmanaged = spendById.get(null);
+      rows.push({ ...empty, ...unmanaged, connectionId: null, connectionName: null, connectionExists: true, provider: unmanaged?.provider ?? null });
+      for (const connection of connections) {
+        const row = spendById.get(connection.id);
+        rows.push({ ...empty, ...row, connectionId: connection.id, connectionName: connection.name, connectionExists: true, provider: connection.provider ?? row?.provider ?? null });
+      }
+      const known = new Set(connections.map((connection) => connection.id));
+      for (const row of spend) {
+        if (row.connectionId && !known.has(row.connectionId)) rows.push({ ...row, connectionId: row.connectionId, connectionName: null, connectionExists: false });
+      }
+      return rows.sort((a, b) => b.costCents - a.costCents);
     },
 
     /**

@@ -28,6 +28,8 @@ import { agentsApi } from "../api/agents";
 import { BillerSpendCard } from "../components/BillerSpendCard";
 import { BudgetIncidentCard } from "../components/BudgetIncidentCard";
 import { BudgetPolicyCard } from "../components/BudgetPolicyCard";
+import { ConnectionBudgets } from "../components/ConnectionBudgets";
+import { ConnectionSpendTable } from "../components/ConnectionSpendTable";
 import { SubscriptionWindowBudgets } from "../components/SubscriptionWindowBudgets";
 import { EmptyState } from "../components/EmptyState";
 import { FinanceBillerCard } from "../components/FinanceBillerCard";
@@ -49,7 +51,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
 const NO_COMPANY = "__none__";
-export type CostsMainTab = "overview" | "budgets" | "providers" | "billers" | "finance" | "decisions" | "fast-responses";
+export type CostsMainTab = "overview" | "budgets" | "providers" | "billers" | "connections" | "finance" | "decisions" | "fast-responses";
 
 export interface CostsProps {
   /** Render inside Audit without a second page-level title or breadcrumb. */
@@ -213,7 +215,7 @@ export function Costs({
 
   useEffect(() => {
     const tab = searchParams.get("tab");
-    setMainTab(!lockTab && tab && ["overview", "providers", "billers", "finance", "budgets", "decisions", "fast-responses"].includes(tab) ? tab as CostsMainTab : initialTab);
+    setMainTab(!lockTab && tab && ["overview", "providers", "billers", "connections", "finance", "budgets", "decisions", "fast-responses"].includes(tab) ? tab as CostsMainTab : initialTab);
   }, [initialTab, lockTab, searchParams]);
 
   const [today, setToday] = useState(() => new Date().toDateString());
@@ -285,6 +287,8 @@ export function Costs({
       scopeId: summary.scopeId,
       metric: summary.metric,
       windowKind: summary.windowKind,
+      // Connection rules are separate rows; keep the edit on this rule.
+      ...(summary.connectionFilter ? { connectionFilter: summary.connectionFilter } : {}),
       ...changes,
     }),
     onSuccess: invalidateBudgetViews,
@@ -371,6 +375,22 @@ export function Costs({
     enabled: !!selectedCompanyId && customReady && (mainTab === "providers" || mainTab === "billers"),
     refetchInterval: 30_000,
     staleTime: 10_000,
+  });
+
+  const { data: connectionData, error: connectionError } = useQuery({
+    queryKey: queryKeys.usageByConnection(companyId, reportQueryFrom, reportQueryTo),
+    queryFn: () => costsApi.byConnection(companyId, from || undefined, to || undefined),
+    enabled: !!selectedCompanyId && customReady && mainTab === "connections",
+    refetchInterval: 30_000,
+    staleTime: 10_000,
+  });
+
+  // The budget editor lists every AI connection; spend amounts are not shown.
+  const { data: budgetConnectionData } = useQuery({
+    queryKey: queryKeys.usageByConnection(companyId),
+    queryFn: () => costsApi.byConnection(companyId),
+    enabled: !!selectedCompanyId && mainTab === "budgets",
+    staleTime: 30_000,
   });
 
   const { data: billerData, error: billerError } = useQuery({
@@ -598,7 +618,8 @@ export function Costs({
     [budgetPolicies],
   );
   const budgetPoliciesByScope = useMemo(() => {
-    const billed = budgetPolicies.filter((policy) => policy.metric !== "subscription_percent");
+    // Connection rules have their own section.
+    const billed = budgetPolicies.filter((policy) => policy.metric !== "subscription_percent" && !policy.connectionFilter);
     return {
       company: billed.filter((policy) => policy.scopeType === "company"),
       agent: billed.filter((policy) => policy.scopeType === "agent"),
@@ -739,7 +760,7 @@ export function Costs({
           Budget data could not be loaded. Please try again shortly.
         </p>
       ) : null}
-      {((spendData && spendError) || (financeData && financeError) || (budgetData && budgetError) || providerError || billerError || weekError || weekBillerError || windowError) ? (
+      {((spendData && spendError) || (financeData && financeError) || (budgetData && budgetError) || providerError || billerError || connectionError || weekError || weekBillerError || windowError) ? (
         <p role="status" className="text-sm text-muted-foreground">
           Showing the last loaded data. Updates will resume automatically.
         </p>
@@ -754,6 +775,7 @@ export function Costs({
               {!hideBudgetsTab ? <TabsTrigger value="budgets">Budgets</TabsTrigger> : null}
               <TabsTrigger value="providers">Providers</TabsTrigger>
               <TabsTrigger value="billers">Billers</TabsTrigger>
+              <TabsTrigger value="connections">Connections</TabsTrigger>
               <TabsTrigger value="finance">Finance</TabsTrigger>
               <TabsTrigger value="decisions">Decisions</TabsTrigger>
               <TabsTrigger value="fast-responses">Fast responses</TabsTrigger>
@@ -1013,6 +1035,21 @@ export function Costs({
                 }}
               />
 
+              <ConnectionBudgets
+                policies={budgetPolicies}
+                connections={budgetConnectionData ?? []}
+                onSave={async (input, policyId) => {
+                  const data = { ...input, scopeType: "company" as const, scopeId: companyId, metric: "billed_cents" as const, windowKind: "calendar_month_utc" as const };
+                  if (policyId) await budgetsApi.updatePolicy(companyId, policyId, data);
+                  else await budgetsApi.upsertPolicy(companyId, data);
+                  invalidateBudgetViews();
+                }}
+                onDelete={async (policyId) => {
+                  await budgetsApi.deletePolicy(companyId, policyId);
+                  invalidateBudgetViews();
+                }}
+              />
+
               <div className="space-y-5">
                 {(["company", "agent", "project"] as const).map((scopeType) => {
                   const rows = budgetPoliciesByScope[scopeType];
@@ -1116,6 +1153,14 @@ export function Costs({
                 ))}
               </Tabs>
             </>
+          )}
+        </TabsContent>
+
+        <TabsContent value="connections" className="mt-4 space-y-4">
+          {showCustomPrompt ? (
+            <p className="text-sm text-muted-foreground">Select a start and end date to load data.</p>
+          ) : (
+            <ConnectionSpendTable rows={connectionData ?? []} />
           )}
         </TabsContent>
 

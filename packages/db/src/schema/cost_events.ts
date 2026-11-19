@@ -21,6 +21,10 @@ export const costEvents = pgTable(
     goalId: uuid("goal_id").references(() => goals.id),
     heartbeatRunId: uuid("heartbeat_run_id").references(() => heartbeatRuns.id),
     subscriptionId: uuid("subscription_id").references(() => aiSubscriptions.id),
+    // AI Connection the usage ran under; null for host credentials not managed
+    // by Connections. No foreign key: the ledger keeps the attribution after a
+    // connection is removed, and reports fall back to the stored id.
+    aiConnectionId: uuid("ai_connection_id"),
     billingCode: text("billing_code"),
     idempotencyKey: text("idempotency_key"),
     receiptHash: text("receipt_hash"),
@@ -49,6 +53,7 @@ export const costEvents = pgTable(
     dataQualityIdx: index("cost_events_data_quality_idx").on(table.companyId, table.occurredAt.desc(), table.id)
       .where(sql`${table.billingType} = 'unknown' or (${table.costStatus} = 'unpriced' and ${table.billingType} <> 'subscription_included')`),
     companyOccurredIdx: index("cost_events_company_occurred_idx").on(table.companyId, table.occurredAt),
+    companyAiConnectionOccurredIdx: index("cost_events_company_ai_connection_occurred_idx").on(table.companyId, table.aiConnectionId, table.occurredAt),
     companySubscriptionOccurredIdx: index("cost_events_company_subscription_occurred_idx").on(table.companyId, table.subscriptionId, table.occurredAt),
     companyAgentOccurredIdx: index("cost_events_company_agent_occurred_idx").on(
       table.companyId,

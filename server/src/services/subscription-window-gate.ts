@@ -2,6 +2,7 @@ import { and, eq, gt, inArray, or } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { budgetPolicies } from "@paperclipai/db";
 import {
+  aiConnectionBindingSchema,
   SUBSCRIPTION_BUDGET_WINDOW_DURATION_MS,
   SUBSCRIPTION_BUDGET_WINDOW_QUOTA_KEYS,
   isSubscriptionBudgetWindowKind,
@@ -541,8 +542,22 @@ export type SubscriptionWindowGateInput = {
   agentId: string;
   adapterType: string;
   projectId?: string | null;
+  /** The agent's stored AI connection binding (`runtimeConfig.aiConnection`). */
+  aiConnection?: unknown;
   now?: Date;
 };
+
+/**
+ * True when the agent is pinned to an API-key AI connection. Such runs bill
+ * the connection's account (an API key or an Anthropic-compatible gateway such
+ * as MiniMax), never the provider subscription, so subscription window limits
+ * do not apply to them. Responsible-user bindings resolve their method per run
+ * and stay gated.
+ */
+export function bindingBypassesSubscriptionWindow(aiConnection: unknown) {
+  const binding = aiConnectionBindingSchema.safeParse(aiConnection);
+  return binding.success && binding.data.mode !== "responsible_user" && binding.data.method === "api_key";
+}
 
 export function subscriptionWindowGateService(
   db: Db,
@@ -612,6 +627,7 @@ export function subscriptionWindowGateService(
      * instead of letting it through (see decideSubscriptionWindowWait).
      */
     evaluate: async (input: SubscriptionWindowGateInput): Promise<SubscriptionWindowWait | null> => {
+      if (bindingBypassesSubscriptionWindow(input.aiConnection)) return null;
       const provider = providerSlugForAdapterType(input.adapterType);
       const policies = (await listPolicies(input)).filter((policy) => policy.provider === provider);
       if (policies.length === 0) return null;

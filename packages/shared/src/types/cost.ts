@@ -168,6 +168,25 @@ export interface CostByBiller {
   modelCount: number;
 }
 
+/** Spend per AI Connection. `connectionId` null is usage on host credentials
+ * not managed by Connections ("Existing authentication"). */
+export interface CostByConnection {
+  connectionId: string | null;
+  /** Null when the connection was removed after the usage was recorded. */
+  connectionName: string | null;
+  provider: string | null;
+  /** False once the connection no longer exists; its ledger rows remain. */
+  connectionExists: boolean;
+  costCents: number;
+  costCentsExact: string;
+  eventCount: number;
+  unpricedEventCount: number;
+  inputTokens: number;
+  cachedInputTokens: number;
+  outputTokens: number;
+  agentCount: number;
+}
+
 /** per-agent breakdown by provider + model, for identifying token-hungry agents */
 export interface CostByAgentModel {
   agentId: string | null;
