@@ -28,9 +28,21 @@ export async function stageRunnerBinary(source, destination) {
   }
 }
 
+/**
+ * Where cargo wrote the release executable. An installer may point
+ * `CARGO_TARGET_DIR` outside the source tree so compiled crates survive
+ * between builds; cargo (run from the package root by build-runner-binary.mjs)
+ * resolves a relative value from there. Without it, the default target applies.
+ */
+export function builtRunnerBinaryPath(packageRoot, executable, env = process.env) {
+  const targetDirectory = env.CARGO_TARGET_DIR?.trim();
+  if (targetDirectory) return path.resolve(packageRoot, targetDirectory, "release", executable);
+  return path.join(packageRoot, "runner", "target", "release", executable);
+}
+
 export async function stageBuiltRunnerBinary(packageRoot) {
   const executable = process.platform === "win32" ? "paperclip-runnerd.exe" : "paperclip-runnerd";
-  const source = path.join(packageRoot, "runner", "target", "release", executable);
+  const source = builtRunnerBinaryPath(packageRoot, executable);
   const binaryRoot = path.join(packageRoot, "dist", "bin");
   await stageRunnerBinary(source, path.join(binaryRoot, executable));
 }

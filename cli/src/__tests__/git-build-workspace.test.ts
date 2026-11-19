@@ -116,3 +116,30 @@ it("prunes only other generations older than 24 hours after a successful build",
   expect(fs.existsSync(unrelated)).toBe(true);
   expect(fs.existsSync(current)).toBe(true);
 });
+
+it("keeps compiled Rust crates beside the source across reused builds", async () => {
+  let first = "";
+  await withGitBuildWorkspace("owner/repo", paths, async (source, workspace) => {
+    first = workspace.cargoTargetDir;
+    expect(path.relative(source, workspace.cargoTargetDir).startsWith("..")).toBe(true);
+    write(path.join(workspace.cargoTargetDir, "release/deps/libserde-1.rlib"), "compiled");
+  });
+  await withGitBuildWorkspace("owner/repo", paths, async (source, workspace) => {
+    expect(workspace.cargoTargetDir).toBe(first);
+    expect(fs.readFileSync(path.join(workspace.cargoTargetDir, "release/deps/libserde-1.rlib"), "utf8")).toBe("compiled");
+    expect(fs.readdirSync(source)).toEqual([]);
+  });
+});
+
+it("never reuses compiled crates from a failed build", async () => {
+  let failed = "";
+  await expect(withGitBuildWorkspace("owner/repo", paths, async (_source, workspace) => {
+    failed = workspace.cargoTargetDir;
+    write(path.join(workspace.cargoTargetDir, "release/half-written.rlib"));
+    throw new Error("build failed");
+  })).rejects.toThrow("build failed");
+  await withGitBuildWorkspace("owner/repo", paths, async (_source, workspace) => {
+    expect(workspace.cargoTargetDir).not.toBe(failed);
+    expect(fs.readdirSync(workspace.cargoTargetDir)).toEqual([]);
+  });
+});
