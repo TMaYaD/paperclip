@@ -1,5 +1,5 @@
 import { secretsApi } from "../api/secrets";
-import { randomUuid } from "./random-uuid";
+import { createUuid } from "./uuid";
 
 export const PROVIDER_ENV_KEYS: Record<string, string> = {
   openrouter: "OPENROUTER_API_KEY",
@@ -19,7 +19,7 @@ export async function storeOrganizationApiKey(
 ) {
   const secret = await secretsApi.create(companyId, {
     name: `${envKey} · agent setup`,
-    key: `${envKey}.setup.${randomUuid()}`,
+    key: `${envKey}.setup.${createUuid()}`,
     value: value.trim(),
     description: "Adapter credential supplied during agent setup.",
   });
@@ -40,7 +40,7 @@ export async function storeProviderApiKey(
   envKey: string,
   value: string,
 ) {
-  const key = `${envKey}.setup.${randomUuid()}`;
+  const key = `${envKey}.setup.${createUuid()}`;
   const definition = await secretsApi.createUserSecretDefinition(companyId, {
     key,
     name: `${envKey} · agent setup`,

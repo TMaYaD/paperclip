@@ -5,7 +5,7 @@ import { decisionEffectTargetIssueIds, type Agent, type AttentionSubject } from 
 import { decisionsApi, type DecisionOutcome } from "../api/decisions";
 import { issuesApi } from "../api/issues";
 import { queryKeys } from "../lib/queryKeys";
-import { randomUuid } from "../lib/random-uuid";
+import { createUuid } from "../lib/uuid";
 import { useCompany } from "../context/CompanyContext";
 import { DecisionCard, type DecisionIssueRef } from "./DecisionCard";
 
@@ -209,7 +209,7 @@ export function DecisionResolver({ companyId, decisionId, originIssue, agentMap,
       }
       busy={busy}
       errorMessage={errorMessage}
-      onDecide={(optionId, inputValues) => decideMutation.mutate({ optionId, inputValues, idempotencyKey: randomUuid() })}
+      onDecide={(optionId, inputValues) => decideMutation.mutate({ optionId, inputValues, idempotencyKey: createUuid() })}
       onDismiss={(reason) => dismissMutation.mutate(reason)}
     />
   );

@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { randomUuid } from "./random-uuid";
+import { createUuid } from "./uuid";
 
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-describe("randomUuid", () => {
+describe("createUuid", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
   });
@@ -11,7 +11,7 @@ describe("randomUuid", () => {
   it("uses crypto.randomUUID when the browser exposes it", () => {
     const randomUUID = vi.fn(() => "11111111-2222-4333-8444-555555555555");
     vi.stubGlobal("crypto", { randomUUID });
-    expect(randomUuid()).toBe("11111111-2222-4333-8444-555555555555");
+    expect(createUuid()).toBe("11111111-2222-4333-8444-555555555555");
     expect(randomUUID).toHaveBeenCalledTimes(1);
   });
 
@@ -23,15 +23,15 @@ describe("randomUuid", () => {
         return bytes;
       },
     });
-    const id = randomUuid();
+    const id = createUuid();
     expect(id).toMatch(UUID_V4);
     expect(id).toBe("ffffffff-ffff-4fff-bfff-ffffffffffff");
   });
 
   it("produces distinct valid ids without any crypto object", () => {
     vi.stubGlobal("crypto", undefined);
-    const first = randomUuid();
-    const second = randomUuid();
+    const first = createUuid();
+    const second = createUuid();
     expect(first).toMatch(UUID_V4);
     expect(second).toMatch(UUID_V4);
     expect(first).not.toBe(second);
