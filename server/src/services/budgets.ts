@@ -547,6 +547,8 @@ export function budgetServiceInTransaction(
       metric: policy.metric as BudgetMetric,
       windowKind: policy.windowKind as BudgetWindowKind,
       amount,
+      // A disabled rule keeps its limit so the board can turn it back on.
+      configuredAmount: policy.amount,
       progressive,
       pacePercent: progressive ? policy.pacePercent : null,
       releasedAmount,
@@ -1144,6 +1146,8 @@ export function budgetServiceInTransaction(
           windowKind: row.windowKind,
           provider: row.provider || null,
           connectionFilter: row.connectionFilter || null,
+          isActive: row.isActive,
+          ...(existing && existing.isActive !== row.isActive ? { previousIsActive: existing.isActive } : {}),
           progressive: row.progressive,
           pacePercent: row.pacePercent,
         },

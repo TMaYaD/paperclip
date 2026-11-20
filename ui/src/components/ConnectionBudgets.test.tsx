@@ -40,9 +40,10 @@ async function typeAmount(value: string) {
   const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
   await act(async () => { setter.call(input, value); input.dispatchEvent(new Event("input", { bubbles: true })); });
 }
-async function render(policies: BudgetPolicySummary[] = [rule], onSave = vi.fn().mockResolvedValue(undefined), onDelete = vi.fn().mockResolvedValue(undefined)) {
-  await act(async () => root.render(<ConnectionBudgets policies={policies} connections={connections} onSave={onSave} onDelete={onDelete} />));
-  return { onSave, onDelete };
+async function render(policies: BudgetPolicySummary[] = [rule], onSave = vi.fn().mockResolvedValue(undefined), onDelete = vi.fn().mockResolvedValue(undefined),
+  onActiveChange = vi.fn().mockResolvedValue(undefined)) {
+  await act(async () => root.render(<ConnectionBudgets policies={policies} connections={connections} onSave={onSave} onDelete={onDelete} onActiveChange={onActiveChange} />));
+  return { onSave, onDelete, onActiveChange };
 }
 
 describe("connection budgets", () => {
@@ -89,6 +90,25 @@ describe("connection budgets", () => {
     expect(onDelete).not.toHaveBeenCalled();
     await act(async () => button("Remove budget").click());
     expect(onDelete).toHaveBeenCalledWith("minimax-rule");
+  });
+});
+
+describe("turning a connection budget off", () => {
+  it("toggles the saved rule and keeps its limit visible while off", async () => {
+    const { onActiveChange } = await render([{ ...rule, isActive: false, amount: 0, configuredAmount: 1000, status: "ok" }]);
+    const toggle = document.querySelector<HTMLButtonElement>('[role="switch"][aria-label="Enforce my api.minimax.io budget"]')!;
+    expect(toggle.getAttribute("aria-checked")).toBe("false");
+    expect(container.textContent).toContain("of $10.00 · off");
+    expect(container.textContent).toContain("Off · not enforced");
+    await act(async () => toggle.click());
+    expect(onActiveChange).toHaveBeenCalledWith(expect.objectContaining({ policyId: "minimax-rule" }), true);
+  });
+
+  it("edits a disabled rule from its saved limit", async () => {
+    const { onSave } = await render([{ ...rule, isActive: false, amount: 0, configuredAmount: 1000 }]);
+    await act(async () => button("Edit").click());
+    await submit();
+    expect(onSave).toHaveBeenCalledWith({ connectionFilter: MINIMAX, amount: 1000 }, "minimax-rule");
   });
 });
 

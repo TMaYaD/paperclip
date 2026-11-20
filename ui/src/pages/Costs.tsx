@@ -281,7 +281,7 @@ export function Costs({
   const policyMutation = useMutation({
     mutationFn: ({ summary, changes }: {
       summary: BudgetPolicySummary;
-      changes: Partial<Pick<BudgetPolicySummary, "amount" | "reservationCents" | "unpricedUsagePolicy">>;
+      changes: Partial<Pick<BudgetPolicySummary, "amount" | "reservationCents" | "unpricedUsagePolicy" | "isActive">>;
     }) => budgetsApi.upsertPolicy(companyId, {
       scopeType: summary.scopeType,
       scopeId: summary.scopeId,
@@ -1034,6 +1034,15 @@ export function Costs({
                   await budgetsApi.deletePolicy(companyId, policyId);
                   invalidateBudgetViews();
                 }}
+                onActiveChange={async (rule, isActive) => {
+                  // Restate the saved rule so turning it on restores the same limit and window.
+                  await budgetsApi.updatePolicy(companyId, rule.policyId, {
+                    scopeType: rule.scopeType, scopeId: rule.scopeId, metric: "subscription_percent", windowKind: rule.windowKind,
+                    connectionFilter: rule.connectionFilter ?? null, amount: rule.configuredAmount ?? rule.amount,
+                    progressive: rule.progressive === true, pacePercent: rule.progressive ? rule.pacePercent ?? null : null, isActive,
+                  });
+                  invalidateBudgetViews();
+                }}
               />
 
               <ConnectionBudgets
@@ -1047,6 +1056,13 @@ export function Costs({
                 }}
                 onDelete={async (policyId) => {
                   await budgetsApi.deletePolicy(companyId, policyId);
+                  invalidateBudgetViews();
+                }}
+                onActiveChange={async (rule, isActive) => {
+                  await budgetsApi.updatePolicy(companyId, rule.policyId, {
+                    scopeType: rule.scopeType, scopeId: rule.scopeId, metric: "billed_cents", windowKind: rule.windowKind,
+                    connectionFilter: rule.connectionFilter ?? null, amount: rule.configuredAmount ?? rule.amount, isActive,
+                  });
                   invalidateBudgetViews();
                 }}
               />
@@ -1074,6 +1090,7 @@ export function Costs({
                             summary={summary}
                             onReservationChange={(reservationCents) => policyMutation.mutate({ summary, changes: { reservationCents } })}
                             onUnpricedUsagePolicyChange={(unpricedUsagePolicy) => policyMutation.mutate({ summary, changes: { unpricedUsagePolicy } })}
+                            onActiveChange={(isActive) => policyMutation.mutate({ summary, changes: { isActive } })}
                             isSaving={policyMutation.isPending}
                             onSave={(amount) =>
                               policyMutation.mutate({ summary, changes: { amount } })}

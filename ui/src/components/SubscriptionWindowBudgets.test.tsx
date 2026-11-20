@@ -31,9 +31,10 @@ let root: Root;
 beforeEach(() => { container = document.createElement("div"); document.body.append(container); root = createRoot(container); });
 afterEach(async () => { await act(async () => root.unmount()); container.remove(); });
 const button = (text: string) => [...document.querySelectorAll("button")].find((b) => b.textContent === text)!;
-async function render(policies = [base], onSave = vi.fn().mockResolvedValue(undefined), onDelete = vi.fn().mockResolvedValue(undefined)) {
-  await act(async () => root.render(<SubscriptionWindowBudgets policies={policies} connections={connections} onSave={onSave} onDelete={onDelete} />));
-  return { onSave, onDelete };
+async function render(policies = [base], onSave = vi.fn().mockResolvedValue(undefined), onDelete = vi.fn().mockResolvedValue(undefined),
+  onActiveChange = vi.fn().mockResolvedValue(undefined)) {
+  await act(async () => root.render(<SubscriptionWindowBudgets policies={policies} connections={connections} onSave={onSave} onDelete={onDelete} onActiveChange={onActiveChange} />));
+  return { onSave, onDelete, onActiveChange };
 }
 describe("provider budget rule table", () => {
   it("keeps independent release values, statuses and progress markers in each rich row", async () => {
@@ -96,5 +97,23 @@ describe("provider budget rule table", () => {
     expect(document.querySelector('[role="dialog"]')?.textContent).toContain("Codex local credentials weekly");
     await act(async () => button("Delete rule").click());
     expect(onDelete).toHaveBeenCalledWith("openai-week");
+  });
+  it("turns a rule off and on from its row, keeping the saved cap", async () => {
+    const cap = { ...base, policyId: "cap", progressive: false, pacePercent: null, amount: 0, configuredAmount: 70, isActive: false, status: "ok" as const };
+    const { onActiveChange, onSave } = await render([cap]);
+    expect(container.textContent).toContain("70%");
+    expect(container.textContent).toContain("Off · not enforced");
+    const toggle = document.querySelector<HTMLButtonElement>('[role="switch"]')!;
+    expect(toggle.getAttribute("aria-checked")).toBe("false");
+    await act(async () => toggle.click());
+    expect(onActiveChange).toHaveBeenCalledWith(expect.objectContaining({ policyId: "cap" }), true);
+    await act(async () => button("Edit").click());
+    await act(async () => document.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+    expect(onSave).toHaveBeenCalledWith(expect.objectContaining({ amount: 70, progressive: false }), "cap");
+  });
+  it("shows a failed toggle inline", async () => {
+    await render([base], undefined, undefined, vi.fn().mockRejectedValue(new Error("Rule changed; try again")));
+    await act(async () => document.querySelector<HTMLButtonElement>('[role="switch"]')!.click());
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain("Rule changed; try again");
   });
 });

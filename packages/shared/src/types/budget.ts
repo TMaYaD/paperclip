@@ -58,7 +58,13 @@ export interface BudgetPolicySummary {
   scopeName: string;
   metric: BudgetMetric;
   windowKind: BudgetWindowKind;
+  /** The limit in force: 0 while the rule is disabled (`isActive` false). */
   amount: number;
+  /**
+   * The saved limit, kept while the rule is disabled so turning it back on
+   * restores it. A saved zero is also a disabled rule, with nothing to restore.
+   */
+  configuredAmount?: number;
   /**
    * True when quota is released at `pacePercent` per day/hour instead
    * of being available in full from the window start (`subscription_percent`

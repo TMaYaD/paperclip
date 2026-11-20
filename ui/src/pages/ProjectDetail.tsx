@@ -600,7 +600,7 @@ export function ProjectDetail() {
 
   const projectBudgetSummary = useMemo(() => {
     const matched = budgetOverview?.policies.find(
-      (policy) => policy.scopeType === "project" && policy.scopeId === (project?.id ?? routeProjectRef),
+      (policy) => policy.metric === "billed_cents" && !policy.connectionFilter && policy.scopeType === "project" && policy.scopeId === (project?.id ?? routeProjectRef),
     );
     if (matched) return matched;
     return {
@@ -630,11 +630,12 @@ export function ProjectDetail() {
   }, [budgetOverview?.policies, project, resolvedCompanyId, routeProjectRef]);
 
   const budgetMutation = useMutation({
-    mutationFn: (amount: number) =>
+    // Either a new amount or the enabled state; the server keeps the other.
+    mutationFn: (changes: { amount?: number; isActive?: boolean }) =>
       budgetsApi.upsertPolicy(resolvedCompanyId!, {
         scopeType: "project",
         scopeId: project?.id ?? routeProjectRef,
-        amount,
+        ...changes,
         windowKind: "lifetime",
       }),
     onSuccess: () => {
@@ -913,7 +914,8 @@ export function ProjectDetail() {
             summary={projectBudgetSummary}
             variant="plain"
             isSaving={budgetMutation.isPending}
-            onSave={(amount) => budgetMutation.mutate(amount)}
+            onSave={(amount) => budgetMutation.mutate({ amount })}
+            onActiveChange={(isActive) => budgetMutation.mutate({ isActive })}
           />
         </div>
       ) : null}
