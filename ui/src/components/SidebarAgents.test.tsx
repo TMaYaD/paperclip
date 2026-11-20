@@ -731,6 +731,30 @@ describe("SidebarAgents", () => {
     expect(seeAllAgentsLink(container)?.getAttribute("href")).toBe("/agents/all");
   });
 
+  it("shows running/total runs in the live badge and keeps queued-only agents listed", async () => {
+    mockAgentsApi.list.mockResolvedValue([
+      makeAgent({ id: "agent-a", name: "Alpha", urlKey: "alpha" }),
+      makeAgent({ id: "agent-b", name: "Bravo", urlKey: "bravo" }),
+      makeAgent({ id: "agent-c", name: "Charlie", urlKey: "charlie" }),
+    ]);
+    mockHeartbeatsApi.liveRunsForCompany.mockResolvedValue([
+      { id: "run-1", agentId: "agent-a", status: "running" },
+      { id: "run-2", agentId: "agent-a", status: "running" },
+      { id: "run-3", agentId: "agent-a", status: "queued" },
+      { id: "run-4", agentId: "agent-a", status: "queued" },
+      { id: "run-5", agentId: "agent-b", status: "queued" },
+    ]);
+
+    await renderSidebarAgents();
+
+    const labels = agentLinkLabels(container);
+    expect(labels).toHaveLength(2);
+    expect(labels[0]).toContain("Alpha");
+    expect(labels[0]).toContain("2/4 live");
+    expect(labels[1]).toContain("Bravo");
+    expect(labels[1]).toContain("0/1 live");
+  });
+
   it("keeps formerly live agents visible for the streamlined linger window", async () => {
     vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
     mockAgentsApi.list.mockResolvedValue([

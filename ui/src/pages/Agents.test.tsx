@@ -1013,4 +1013,32 @@ describe("Agents", () => {
     expect(container.textContent).toContain("Alpha");
     expect(container.querySelector('[aria-label="Invalid reporting chain"]')).not.toBeNull();
   });
+
+  it.each([
+    ["streamlined", Agents],
+    ["production", ProductionAgents],
+  ] as const)("separates queued runs from running ones on the %s agent list", async (_mode, AgentList) => {
+    mockHeartbeatsApi.liveRunsForCompany.mockResolvedValue([
+      ...Array.from({ length: 4 }, (_, i) => ({ id: `run-${i}`, agentId: "agent-1", status: "running" })),
+      ...Array.from({ length: 5 }, (_, i) => ({ id: `queued-${i}`, agentId: "agent-1", status: "queued" })),
+    ]);
+    root = createRoot(container);
+    await act(async () => {
+      root!.render(
+        <QueryClientProvider client={queryClient}>
+          <ToastProvider>
+            <AgentList />
+          </ToastProvider>
+        </QueryClientProvider>,
+      );
+    });
+    await flushReact();
+    await flushReact();
+    const listToggle = container.querySelector<HTMLButtonElement>('button[aria-label="List view"]');
+    await act(async () => { listToggle?.click(); });
+    await flushReact();
+
+    expect(container.textContent).toContain("Live (4) · 5 queued");
+    expect(container.textContent).not.toContain("Live (9)");
+  });
 });

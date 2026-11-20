@@ -117,6 +117,7 @@ function SidebarAgentItem({
   onPauseResume,
   rail,
   runCount,
+  liveRunTotal,
   setSidebarOpen,
   builtInStatus,
   starred = false,
@@ -133,6 +134,8 @@ function SidebarAgentItem({
   onPauseResume: (agent: Agent, action: "pause" | "resume") => void;
   rail: boolean;
   runCount: number;
+  /** Running plus queued runs for this agent. */
+  liveRunTotal: number;
   setSidebarOpen: (open: boolean) => void;
   builtInStatus?: BuiltInAgentStatus;
   starred?: boolean;
@@ -170,6 +173,7 @@ function SidebarAgentItem({
       iconNode={<AgentAvatar agent={agent} size={16} className="shrink-0 h-4 w-4"/>}
       active={isActive}
       liveCount={runCount}
+      liveTotal={liveRunTotal}
       labelClassName={showBuiltInLifecycle ? "min-w-(--sz-4_5rem) flex-initial" : undefined}
       className={cn(
         "min-w-0 flex-1",
@@ -360,6 +364,16 @@ export function SidebarAgents({ streamlined = false }: { streamlined?: boolean }
   const liveCountByAgent = useMemo(() => {
     const counts = new Map<string, number>();
     for (const run of liveRuns ?? []) {
+      counts.set(run.agentId, (counts.get(run.agentId) ?? 0) + 1);
+    }
+    return counts;
+  }, [liveRuns]);
+  // The live-runs feed includes queued runs waiting for a concurrency slot;
+  // the row's "N live" badge counts only runs that are executing.
+  const runningCountByAgent = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const run of liveRuns ?? []) {
+      if (run.status !== "running") continue;
       counts.set(run.agentId, (counts.get(run.agentId) ?? 0) + 1);
     }
     return counts;
@@ -626,7 +640,8 @@ export function SidebarAgents({ streamlined = false }: { streamlined?: boolean }
       onLeaveAgent={leaveAgent}
       onPauseResume={(targetAgent, action) => pauseResumeAgent.mutate({ agent: targetAgent, action })}
       rail={rail}
-      runCount={liveCountByAgent.get(agent.id) ?? 0}
+      runCount={runningCountByAgent.get(agent.id) ?? 0}
+      liveRunTotal={liveCountByAgent.get(agent.id) ?? 0}
       setSidebarOpen={setSidebarOpen}
       builtInStatus={builtInStatusByAgentId.get(agent.id)}
       starred={isStarredRow || isStarred(membershipsQuery.data, "agent", agent.id)}

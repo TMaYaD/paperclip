@@ -85,7 +85,9 @@ export function Sidebar({ children }: { children?: ReactNode }) {
     refetchInterval: sharedLiveRuns.refetchInterval,
   });
   usePublishSharedQueryData(sharedLiveRuns, liveRuns, liveRunsUpdatedAt);
-  const liveRunCount = liveRuns?.length ?? 0;
+  // The feed includes queued runs waiting for a concurrency slot.
+  const liveRunTotal = liveRuns?.length ?? 0;
+  const liveRunCount = (liveRuns ?? []).filter((run) => run.status === "running").length;
   const liveIssueIds = new Set(
     (liveRuns ?? []).flatMap((run) => run.issueId ? [run.issueId] : []),
   );
@@ -173,7 +175,7 @@ export function Sidebar({ children }: { children?: ReactNode }) {
               collapsed rail, where the old header icon was dropped entirely.
               Cmd/Ctrl+K remains the keyboard path (command palette). */}
           <SidebarNavItem to="/search" label="Search" icon={Search} />
-          <SidebarNavItem to="/dashboard" label="Dashboard" icon={LayoutDashboard} liveCount={liveRunCount} />
+          <SidebarNavItem to="/dashboard" label="Dashboard" icon={LayoutDashboard} liveCount={liveRunCount} liveTotal={liveRunTotal} />
           {!combinedInboxTasks ? (
             <SidebarNavItem
               to="/inbox"

@@ -57,6 +57,11 @@ interface SidebarNavItemProps {
   alert?: boolean;
   liveCount?: number;
   /**
+   * Running plus queued runs. When it exceeds `liveCount`, the badge reads
+   * `N/M live` so queued work waiting for a concurrency slot stays visible.
+   */
+  liveTotal?: number;
+  /**
    * Overrides NavLink's own route matching for rows whose active state is
    * computed externally (agent rows match `/agents/:ref` across tab suffixes).
    */
@@ -84,6 +89,7 @@ export function SidebarNavItem({
   textBadgeTone = "default",
   alert = false,
   liveCount,
+  liveTotal,
   active,
   trailing,
   trailingLabel,
@@ -99,12 +105,16 @@ export function SidebarNavItem({
   const rail = collapsed && !peeking && !forceExpanded;
 
   const hasBadge = badge != null && badge > 0;
-  const hasLive = liveCount != null && liveCount > 0;
+  const runningCount = liveCount ?? 0;
+  const hasLive = runningCount > 0;
+  const hasQueued = liveTotal != null && liveTotal > runningCount;
+  const hasLiveBadge = hasLive || hasQueued;
+  const liveText = hasQueued ? `${runningCount}/${liveTotal} live` : `${runningCount} live`;
 
   // Accessible text equivalent for the collapsed dot indicator. The visible
   // label is `sr-only` in the rail, so the count must be surfaced here.
-  const railStatusText = hasLive
-    ? `${liveCount} live`
+  const railStatusText = hasLiveBadge
+    ? liveText
     : hasBadge
       ? `${badge}${badgeLabel ? ` ${badgeLabel}` : ""}`
       : alert
@@ -176,7 +186,7 @@ export function SidebarNavItem({
           {textBadge}
         </Badge>
       )}
-      {!rail && (hasLive || liveAccessory) && (
+      {!rail && (hasLiveBadge || liveAccessory) && (
         <span className="ml-auto flex items-center gap-1.5">
           {liveAccessory}
           {hasLive && (
@@ -185,7 +195,13 @@ export function SidebarNavItem({
                 <span className="animate-pulse absolute inline-flex h-full w-full rounded-full bg-blue-600 dark:bg-blue-400 opacity-75" />
                 <span className="relative inline-flex rounded-full h-2 w-2 bg-blue-600 dark:bg-blue-400" />
               </span>
-              <span className="text-(length:--text-micro) font-medium text-blue-600 dark:text-blue-400">{liveCount} live</span>
+              <span className="text-(length:--text-micro) font-medium text-blue-600 dark:text-blue-400">{liveText}</span>
+            </>
+          )}
+          {!hasLive && hasQueued && (
+            <>
+              <span className="inline-flex rounded-full h-2 w-2 bg-muted-foreground/50" />
+              <span className="text-(length:--text-micro) font-medium text-muted-foreground">{liveText}</span>
             </>
           )}
         </span>

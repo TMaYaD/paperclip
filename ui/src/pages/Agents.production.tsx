@@ -21,6 +21,8 @@ import { BuiltInLifecycleChip } from "../components/BuiltInAgentBadges";
 import { EmptyState } from "../components/EmptyState";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { relativeTime, cn, agentRouteRef, agentUrl } from "../lib/utils";
+import { summarizeAgentLiveRuns, type AgentLiveRunSummary } from "../lib/agent-live-runs";
+import { AgentLiveRunIndicator } from "../components/AgentLiveRunIndicator";
 import { Button } from "@/components/ui/button";
 import { AlertTriangle, Bot, Plus, List, GitBranch } from "lucide-react";
 import { AGENT_ROLE_LABELS, type Agent, type Environment, type EnvironmentCapabilities } from "@paperclipai/shared";
@@ -251,20 +253,8 @@ export function Agents() {
   });
   usePublishSharedQueryData(sharedRuns, runs, runsUpdatedAt);
 
-  // Map agentId -> first live run + live run count
-  const liveRunByAgent = useMemo(() => {
-    const map = new Map<string, { runId: string; liveCount: number }>();
-    for (const r of runs ?? []) {
-      if (r.status !== "running" && r.status !== "queued") continue;
-      const existing = map.get(r.agentId);
-      if (existing) {
-        existing.liveCount += 1;
-        continue;
-      }
-      map.set(r.agentId, { runId: r.id, liveCount: 1 });
-    }
-    return map;
-  }, [runs]);
+  // Map agentId -> running/queued split of its live runs
+  const liveRunByAgent = useMemo(() => summarizeAgentLiveRuns(runs), [runs]);
 
   const agentMap = useMemo(() => {
     const map = new Map<string, Agent>();
@@ -387,10 +377,9 @@ export function Agents() {
           <div className="flex items-center gap-3">
             <div className="hidden sm:flex items-center gap-3">
               {liveRunByAgent.has(agent.id) && (
-                <LiveRunIndicator
+                <AgentLiveRunIndicator
                   agentRef={agentRouteRef(agent)}
-                  runId={liveRunByAgent.get(agent.id)!.runId}
-                  liveCount={liveRunByAgent.get(agent.id)!.liveCount}
+                  summary={liveRunByAgent.get(agent.id)!}
                 />
               )}
               <span className="w-20 flex justify-end">
@@ -528,7 +517,7 @@ function OrgTreeNode({
   node: OrgNode;
   depth: number;
   agentMap: Map<string, Agent>;
-  liveRunByAgent: Map<string, { runId: string; liveCount: number }>;
+  liveRunByAgent: Map<string, AgentLiveRunSummary>;
   environmentByAgentId: Map<string, EnvironmentDescriptor>;
   environmentDataLoading: boolean;
   showEnvironment: boolean;
@@ -583,10 +572,9 @@ function OrgTreeNode({
         <div className="flex items-center gap-3 shrink-0">
           <span className="sm:hidden">
             {liveRunByAgent.has(node.id) ? (
-              <LiveRunIndicator
+              <AgentLiveRunIndicator
                 agentRef={agent ? agentRouteRef(agent) : node.id}
-                runId={liveRunByAgent.get(node.id)!.runId}
-                liveCount={liveRunByAgent.get(node.id)!.liveCount}
+                summary={liveRunByAgent.get(node.id)!}
               />
             ) : (
               <AgentStatusBadge status={node.status} />
@@ -594,10 +582,9 @@ function OrgTreeNode({
           </span>
           <div className="hidden sm:flex items-center gap-3">
             {liveRunByAgent.has(node.id) && (
-              <LiveRunIndicator
+              <AgentLiveRunIndicator
                 agentRef={agent ? agentRouteRef(agent) : node.id}
-                runId={liveRunByAgent.get(node.id)!.runId}
-                liveCount={liveRunByAgent.get(node.id)!.liveCount}
+                summary={liveRunByAgent.get(node.id)!}
               />
             )}
             {agent && (
@@ -686,31 +673,5 @@ function AgentMetaColumns({
         {agent.lastHeartbeatAt ? relativeTime(agent.lastHeartbeatAt) : "—"}
       </span>
     </>
-  );
-}
-
-function LiveRunIndicator({
-  agentRef,
-  runId,
-  liveCount,
-}: {
-  agentRef: string;
-  runId: string;
-  liveCount: number;
-}) {
-  return (
-    <Link
-      to={`/agents/${agentRef}/runs/${runId}`}
-      className="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-blue-500/10 hover:bg-blue-500/20 transition-colors no-underline"
-      onClick={(e) => e.stopPropagation()}
-    >
-      <span className="relative flex h-2 w-2">
-        <span className="animate-pulse absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
-        <span className="relative inline-flex rounded-full h-2 w-2 bg-blue-500" />
-      </span>
-      <span className="text-(length:--text-micro) font-medium text-blue-600 dark:text-blue-400">
-        Live{liveCount > 1 ? ` (${liveCount})` : ""}
-      </span>
-    </Link>
   );
 }
