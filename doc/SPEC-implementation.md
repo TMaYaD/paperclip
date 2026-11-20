@@ -2252,6 +2252,16 @@ it (amount 0, inactive) so the audit trail stays. A scope's monthly budget field
 mirrors only its unfiltered budget. Connection pools choose their member at run
 time and are not held per connection.
 
+### Turning budget rules off
+
+Every budget rule (scope, connection and subscription) has an enabled switch.
+New rules are enabled. Turning a rule off stops enforcing it without deleting
+it: the saved limit stays (`configuredAmount` in the summary; `amount` is 0
+while off), holds and scope pauses it caused are released, and its open
+incidents are resolved. Turning it back on restores the same limit and
+evaluates it at once. Editing a rule's limit while it is off keeps it off.
+The change is an ordinary policy update, logged with `isActive`.
+
 ### In-app announcements
 
 A versioned remote JSON manifest supplies one optional board announcement.

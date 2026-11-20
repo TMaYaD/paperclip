@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { agents, budgetIncidents, budgetPolicies, companies, createDb, heartbeatRuns, toolApplications, toolConnections, type Db } from "@paperclipai/db";
+import { agents, budgetIncidents, budgetPolicies, companies, createDb, heartbeatRuns, projects, toolApplications, toolConnections, type Db } from "@paperclipai/db";
 import type { ProviderQuotaResult } from "@paperclipai/shared";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { budgetService, computeObservedSpend } from "../services/budgets.js";
@@ -186,5 +186,44 @@ const support = await getEmbeddedPostgresTestSupport();
     expect((await computeObservedSpend(db, { ...policy, connectionFilter: "local:anthropic" })).liveObservedCents).toBe("200.0000000");
     expect((await computeObservedSpend(db, { ...policy, connectionFilter: "local:openai" })).liveObservedCents).toBe("100.0000000");
     expect((await computeObservedSpend(db, { ...policy, connectionFilter: "" })).liveObservedCents).toBe("340.0000000");
+  });
+  it("turns a rule off and back on without losing it", async () => {
+    const f = await fixture();
+    const budgets = budgetService(db);
+    const rule = await budgets.upsertPolicy(f.companyId, { scopeType: "company", scopeId: f.companyId, connectionFilter: f.minimaxId, amount: 100 }, "board");
+    expect(rule).toMatchObject({ isActive: true, amount: 100, configuredAmount: 100 });
+    await f.charge(f.engineerId, await f.run(f.engineerId, f.minimaxId), "150");
+    expect(await budgets.getConnectionBlock(f.companyId, f.engineerId, null, f.minimaxId)).not.toBeNull();
+
+    const off = await budgets.upsertPolicy(f.companyId, { scopeType: "company", scopeId: f.companyId, connectionFilter: f.minimaxId, isActive: false }, "board", rule.policyId);
+    expect(off).toMatchObject({ policyId: rule.policyId, isActive: false, amount: 0, configuredAmount: 100, status: "ok" });
+    expect(await budgets.getConnectionBlock(f.companyId, f.engineerId, null, f.minimaxId)).toBeNull();
+    expect((await budgets.overview(f.companyId)).activeIncidents).toHaveLength(0);
+
+    // Editing the limit while off keeps the rule off.
+    const edited = await budgets.upsertPolicy(f.companyId, { scopeType: "company", scopeId: f.companyId, amount: 120 }, "board", rule.policyId);
+    expect(edited).toMatchObject({ isActive: false, configuredAmount: 120 });
+
+    const on = await budgets.upsertPolicy(f.companyId, { scopeType: "company", scopeId: f.companyId, isActive: true }, "board", rule.policyId);
+    expect(on).toMatchObject({ policyId: rule.policyId, isActive: true, amount: 120, configuredAmount: 120, status: "hard_stop" });
+    expect(await budgets.getConnectionBlock(f.companyId, f.engineerId, null, f.minimaxId)).not.toBeNull();
+    expect(await db.select().from(budgetPolicies)).toHaveLength(1);
+  });
+
+  it("releases a scope paused by its budget while the budget is off", async () => {
+    const f = await fixture();
+    const budgets = budgetService(db);
+    const projectId = randomUUID();
+    await db.insert(projects).values({ id: projectId, companyId: f.companyId, name: "Budgeted", status: "in_progress" });
+    const paused = async () => (await db.select().from(projects).where(eq(projects.id, projectId)))[0].pauseReason;
+    await budgets.upsertPolicy(f.companyId, { scopeType: "project", scopeId: projectId, amount: 100 }, "board");
+    await costService(db).createEvent(f.companyId, { agentId: f.reviewerId, projectId, provider: "anthropic", biller: "anthropic",
+      billingType: "metered_api", costStatus: "reported", model: "test-model", costCents: "150", occurredAt: new Date() });
+    expect(await paused()).toBe("budget");
+    const off = await budgets.upsertPolicy(f.companyId, { scopeType: "project", scopeId: projectId, isActive: false }, "board");
+    expect(off).toMatchObject({ isActive: false, configuredAmount: 100, paused: false });
+    expect(await paused()).toBeNull();
+    await budgets.upsertPolicy(f.companyId, { scopeType: "project", scopeId: projectId, isActive: true }, "board");
+    expect(await paused()).toBe("budget");
   });
 });

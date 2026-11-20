@@ -344,4 +344,23 @@ describe("BudgetPolicyCard", () => {
     expect(toggle?.getAttribute("aria-checked")).toBe("true");
     expect(saveButton?.disabled).toBe(true);
   });
+  it("turns a saved budget off and on without losing its limit", () => {
+    const onActiveChange = vi.fn();
+    const money = subscriptionSummary({ metric: "billed_cents", windowKind: "calendar_month_utc", amount: 0, configuredAmount: 10_000,
+      isActive: false, observedAmount: 2_500, remainingAmount: 0, utilizationPercent: 0, usageUnavailable: undefined });
+    root = createRoot(container);
+    act(() => { root!.render(<BudgetPolicyCard summary={money} onSave={vi.fn()} onActiveChange={onActiveChange} />); });
+    const toggle = container.querySelector('[data-testid="budget-enabled-toggle"]') as HTMLButtonElement;
+    expect(toggle.getAttribute("aria-checked")).toBe("false");
+    expect(container.textContent).toContain("Disabled");
+    expect(container.textContent).toContain("$100.00 · off");
+    act(() => toggle.click());
+    expect(onActiveChange).toHaveBeenCalledWith(true);
+  });
+
+  it("offers no enabled toggle before a budget is saved", () => {
+    root = createRoot(container);
+    act(() => { root!.render(<BudgetPolicyCard summary={subscriptionSummary({ policyId: "", metric: "billed_cents", windowKind: "calendar_month_utc", amount: 0 })} onSave={vi.fn()} onActiveChange={vi.fn()} />); });
+    expect(container.querySelector('[data-testid="budget-enabled-toggle"]')).toBeNull();
+  });
 });

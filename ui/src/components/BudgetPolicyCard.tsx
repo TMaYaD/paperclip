@@ -255,11 +255,17 @@ export function BudgetPolicyCard({
   onSave,
   onUnpricedUsagePolicyChange,
   onReservationChange,
+  onActiveChange,
   isSaving,
   compact = false,
   variant = "card",
 }: {
   summary: BudgetPolicySummary;
+  /**
+   * Turns the saved budget on or off without deleting it. Shown only for a
+   * saved policy with a limit to restore.
+   */
+  onActiveChange?: (active: boolean) => void;
   /**
    * Saves the drafted amount (cents or percent). `progressive` is the drafted
    * release mode; it is only ever true for a subscription budget.
@@ -359,7 +365,12 @@ export function BudgetPolicyCard({
           : summary.status === "warning"
             ? AlertTriangle
             : Wallet;
-  const statusLabel = summary.paused
+  // A disabled rule keeps its saved limit (`configuredAmount`); `amount` is 0 while off.
+  const savedAmount = summary.configuredAmount ?? summary.amount;
+  const disabled = !summary.isActive && savedAmount > 0;
+  const statusLabel = disabled
+    ? "Disabled"
+    : summary.paused
     ? "Paused"
     : usageHeld
       ? "Runs held"
@@ -415,7 +426,7 @@ export function BudgetPolicyCard({
       <div>
         <div className="text-(length:--text-micro) uppercase tracking-(--tracking-caps) text-muted-foreground">Budget</div>
         <div className="mt-2 text-xl font-semibold tabular-nums">
-          {summary.amount > 0 ? formatAmount(summary.amount) : "Disabled"}
+          {summary.amount > 0 ? formatAmount(summary.amount) : disabled ? `${formatAmount(savedAmount)} · off` : "Disabled"}
         </div>
         <div className="mt-1 text-xs text-muted-foreground">{budgetCaption}</div>
       </div>
@@ -430,7 +441,7 @@ export function BudgetPolicyCard({
       <div className="rounded-xl border border-border/70 bg-black/[0.18] px-4 py-3">
         <div className="text-(length:--text-micro) uppercase tracking-(--tracking-caps) text-muted-foreground">Budget</div>
         <div className="mt-2 text-xl font-semibold tabular-nums">
-          {summary.amount > 0 ? formatAmount(summary.amount) : "Disabled"}
+          {summary.amount > 0 ? formatAmount(summary.amount) : disabled ? `${formatAmount(savedAmount)} · off` : "Disabled"}
         </div>
         <div className="mt-1 text-xs text-muted-foreground">{budgetCaption}</div>
       </div>
@@ -513,8 +524,29 @@ export function BudgetPolicyCard({
     </div>
   ) : null;
 
+  const enabledRow = onActiveChange && summary.policyId && savedAmount > 0 ? (
+    <div className="flex items-center justify-between gap-3">
+      <div className="min-w-0">
+        <div className="text-sm font-medium">Enforce this budget</div>
+        <div className="text-xs text-muted-foreground">
+          {summary.isActive
+            ? "Turn off to stop enforcing it without losing the limit"
+            : `Off: not enforced. Turn on to restore the ${formatAmount(savedAmount)} limit`}
+        </div>
+      </div>
+      <ToggleSwitch
+        data-testid="budget-enabled-toggle"
+        aria-label="Enforce this budget"
+        checked={summary.isActive}
+        onCheckedChange={onActiveChange}
+        disabled={isSaving}
+      />
+    </div>
+  ) : null;
+
   const saveSection = onSave ? (
     <div className={cn("space-y-3", isPlain ? "" : "rounded-xl border border-border/70 bg-background/50 p-3")}>
+      {enabledRow}
       {progressiveRow}
       <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
         <div className="min-w-0 flex-1">

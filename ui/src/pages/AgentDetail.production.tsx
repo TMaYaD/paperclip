@@ -923,7 +923,7 @@ export function AgentDetail() {
   const directReports = (allAgents ?? []).filter((a) => a.reportsTo === agent?.id && a.status !== "terminated");
   const agentBudgetSummary = useMemo(() => {
     const matched = budgetOverview?.policies.find(
-      (policy) => policy.scopeType === "agent" && policy.scopeId === (agent?.id ?? routeAgentRef),
+      (policy) => policy.metric === "billed_cents" && !policy.connectionFilter && policy.scopeType === "agent" && policy.scopeId === (agent?.id ?? routeAgentRef),
     );
     if (matched) return matched;
     const budgetMonthlyCents = agent?.budgetMonthlyCents ?? 0;
@@ -1026,11 +1026,12 @@ export function AgentDetail() {
   });
 
   const budgetMutation = useMutation({
-    mutationFn: (amount: number) =>
+    // Either a new amount or the enabled state; the server keeps the other.
+    mutationFn: (changes: { amount?: number; isActive?: boolean }) =>
       budgetsApi.upsertPolicy(resolvedCompanyId!, {
         scopeType: "agent",
         scopeId: agent?.id ?? routeAgentRef,
-        amount,
+        ...changes,
         windowKind: "calendar_month_utc",
       }),
     onSuccess: () => {
@@ -1570,7 +1571,8 @@ export function AgentDetail() {
           <BudgetPolicyCard
             summary={agentBudgetSummary}
             isSaving={budgetMutation.isPending}
-            onSave={(amount) => budgetMutation.mutate(amount)}
+            onSave={(amount) => budgetMutation.mutate({ amount })}
+            onActiveChange={(isActive) => budgetMutation.mutate({ isActive })}
             variant="plain"
           />
         </div>

@@ -5,6 +5,7 @@ import { BudgetUsageBar } from "./BudgetPolicyCard";
 import { connectionLabel } from "./ConnectionSpendTable";
 import { cn, formatCents } from "../lib/utils";
 import { Button } from "./ui/button";
+import { ToggleSwitch } from "./ui/toggle-switch";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "./ui/dialog";
@@ -12,6 +13,8 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 export type ConnectionBudgetInput = { connectionFilter: string; amount: number };
 
 const scopeLabel = (rule: BudgetPolicySummary) => rule.scopeType === "company" ? "Organization" : rule.scopeName;
+/** The budget's saved limit; `amount` is 0 while the budget is turned off. */
+const savedAmount = (rule: BudgetPolicySummary) => rule.configuredAmount ?? rule.amount;
 const ruleLabel = (rule: BudgetPolicySummary) => connectionLabel({ connectionKey: rule.connectionFilter, connectionName: rule.connectionName });
 
 /**
@@ -20,12 +23,14 @@ const ruleLabel = (rule: BudgetPolicySummary) => connectionLabel({ connectionKey
  * until the budget is raised or the month resets; agents on other connections
  * keep running, and runs already in progress finish.
  */
-export function ConnectionBudgets({ policies, connections, onSave, onDelete }: {
+export function ConnectionBudgets({ policies, connections, onSave, onDelete, onActiveChange }: {
   policies: BudgetPolicySummary[];
   /** Every AI connection in the company and each harness's local credentials, for the picker. */
   connections: CostByConnection[];
   onSave: (input: ConnectionBudgetInput, policyId?: string) => Promise<unknown>;
   onDelete: (policyId: string) => Promise<unknown>;
+  /** Turns a saved budget on or off without deleting it. */
+  onActiveChange?: (rule: BudgetPolicySummary, active: boolean) => Promise<unknown>;
 }) {
   const rows = policies.filter((policy) => policy.metric === "billed_cents" && Boolean(policy.connectionFilter))
     .toSorted((a, b) => ruleLabel(a).localeCompare(ruleLabel(b)) || a.scopeType.localeCompare(b.scopeType));
@@ -46,7 +51,7 @@ export function ConnectionBudgets({ policies, connections, onSave, onDelete }: {
   function openEditor(rule: BudgetPolicySummary | "new") {
     const firstFree = options.find((option) => !companyRuleFilters.has(option.value));
     setConnectionFilter(rule === "new" ? firstFree?.value ?? options[0]?.value ?? "" : rule.connectionFilter ?? "");
-    setAmount(rule === "new" ? "" : String(rule.amount / 100));
+    setAmount(rule === "new" ? "" : String(savedAmount(rule) / 100));
     setError(null);
     setEditing(rule);
   }
@@ -60,6 +65,17 @@ export function ConnectionBudgets({ policies, connections, onSave, onDelete }: {
       setEditing(null);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not save the budget. Try again.");
+    } finally { setPending(false); }
+  }
+
+  async function toggle(rule: BudgetPolicySummary, next: boolean) {
+    if (!onActiveChange || pending) return;
+    setPending(true);
+    setError(null);
+    try {
+      await onActiveChange(rule, next);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not change the budget. Try again.");
     } finally { setPending(false); }
   }
 
@@ -84,6 +100,7 @@ export function ConnectionBudgets({ policies, connections, onSave, onDelete }: {
         </div>
         <Button variant="outline" size="sm" onClick={() => openEditor("new")} disabled={pending || options.length === 0}><Plus />Add connection budget</Button>
       </div>
+      {error && editing === null && deleting === null && <p role="alert" className="text-sm text-destructive">{error}</p>}
       <div className="overflow-hidden rounded-xl border border-border" role="table" aria-label="Connection budget rules">
         <div role="row" className="hidden grid-cols-12 gap-6 border-b border-border bg-muted/30 px-5 py-3 text-(length:--text-micro) uppercase tracking-(--tracking-caps) text-muted-foreground lg:grid">
           <div role="columnheader" className="col-span-3">Connection / scope</div>
@@ -95,7 +112,7 @@ export function ConnectionBudgets({ policies, connections, onSave, onDelete }: {
           {rows.map((rule) => {
             const active = rule.isActive && rule.amount > 0;
             const observed = rule.observedAmountExact ? Number(rule.observedAmountExact) : rule.observedAmount;
-            const status = !active ? "Disabled" : rule.status === "hard_stop" ? "Budget reached · runs on this connection wait" : rule.status === "warning" ? "Near limit" : "Within budget";
+            const status = !active ? "Off · not enforced" : rule.status === "hard_stop" ? "Budget reached · runs on this connection wait" : rule.status === "warning" ? "Near limit" : "Within budget";
             const StatusIcon = rule.status === "hard_stop" ? PauseCircle : rule.status === "warning" ? TriangleAlert : CheckCircle2;
             return <div role="row" key={rule.policyId} className="grid grid-cols-1 items-center gap-5 bg-card px-5 py-5 lg:grid-cols-12 lg:gap-6">
               <div role="cell" className="space-y-1 lg:col-span-3">
@@ -105,7 +122,7 @@ export function ConnectionBudgets({ policies, connections, onSave, onDelete }: {
               <div role="cell" className="space-y-3 lg:col-span-5">
                 <div className="flex flex-wrap items-baseline justify-between gap-4">
                   <div className="text-2xl font-semibold tabular-nums tracking-tight">{formatCents(observed)}</div>
-                  <div className="text-sm text-muted-foreground">of {active ? formatCents(rule.amount) : "no limit"}</div>
+                  <div className="text-sm text-muted-foreground">of {formatCents(savedAmount(rule))}{active ? "" : " · off"}</div>
                 </div>
                 <BudgetUsageBar usedPercent={rule.utilizationPercent} limitPercent={null} releasedPercent={null} status={rule.status} unavailable={false} neutral={!active} held={false} className="bg-muted/70" />
                 {rule.pendingRunCount > 0 || rule.unpricedEventCount > 0 ? (
@@ -119,7 +136,9 @@ export function ConnectionBudgets({ policies, connections, onSave, onDelete }: {
               <div role="cell" className="lg:col-span-3">
                 <div className={cn("flex items-center gap-2 text-sm font-medium", rule.status === "hard_stop" ? "text-destructive" : rule.status === "warning" ? "text-(--status-task-todo)" : active ? "text-(--status-task-done)" : "text-muted-foreground")}><StatusIcon className="size-4 shrink-0" />{status}</div>
               </div>
-              <div role="cell" className="flex gap-1 lg:col-span-1 lg:flex-col lg:items-end">
+              <div role="cell" className="flex items-center gap-1 lg:col-span-1 lg:flex-col lg:items-end">
+                {onActiveChange && savedAmount(rule) > 0 && <ToggleSwitch checked={rule.isActive} disabled={pending} onCheckedChange={(next) => void toggle(rule, next)}
+                  aria-label={`Enforce ${ruleLabel(rule)} budget`} />}
                 <Button variant="ghost" size="sm" disabled={pending} aria-label={`Edit ${ruleLabel(rule)} budget`} onClick={() => openEditor(rule)}>Edit</Button>
                 <Button variant="ghost" size="sm" disabled={pending} aria-label={`Remove ${ruleLabel(rule)} budget`} onClick={() => { setError(null); setDeleting(rule); }}>Remove</Button>
               </div>

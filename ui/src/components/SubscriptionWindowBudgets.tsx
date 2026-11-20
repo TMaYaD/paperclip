@@ -5,6 +5,7 @@ import { CheckCircle2, Hourglass, PauseCircle, Plus } from "lucide-react";
 import { BudgetMarkerLegend, BudgetUsageBar } from "./BudgetPolicyCard";
 import { cn, formatDurationMs, relativeTime } from "../lib/utils";
 import { Button } from "./ui/button";
+import { ToggleSwitch } from "./ui/toggle-switch";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "./ui/dialog";
@@ -26,18 +27,22 @@ const WINDOW_NAMES: Record<SubscriptionBudgetWindowKind, string> = {
 const windowName = (window: string) => WINDOW_NAMES[window as SubscriptionBudgetWindowKind] ?? window;
 const paceUnit = (window: string) => SUBSCRIPTION_BUDGET_PACE_UNIT[window as SubscriptionBudgetWindowKind] ?? { unit: "hour" as const, unitsPerWindow: 5 };
 const unitsPerWindow = (window: string) => paceUnit(window).unitsPerWindow;
-const paceValue = (rule: BudgetPolicySummary) => rule.pacePercent ?? rule.amount / unitsPerWindow(rule.windowKind);
+/** The rule's saved limit; `amount` is 0 while the rule is turned off. */
+const savedAmount = (rule: BudgetPolicySummary) => rule.configuredAmount ?? rule.amount;
+const paceValue = (rule: BudgetPolicySummary) => rule.pacePercent ?? savedAmount(rule) / unitsPerWindow(rule.windowKind);
 const rateText = (value: number) => String(Number(value.toFixed(4)) || value);
 const percent = (value: number) => `${Number(value.toFixed(1))}%`;
 const countdown = (value: string | Date) => `in ${formatDurationMs(Math.max(0, new Date(value).getTime() - Date.now()))}`;
 const dateLabel = (value: string | Date | null | undefined) => value ? new Date(value).toLocaleString() : "Unknown";
 
-export function SubscriptionWindowBudgets({ policies, connections = [], onSave, onDelete }: {
+export function SubscriptionWindowBudgets({ policies, connections = [], onSave, onDelete, onActiveChange }: {
   policies: BudgetPolicySummary[];
   /** Connections whose plan usage Paperclip can read; rules can target only these. */
   connections?: CostByConnection[];
   onSave: (input: SubscriptionRuleInput, policyId?: string) => Promise<unknown>;
   onDelete: (policyId: string) => Promise<unknown>;
+  /** Turns a saved rule on or off without deleting it. */
+  onActiveChange?: (rule: BudgetPolicySummary, active: boolean) => Promise<unknown>;
 }) {
   const rows = policies.filter((policy) => policy.scopeType === "company" && policy.metric === "subscription_percent")
     .toSorted((a, b) => ruleName(a).localeCompare(ruleName(b)) || a.windowKind.localeCompare(b.windowKind) || Number(b.progressive) - Number(a.progressive));
@@ -66,7 +71,7 @@ export function SubscriptionWindowBudgets({ policies, connections = [], onSave, 
     setConnectionFilter(rule === "new" ? available?.connectionFilter ?? options[0]?.value ?? "" : rule.connectionFilter ?? "");
     setWindowKind(rule === "new" ? available?.windowKind ?? "provider_week" : rule.windowKind as SubscriptionBudgetWindowKind);
     const isPace = rule === "new" ? available?.progressive ?? true : rule.progressive === true;
-    setAmount(rule === "new" ? (isPace ? "20" : "100") : isPace ? rateText(paceValue(rule) || 20) : String(rule.amount || 100));
+    setAmount(rule === "new" ? (isPace ? "20" : "100") : isPace ? rateText(paceValue(rule) || 20) : String(savedAmount(rule) || 100));
     setProgressive(isPace);
     setError(null);
     setEditing(rule);
@@ -81,6 +86,17 @@ export function SubscriptionWindowBudgets({ policies, connections = [], onSave, 
       setEditing(null);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not save the rule. Try again.");
+    } finally { setPending(false); }
+  }
+
+  async function toggle(rule: BudgetPolicySummary, next: boolean) {
+    if (!onActiveChange || pending) return;
+    setPending(true);
+    setError(null);
+    try {
+      await onActiveChange(rule, next);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not change the rule. Try again.");
     } finally { setPending(false); }
   }
 
@@ -105,6 +121,7 @@ export function SubscriptionWindowBudgets({ policies, connections = [], onSave, 
         </div>
         <Button variant="outline" size="sm" onClick={() => openEditor("new")} disabled={pending || options.length === 0}><Plus />Add rule</Button>
       </div>
+      {error && editing === null && deleting === null && <p role="alert" className="text-sm text-destructive">{error}</p>}
       <div className="overflow-hidden rounded-xl border border-border" role="table" aria-label="Provider budget rules">
         <div role="row" className="hidden grid-cols-12 gap-6 border-b border-border bg-muted/30 px-5 py-3 text-(length:--text-micro) uppercase tracking-(--tracking-caps) text-muted-foreground lg:grid">
           <div role="columnheader" className="col-span-2">Connection / window</div>
@@ -117,7 +134,7 @@ export function SubscriptionWindowBudgets({ policies, connections = [], onSave, 
             const active = rule.isActive && rule.amount > 0;
             const released = rule.releasedAmount ?? rule.amount;
             const heldForRelease = active && rule.progressive && !rule.usageUnavailable && rule.observedAmount > 0 && rule.observedAmount >= released && rule.observedAmount < rule.amount;
-            const status = !active ? "Disabled" : rule.usageUnavailable ? "Usage unavailable" : rule.usageHeld ? "Waiting for fresh usage" : rule.observedAmount >= rule.amount ? (rule.progressive ? "Quota exhausted" : "Cap reached") : heldForRelease ? "Waiting for release" : rule.progressive ? "Within pace" : "Within cap";
+            const status = !active ? "Off · not enforced" : rule.usageUnavailable ? "Usage unavailable" : rule.usageHeld ? "Waiting for fresh usage" : rule.observedAmount >= rule.amount ? (rule.progressive ? "Quota exhausted" : "Cap reached") : heldForRelease ? "Waiting for release" : rule.progressive ? "Within pace" : "Within cap";
             const held = active && (rule.usageHeld || rule.usageUnavailable || heldForRelease || rule.observedAmount >= rule.amount);
             const StatusIcon = heldForRelease ? Hourglass : held ? PauseCircle : CheckCircle2;
             const remaining = rule.usageUnavailable ? "Allowance unknown" : !active ? "No limit configured" : heldForRelease ? `${percent(rule.observedAmount - released)} ahead of release` : `${percent(rule.remainingAmount)} available now`;
@@ -135,7 +152,7 @@ export function SubscriptionWindowBudgets({ policies, connections = [], onSave, 
                   </div>
                   <div className="text-right">
                     <div className="text-(length:--text-micro) uppercase tracking-(--tracking-caps) text-muted-foreground">{rule.progressive ? "Release pace" : "Usage cap"}</div>
-                    <div className="mt-1 text-2xl font-semibold tabular-nums tracking-tight">{active ? (rule.progressive ? `${rateText(paceValue(rule))}%` : percent(rule.amount)) : "Disabled"}</div>
+                    <div className="mt-1 text-2xl font-semibold tabular-nums tracking-tight">{rule.progressive ? `${rateText(paceValue(rule))}%` : percent(savedAmount(rule))}{!active && <span className="ml-2 text-xs font-normal tracking-normal text-muted-foreground">off</span>}</div>
                     <div className="mt-1 text-xs text-muted-foreground">{rule.progressive ? `per ${paceUnit(rule.windowKind).unit}` : "Maximum usage this window"}</div>
                   </div>
                 </div>
@@ -152,7 +169,9 @@ export function SubscriptionWindowBudgets({ policies, connections = [], onSave, 
                 <div className="text-xs text-muted-foreground" title={dateLabel(heldForRelease && rule.releaseAt ? rule.releaseAt : rule.windowEnd)}>{heldForRelease && rule.releaseAt ? `More released ${countdown(rule.releaseAt)}` : rule.releaseWindowUnknown || rule.usageUnavailable ? "Waiting for provider window" : `Resets ${countdown(rule.windowEnd)}`}</div>
                 {rule.usageStale && <div className="text-xs text-muted-foreground" title={dateLabel(rule.usageObservedAt)}>Observed {rule.usageObservedAt ? relativeTime(rule.usageObservedAt) : "earlier"}</div>}
               </div>
-              <div role="cell" className="flex gap-1 lg:col-span-1 lg:flex-col lg:items-end">
+              <div role="cell" className="flex items-center gap-1 lg:col-span-1 lg:flex-col lg:items-end">
+                {onActiveChange && savedAmount(rule) > 0 && <ToggleSwitch checked={rule.isActive} disabled={pending} onCheckedChange={(next) => void toggle(rule, next)}
+                  aria-label={`Enforce ${ruleName(rule)} ${windowName(rule.windowKind)} ${rule.progressive ? "pace" : "cap"} rule`} />}
                 <Button variant="ghost" size="sm" disabled={pending} aria-label={`Edit ${ruleName(rule)} ${windowName(rule.windowKind)} ${rule.progressive ? "pace" : "cap"} rule`} onClick={() => openEditor(rule)}>Edit</Button>
                 <Button variant="ghost" size="sm" disabled={pending} aria-label={`Delete ${ruleName(rule)} ${windowName(rule.windowKind)} ${rule.progressive ? "pace" : "cap"} rule`} onClick={() => { setError(null); setDeleting(rule); }}>Delete</Button>
               </div>
