@@ -6,7 +6,7 @@ import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
-import { stageBuiltRunnerBinary, stageRunnerBinary } from "./stage-runner-binary.mjs";
+import { builtRunnerBinaryPath, stageBuiltRunnerBinary, stageRunnerBinary } from "./stage-runner-binary.mjs";
 import { RELEASE_RUNNER_TARGETS, releaseRunnerTargets, releaseDaemonManifest, verifyReleaseRunnerMetadata } from "./stage-release-runner-binaries.mjs";
 import { paperclipRunnerBinaryNeedsBuild, resolveNativeRunnerDevBinary } from "../../../scripts/dev-runner-native-binary.mjs";
 import { resolvePackagedRunnerBinary } from "../src/live/runner-binary.ts";
@@ -230,4 +230,17 @@ test("failed preparation preserves the published bytes and mode", async () => {
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("stages the binary from CARGO_TARGET_DIR when an installer keeps cargo output outside the source tree", () => {
+  const packageRoot = path.join(path.sep, "build", "source", "packages", "paperclip-runner");
+  assert.equal(builtRunnerBinaryPath(packageRoot, "paperclip-runnerd", {}),
+    path.join(packageRoot, "runner", "target", "release", "paperclip-runnerd"));
+  assert.equal(builtRunnerBinaryPath(packageRoot, "paperclip-runnerd", { CARGO_TARGET_DIR: "  " }),
+    path.join(packageRoot, "runner", "target", "release", "paperclip-runnerd"));
+  assert.equal(builtRunnerBinaryPath(packageRoot, "paperclip-runnerd", { CARGO_TARGET_DIR: "/build/cargo-target" }),
+    path.join(path.sep, "build", "cargo-target", "release", "paperclip-runnerd"));
+  // Cargo runs from the package root, so a relative directory resolves from there.
+  assert.equal(builtRunnerBinaryPath(packageRoot, "paperclip-runnerd", { CARGO_TARGET_DIR: "../../out" }),
+    path.join(path.sep, "build", "source", "out", "release", "paperclip-runnerd"));
 });

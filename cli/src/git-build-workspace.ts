@@ -68,7 +68,7 @@ export function clearGitBuildSources(source: string): void {
 export async function withGitBuildWorkspace<T>(
   repo: string,
   paths: InstallStorePaths,
-  build: (source: string) => Promise<T>,
+  build: (source: string, workspace: { cargoTargetDir: string }) => Promise<T>,
 ): Promise<T> {
   privateDirectory(paths.cliRoot);
   privateDirectory(path.join(paths.cliRoot, "build"));
@@ -90,6 +90,11 @@ export async function withGitBuildWorkspace<T>(
     privateDirectory(generation);
     const source = path.join(generation, "source");
     privateDirectory(source);
+    // Compiled Rust crates live beside the source, not in it: clearing the
+    // source for each build must not discard them. They share the
+    // generation's lifetime, so a dirty generation never reuses them either.
+    const cargoTargetDir = path.join(generation, "cargo-target");
+    privateDirectory(cargoTargetDir);
     // Commit dirty state BEFORE touching any reusable files.
     writeState(statePath, state);
     console.log(`[git install] build workspace: ${reuse ? "reuse dependencies" : "clean generation"}`);
@@ -99,7 +104,7 @@ export async function withGitBuildWorkspace<T>(
     // Recent failed generations remain isolated from possible orphaned writers.
     clearGitBuildSources(source);
     console.log(`[git install] prepare build workspace: ${((performance.now() - start) / 1000).toFixed(2)}s`);
-    const result = await build(source);
+    const result = await build(source, { cargoTargetDir });
     writeState(statePath, { ...state, clean: true });
     // A successful build bounds quarantine growth while this repo lock is held.
     const cutoff = Date.now() - 24 * 60 * 60 * 1000;
