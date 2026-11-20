@@ -115,6 +115,23 @@ agents cannot choose or spoof this field. The owner must still be an active
 non-viewer company member at each use. A standing delegation is needed only
 when a run genuinely has no responsible user.
 
+### Permissions page identity preview
+
+A connection's Permissions page lists agents by profile binding, which does not
+choose a GitHub credential. `GET /api/tool-connections/:connectionId/github-agent-identities`
+runs the selector above for each live agent, using the signed-in user as
+`responsibleUserId`, and reports whether the agent resolves to this connection,
+another one, or no usable identity. The page flags any listed agent that does
+not resolve here. The result is exact only for runs owned by the viewer; runs
+owned by someone else or without an owner can resolve differently, and standing
+delegations are not guessed at. A selected grant counts only if it is also usable
+(complete, with repository access, and an authorized owner). The response
+contains no credential references. Other connections' names and account logins
+follow the grants-list policy: they appear only for the viewer's own personal
+grant or for managers.
+The page also refuses to newly add an agent to a connection dedicated to a
+different agent; legacy bindings stay listed so they can be removed.
+
 ## Credential lifecycle
 
 The production, staging, and development GitHub Apps deliberately disable

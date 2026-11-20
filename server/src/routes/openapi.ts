@@ -1518,6 +1518,7 @@ const BOARD_ONLY_OPERATIONS = new Set([
   "POST /api/companies/{companyId}/tools/connections/{connectionId}/start-authorization",
   "GET /api/tool-connections/{connectionId}",
   "GET /api/tool-connections/{connectionId}/grants",
+  "GET /api/tool-connections/{connectionId}/github-agent-identities",
   "POST /api/tool-connections/{connectionId}/grants/installations",
   "POST /api/tool-connections/{connectionId}/grants/{grantId}/delegations",
   "DELETE /api/tool-connections/{connectionId}/grants/{grantId}/delegations/{delegationId}",
@@ -11431,6 +11432,13 @@ registerCurrentRoute({
   path: "/api/tool-connections/{connectionId}/grants",
   tags: ["tool-access"],
   summary: "List tool connection grants",
+});
+
+registerCurrentRoute({
+  method: "get",
+  path: "/api/tool-connections/{connectionId}/github-agent-identities",
+  tags: ["tool-access"],
+  summary: "Preview which GitHub identity each agent resolves to for the signed-in user",
 });
 
 registerCurrentRoute({

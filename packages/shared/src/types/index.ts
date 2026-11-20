@@ -628,6 +628,9 @@ export type {
   ToolUpstreamPending,
   ToolConnectionTestCallStatus,
   ToolConnectionTestCallStatusPhase,
+  GitHubAgentIdentityState,
+  GitHubAgentIdentityPreview,
+  GitHubAgentIdentitiesResponse,
 } from "./tool-access.js";
 export { CONNECTION_RECOVERABLE_ERROR_CODES } from "./tool-access.js";
 export type {

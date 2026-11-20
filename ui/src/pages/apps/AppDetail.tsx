@@ -158,6 +158,13 @@ function StandardAppDetail({ renderActions, renderAgentSettings, renderConnectio
     enabled: !!connectionId && !!activeTab,
   });
 
+  const isGitHubConnection = connectionQuery.data?.config?.sourceTemplateKey === "github";
+  const githubIdentitiesQuery = useQuery({
+    queryKey: queryKeys.tools.githubAgentIdentities(connectionId),
+    queryFn: () => toolsApi.listGitHubAgentIdentities(connectionId),
+    enabled: !!connectionId && isGitHubConnection && activeTab === "permissions",
+  });
+
   const connection = connectionQuery.data;
   const application = connection
     ? (applicationsQuery.data?.applications ?? []).find((candidate) => candidate.id === connection.applicationId)
@@ -690,6 +697,7 @@ function StandardAppDetail({ renderActions, renderAgentSettings, renderConnectio
                 actions={actionsContent}
                 connectionId={connectionId}
                 capabilities={grantsQuery.data?.capabilities}
+                githubIdentities={isGitHubConnection ? { loading: githubIdentitiesQuery.isLoading, failed: githubIdentitiesQuery.isError, data: githubIdentitiesQuery.data } : undefined}
                 appName={appName}
                 agents={agents}
                 access={access}

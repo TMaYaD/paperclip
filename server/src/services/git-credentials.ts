@@ -1,4 +1,5 @@
 import {
+  agents as agentsTable,
   companySecrets,
   heartbeatRuns,
   companyMemberships,
@@ -10,6 +11,7 @@ import {
   type Db,
 } from "@paperclipai/db";
 import { and, eq, inArray, or } from "drizzle-orm";
+import type { GitHubAgentIdentitiesResponse, GitHubAgentIdentityPreview } from "@paperclipai/shared";
 import { isGitHubDotCom } from "./github-fetch.js";
 import { secretService } from "./secrets.js";
 import { toolAccessService } from "./tool-access.js";
@@ -293,21 +295,30 @@ export function createGitRemoteAuthProvider(
   };
 }
 
-export async function resolveManagedGitHubIdentitySelection(
+type GrantRow = typeof connectionGrants.$inferSelect;
+type CredentialRecord = {
+  id: string; status: string; deletedAt: Date | null; scope: string; ownerUserId: string | null;
+  definitionStatus: string | null; definitionDeletedAt: Date | null; userSecretDefinitionId: string | null;
+};
+
+/** Everything the selector reads for one company, loaded once. */
+export interface GitHubIdentitySnapshot {
+  companyId: string;
+  githubConnections: Array<typeof toolConnections.$inferSelect>;
+  installs: Array<typeof toolConnectionInstalls.$inferSelect>;
+  grants: GrantRow[];
+  delegations: Array<{ grantId: string; agentId: string }>;
+}
+
+/**
+ * `forAgentId` is the runtime fast path: when no GitHub connection is installed
+ * for that agent (or company-wide) the grants are never read, as before.
+ */
+export async function loadGitHubIdentitySnapshot(
   db: Db,
   companyId: string,
-  context: {
-    responsibleUserId?: string | null;
-    agentId?: string | null;
-    allowStandingDelegation?: boolean;
-    excludeGrantId?: string;
-  },
-): Promise<{
-  configured: boolean;
-  identitySource?: "personal" | "dedicated";
-  grant?: typeof connectionGrants.$inferSelect;
-  error?: string;
-}> {
+  options: { forAgentId?: string | null } = {},
+): Promise<GitHubIdentitySnapshot> {
   const connections = await db.select().from(toolConnections).where(and(
     eq(toolConnections.companyId, companyId),
   ));
@@ -318,16 +329,83 @@ export async function resolveManagedGitHubIdentitySelection(
       : {};
     return config.sourceTemplateKey === "github" || transportConfig.sourceTemplateKey === "github";
   });
-  if (githubConnections.length === 0) return { configured: false };
-
+  if (githubConnections.length === 0) return { companyId, githubConnections, installs: [], grants: [], delegations: [] };
   const connectionIds = githubConnections.map((connection) => connection.id);
   const installs = await db.select().from(toolConnectionInstalls).where(and(
     eq(toolConnectionInstalls.companyId, companyId),
     inArray(toolConnectionInstalls.connectionId, connectionIds),
   ));
+  if ("forAgentId" in options && !installs.some((install) =>
+    (install.targetType === "company" && install.targetId === companyId)
+    || (install.targetType === "agent" && install.targetId === options.forAgentId))) {
+    return { companyId, githubConnections, installs, grants: [], delegations: [] };
+  }
+  const grants = await db.select().from(connectionGrants).where(and(
+    eq(connectionGrants.companyId, companyId),
+    inArray(connectionGrants.connectionId, connectionIds),
+    or(eq(connectionGrants.kind, "agent"), eq(connectionGrants.kind, "user")),
+  ));
+  const delegations = grants.length === 0 ? [] : await db.select({
+    grantId: connectionGrantDelegations.grantId, agentId: connectionGrantDelegations.agentId,
+  }).from(connectionGrantDelegations).where(and(
+    eq(connectionGrantDelegations.companyId, companyId),
+    inArray(connectionGrantDelegations.grantId, grants.map((grant) => grant.id)),
+  ));
+  return { companyId, githubConnections, installs, grants, delegations };
+}
+
+export function loadGitHubCredentialRecords(db: Db, companyId: string) {
+  return async (credentialIds: string[]): Promise<CredentialRecord[]> => credentialIds.length === 0 ? [] : db.select({
+    id: companySecrets.id, status: companySecrets.status, deletedAt: companySecrets.deletedAt,
+    scope: companySecrets.scope, ownerUserId: companySecrets.ownerUserId,
+    userSecretDefinitionId: companySecrets.userSecretDefinitionId,
+    definitionStatus: userSecretDefinitions.status, definitionDeletedAt: userSecretDefinitions.deletedAt,
+  }).from(companySecrets).leftJoin(userSecretDefinitions, and(
+    eq(userSecretDefinitions.id, companySecrets.userSecretDefinitionId),
+    eq(userSecretDefinitions.companyId, companyId),
+  )).where(and(
+    eq(companySecrets.companyId, companyId), inArray(companySecrets.id, credentialIds),
+  ));
+}
+
+export async function resolveManagedGitHubIdentitySelection(
+  db: Db,
+  companyId: string,
+  context: {
+    responsibleUserId?: string | null;
+    agentId?: string | null;
+    allowStandingDelegation?: boolean;
+    excludeGrantId?: string;
+  },
+) {
+  return selectManagedGitHubIdentity(
+    await loadGitHubIdentitySnapshot(db, companyId, { forAgentId: context.agentId ?? null }), context,
+    loadGitHubCredentialRecords(db, companyId),
+  );
+}
+
+/** Pure selection over a snapshot; the runtime and the Permissions preview both use it. */
+export async function selectManagedGitHubIdentity(
+  snapshot: GitHubIdentitySnapshot,
+  context: {
+    responsibleUserId?: string | null;
+    agentId?: string | null;
+    allowStandingDelegation?: boolean;
+    excludeGrantId?: string;
+  },
+  loadCredentialRecords: (credentialIds: string[]) => Promise<CredentialRecord[]>,
+): Promise<{
+  configured: boolean;
+  identitySource?: "personal" | "dedicated";
+  grant?: typeof connectionGrants.$inferSelect;
+  error?: string;
+}> {
+  const { githubConnections, installs } = snapshot;
+  if (githubConnections.length === 0) return { configured: false };
+
   const eligibleConnectionIds = new Set(githubConnections.filter((connection) => installs.some((install) =>
     install.connectionId === connection.id && (
-      (install.targetType === "company" && install.targetId === companyId)
+      (install.targetType === "company" && install.targetId === snapshot.companyId)
       || (install.targetType === "agent" && install.targetId === context.agentId)
     )
   )).map((connection) => connection.id));
@@ -336,11 +414,7 @@ export async function resolveManagedGitHubIdentitySelection(
   // make unrelated agents fail before their adapter starts and would also
   // suppress their otherwise-eligible legacy credential fallback.
   if (eligibleConnectionIds.size === 0) return { configured: false };
-  const grants = await db.select().from(connectionGrants).where(and(
-    eq(connectionGrants.companyId, companyId),
-    inArray(connectionGrants.connectionId, [...eligibleConnectionIds]),
-    or(eq(connectionGrants.kind, "agent"), eq(connectionGrants.kind, "user")),
-  ));
+  const grants = snapshot.grants.filter((grant) => eligibleConnectionIds.has(grant.connectionId));
   const dedicated = context.agentId
     ? grants.filter((grant) => grant.kind === "agent" && grant.subjectAgentId === context.agentId)
     : [];
@@ -350,15 +424,10 @@ export async function resolveManagedGitHubIdentitySelection(
   const personal = context.responsibleUserId
     ? grants.filter((grant) => grant.kind === "user" && grant.subjectUserId === context.responsibleUserId)
     : [];
+  const delegatedIds = new Set(snapshot.delegations
+    .filter((row) => row.agentId === context.agentId).map((row) => row.grantId));
   const delegated = context.allowStandingDelegation !== false && !context.responsibleUserId && context.agentId
-    ? await db.select({ grantId: connectionGrantDelegations.grantId }).from(connectionGrantDelegations).where(and(
-        eq(connectionGrantDelegations.companyId, companyId),
-        eq(connectionGrantDelegations.agentId, context.agentId),
-        inArray(connectionGrantDelegations.grantId, grants.map((grant) => grant.id)),
-      )).then((rows) => {
-        const delegatedIds = new Set(rows.map((row) => row.grantId));
-        return grants.filter((grant) => grant.kind === "user" && delegatedIds.has(grant.id));
-      })
+    ? grants.filter((grant) => grant.kind === "user" && delegatedIds.has(grant.id))
     : [];
   const candidates = dedicated.length > 0 ? dedicated : personal.length > 0 ? personal : delegated;
   const identitySource = dedicated.length > 0 ? "dedicated" as const : "personal" as const;
@@ -367,18 +436,7 @@ export async function resolveManagedGitHubIdentitySelection(
   }
   const credentialIds = candidates.flatMap((grant) => grant.credentialSecretRefs
     .filter((ref) => ref.configPath === "oauth.access_token").map((ref) => ref.secretId));
-  const credentialRecords = credentialIds.length > 0
-    ? await db.select({
-        id: companySecrets.id, status: companySecrets.status, deletedAt: companySecrets.deletedAt,
-        scope: companySecrets.scope, ownerUserId: companySecrets.ownerUserId,
-        definitionStatus: userSecretDefinitions.status, definitionDeletedAt: userSecretDefinitions.deletedAt,
-      }).from(companySecrets).leftJoin(userSecretDefinitions, and(
-        eq(userSecretDefinitions.id, companySecrets.userSecretDefinitionId),
-        eq(userSecretDefinitions.companyId, companyId),
-      )).where(and(
-        eq(companySecrets.companyId, companyId), inArray(companySecrets.id, credentialIds),
-      ))
-    : [];
+  const credentialRecords = credentialIds.length > 0 ? await loadCredentialRecords(credentialIds) : [];
   const hasCredentialRecord = (grant: typeof connectionGrants.$inferSelect) => {
     const github = grant.providerTenant?.github;
     const ref = grant.credentialSecretRefs.find((ref) => ref.configPath === "oauth.access_token");
@@ -581,4 +639,100 @@ export async function resolveManagedGitHubCredential(
     || alternate.grant.subjectUserId !== selection.grant.subjectUserId
     || alternate.grant.subjectAgentId !== selection.grant.subjectAgentId) return failure;
   try { return await acquire(alternate); } catch { return failure; }
+}
+
+/**
+ * Read-only preview of which managed GitHub identity each live agent in the
+ * company would use, as seen from one connection's Permissions page.
+ *
+ * It runs the runtime's pure selector over a single snapshot, so the page
+ * cannot drift from what a run gets and the cost does not grow per agent in
+ * queries. Personal grants depend on the run's responsible user, so the
+ * preview is exact only for runs owned by `viewerUserId`; standing delegations
+ * (ownerless runs) are deliberately not guessed at. A selected grant counts as
+ * usable only when the checks runtime acquisition makes without touching
+ * secret values also pass. It never returns credential references, and it
+ * withholds other connections' names and account logins unless the viewer
+ * could already read that grant (own personal grant, or manager).
+ */
+export async function previewGitHubAgentIdentities(
+  db: Db,
+  input: {
+    companyId: string;
+    connectionId: string;
+    viewerUserId: string | null;
+    canViewPrivateIdentities: boolean;
+  },
+): Promise<GitHubAgentIdentitiesResponse> {
+  const { companyId, connectionId, viewerUserId, canViewPrivateIdentities } = input;
+  const snapshot = await loadGitHubIdentitySnapshot(db, companyId);
+  const accessRefOf = (grant: GrantRow) => grant.credentialSecretRefs.find((ref) => ref.configPath === "oauth.access_token");
+  const secretIds = snapshot.grants.flatMap((grant) => accessRefOf(grant)?.secretId ?? []);
+  const [agentRows, secretRecords, memberships] = await Promise.all([
+    db.select({ id: agentsTable.id, status: agentsTable.status }).from(agentsTable)
+      .where(eq(agentsTable.companyId, companyId)),
+    loadGitHubCredentialRecords(db, companyId)(secretIds),
+    viewerUserId ? db.select({ role: companyMemberships.membershipRole }).from(companyMemberships).where(and(
+      eq(companyMemberships.companyId, companyId),
+      eq(companyMemberships.principalType, "user"),
+      eq(companyMemberships.principalId, viewerUserId),
+      eq(companyMemberships.status, "active"),
+    )).limit(1) : Promise.resolve([]),
+  ]);
+  const viewerIsAuthorizedMember = memberships.length > 0 && memberships[0]!.role !== "viewer";
+  const names = new Map(snapshot.githubConnections.map((row) => [row.id, row.name]));
+  const loadRecords = async (ids: string[]) => secretRecords.filter((record) => ids.includes(record.id));
+  // The same checks acquisition makes before it resolves a secret value.
+  const isUsable = (grant: GrantRow) => {
+    const github = grant.providerTenant?.github;
+    const ref = accessRefOf(grant);
+    if (!ref || !github || github.installationCount < 1 || github.repositoryCount < 1) return false;
+    const record = secretRecords.find((secret) => secret.id === ref.secretId);
+    if (!record || record.status !== "active" || record.deletedAt) return false;
+    if (grant.kind !== "user") return record.scope === "company";
+    if (!grant.subjectUserId || grant.subjectUserId !== viewerUserId || !viewerIsAuthorizedMember) return false;
+    return record.scope === "user"
+      && Boolean(record.userSecretDefinitionId)
+      && record.ownerUserId === grant.subjectUserId
+      && record.definitionStatus === "active"
+      && !record.definitionDeletedAt;
+  };
+  const previews = await Promise.all(agentRows.filter((agent) => agent.status !== "terminated").map(
+    async (agent): Promise<GitHubAgentIdentityPreview> => {
+      const selection = await selectManagedGitHubIdentity(snapshot, {
+        agentId: agent.id,
+        responsibleUserId: viewerUserId,
+        allowStandingDelegation: false,
+      }, loadRecords);
+      const base = {
+        agentId: agent.id,
+        source: selection.identitySource ?? null,
+        selectedConnectionId: null,
+        selectedConnectionName: null,
+        selectedAccountLogin: null,
+      };
+      if (!selection.configured) return { ...base, state: "not_installed" };
+      const grant = selection.grant;
+      if (grant && isUsable(grant)) {
+        const here = grant.connectionId === connectionId;
+        const mayDisclose = canViewPrivateIdentities || (grant.kind === "user" && grant.subjectUserId === viewerUserId);
+        return {
+          ...base,
+          state: here ? "selected_here" : "selected_elsewhere",
+          selectedConnectionId: here || mayDisclose ? grant.connectionId : null,
+          selectedConnectionName: mayDisclose ? names.get(grant.connectionId) ?? null : null,
+          selectedAccountLogin: mayDisclose ? grant.providerTenant?.github?.login ?? null : null,
+        };
+      }
+      if (!grant && !viewerUserId && selection.identitySource !== "dedicated") return { ...base, state: "no_context" };
+      return { ...base, state: selection.error?.startsWith("More than one") ? "ambiguous" : "unavailable" };
+    },
+  ));
+  return {
+    connectionId,
+    previewUserId: viewerUserId,
+      dedicatedAgentIds: snapshot.grants.flatMap((grant) =>
+      grant.kind === "agent" && grant.connectionId === connectionId && grant.subjectAgentId ? [grant.subjectAgentId] : []),
+    agents: previews,
+  };
 }

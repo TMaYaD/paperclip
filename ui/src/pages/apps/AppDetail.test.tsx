@@ -34,6 +34,7 @@ const checkConnectionHealthMock = vi.hoisted(() => vi.fn());
 const startOAuthMock = vi.hoisted(() => vi.fn());
 const reconnectConnectionMock = vi.hoisted(() => vi.fn());
 const listConnectionGrantsMock = vi.hoisted(() => vi.fn());
+const listGitHubAgentIdentitiesMock = vi.hoisted(() => vi.fn());
 const revokeConnectionGrantMock = vi.hoisted(() => vi.fn());
 const createConnectionGrantDelegationMock = vi.hoisted(() => vi.fn());
 const revokeConnectionGrantDelegationMock = vi.hoisted(() => vi.fn());
@@ -84,6 +85,7 @@ vi.mock("@/api/tools", () => ({
       ? startOAuthMock(connectionId)
       : startOAuthMock(connectionId, input),
     listConnectionGrants: (connectionId: string) => listConnectionGrantsMock(connectionId),
+    listGitHubAgentIdentities: (connectionId: string) => listGitHubAgentIdentitiesMock(connectionId),
     revokeConnectionGrant: (connectionId: string, grantId: string) =>
       revokeConnectionGrantMock(connectionId, grantId),
     createConnectionGrantDelegation: (connectionId: string, grantId: string, agentId: string) =>
@@ -1204,6 +1206,60 @@ describe("AppDetail", () => {
     for (const forbidden of ["Change", "Save", "Refresh actions", "Choose agents"]) {
       expect(labels).not.toContain(forbidden);
     }
+  });
+
+  describe("GitHub identity preview", () => {
+    function useGitHubConnection() {
+      getConnectionMock.mockResolvedValue(connection({ config: { sourceTemplateKey: "github" } }));
+      listProfilesMock.mockResolvedValue({
+        profiles: [{
+          profileKey: "app:conn-1",
+          entries: [{ effect: "include", catalogEntryId: "catalog-read" }],
+          bindings: [{ targetType: "agent", targetId: "agent-1" }],
+        }],
+      });
+    }
+    const preview = (overrides: Record<string, unknown>) => ({
+      connectionId: "conn-1",
+      previewUserId: "user-1",
+      dedicatedAgentIds: ["agent-2"],
+      agents: [{
+        agentId: "agent-1", state: "selected_elsewhere", source: "personal",
+        selectedConnectionId: "conn-a", selectedConnectionName: "Personal GitHub",
+        selectedAccountLogin: "account-a", ...overrides,
+      }],
+    });
+
+    it("flags a listed agent whose runs resolve to another GitHub account", async () => {
+      useGitHubConnection();
+      listGitHubAgentIdentitiesMock.mockResolvedValue(preview({}));
+      await renderAppDetail();
+      const notes = container.querySelector('[data-testid="github-identity-notes"]');
+      expect(listGitHubAgentIdentitiesMock).toHaveBeenCalledWith("conn-1");
+      expect(notes?.textContent).toContain("Coder will not use this connection");
+      expect(notes?.textContent).toContain("@account-a");
+      expect(notes?.textContent).toContain("no dedicated grant for this agent");
+      expect(notes?.textContent).toContain("Previewed for runs you own");
+    });
+
+    it("stays quiet for an agent that uses this connection", async () => {
+      useGitHubConnection();
+      listGitHubAgentIdentitiesMock.mockResolvedValue(preview({ state: "selected_here", selectedConnectionId: "conn-1" }));
+      await renderAppDetail();
+      expect(container.textContent).not.toContain("will not use this connection");
+    });
+
+    it("says so when the preview cannot be loaded instead of implying access", async () => {
+      useGitHubConnection();
+      listGitHubAgentIdentitiesMock.mockRejectedValue(new Error("boom"));
+      await renderAppDetail();
+      expect(container.textContent).toContain("Could not check which GitHub account each agent uses");
+    });
+
+    it("does not request the preview for non-GitHub connections", async () => {
+      await renderAppDetail();
+      expect(listGitHubAgentIdentitiesMock).not.toHaveBeenCalled();
+    });
   });
 
   it("redirects legacy connection activity to the filtered company Audit feed", async () => {
