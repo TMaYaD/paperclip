@@ -333,7 +333,7 @@ Gaps: This individual operation has source review but no recorded HTTP verificat
 
 API: `present` — `POST /api/companies/{companyId}/tools/apps/{connectionId}/finish`; JSON REST.
 Agent access: `available` — agent REST and default native `search_api` / `call_api`.
-Policy: `tools:manage_connections` and `tools:manage_profiles`; current and requested audience/target authority, including nested `access`, all agents, and retained bindings. Fresh setup creates a new connection after removal; an explicit reconnect must name the old connection and keep its credential policy and subject.
+Policy: `tools:manage_connections` and `tools:manage_profiles`; current and requested audience/target authority, including nested `access`, all agents, and retained bindings. Fresh setup after removal creates a new application and connection, never reviving the removed ones; an explicit reconnect must name the old connection and keep its credential policy and subject.
 Evidence: `verified` — [assembled-server integration](../../server/src/__tests__/connection-management.integration.test.ts), actual bearer/session authentication, persisted PostgreSQL state, and deterministic local MCP/provider fixtures.
 Verification: `passed` — 25-scenario fixture suite on a fresh isolated PostgreSQL database, including scoped denial, approved continuation, revocation, cancellation and replay. No live provider qualification.
 Gaps: Provider fixtures do not qualify live provider setup or availability.

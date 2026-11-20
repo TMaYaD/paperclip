@@ -1568,6 +1568,7 @@ describeEmbeddedPostgres("generic remote MCP connections", () => {
     expect(fixture.fetchMock).not.toHaveBeenCalled();
     const fresh = await service.connectGalleryApp(company.id, input, { actorType: "user", actorId: "other-user" });
     expect(fresh.connectionId).not.toBe(first.connectionId);
+    expect(fresh.application.id).not.toBe(first.application.id);
     await expect(db.select().from(connectionGrants).where(eq(connectionGrants.connectionId, first.connectionId))).resolves.toHaveLength(0);
     await expect(service.getConnection(fresh.connectionId)).resolves.toMatchObject({
       createdByUserId: "other-user", credentialPolicy: "per_user",

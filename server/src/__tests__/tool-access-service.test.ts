@@ -16622,7 +16622,7 @@ describeEmbeddedPostgres("tool access service", () => {
     ).rejects.toMatchObject({ status: 404 });
   });
 
-  it("reuses a removed gallery app without reviving either archived connection", async () => {
+  it("creates a separate application when a removed gallery app is connected again", async () => {
     const company = await createCompany(db);
     const service = createTestToolAccessService(db);
     const actor = { actorType: "user" as const, actorId: "local-board" };
@@ -16637,6 +16637,7 @@ describeEmbeddedPostgres("tool access service", () => {
       actor,
     );
     await service.archiveConnection(first.connectionId, company.id, actor);
+    const [archivedFirstApplication] = await db.select().from(toolApplications).where(eq(toolApplications.id, first.application.id));
 
     const second = await service.connectGalleryApp(
       company.id,
@@ -16647,13 +16648,13 @@ describeEmbeddedPostgres("tool access service", () => {
       actor,
     );
 
-    expect(second.application.id).toBe(first.application.id);
+    expect(second.application.id).not.toBe(first.application.id);
     expect(second.connectionId).not.toBe(first.connectionId);
     expect(second.connection.uid).not.toBe(first.connection.uid);
     expect(second.application.status).toBe("draft");
+    expect(second.application.name).toBe("Notion (2)");
     expect(second.connection.status).toBe("draft");
     expect(second.connection.credentialPolicy).toBe("shared");
-    expect(second.connection.name).toBe("Notion (2)");
     const grants = await service.listConnectionGrants(
       second.connectionId,
       company.id,
@@ -16665,15 +16666,18 @@ describeEmbeddedPostgres("tool access service", () => {
         isDefault: true,
       }),
     ]);
-    await expect(db.select().from(toolApplications)).resolves.toHaveLength(1);
+    await expect(db.select().from(toolApplications)).resolves.toHaveLength(2);
+    await expect(db.select().from(toolApplications).where(eq(toolApplications.id, first.application.id)))
+      .resolves.toEqual([archivedFirstApplication]);
     await service.archiveConnection(second.connectionId, company.id, actor);
     const third = await service.connectGalleryApp(company.id, {
       galleryKey: "notion", name: "Notion",
     }, actor);
-    expect(third.application.id).toBe(first.application.id);
+    expect(third.application.id).not.toBe(first.application.id);
+    expect(third.application.id).not.toBe(second.application.id);
+    expect(third.application.name).toBe("Notion (3)");
     expect(third.connectionId).not.toBe(first.connectionId);
     expect(third.connectionId).not.toBe(second.connectionId);
-    expect(third.connection.name).toBe("Notion (3)");
     await expect(db.select().from(toolConnections).where(eq(toolConnections.companyId, company.id)))
       .resolves.toEqual(expect.arrayContaining([
         expect.objectContaining({ id: first.connectionId, status: "archived", credentialPolicy: "per_user" }),

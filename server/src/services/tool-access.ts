@@ -1690,26 +1690,29 @@ export function toolAccessService(
       if (!row) throw notFound("App not found");
       existingApplication = row;
     } else {
-      // Removal and interrupted setup retain their application rows. Reuse a
-      // matching application to satisfy the company-unique name constraint,
-      // while giving a fresh connection its own identity.
+      // A fresh setup never revives a removed (archived) application: removal
+      // keeps that application, its grants, credentials and history archived,
+      // and the new connection gets its own application. Only an interrupted
+      // gallery setup (a draft) is resumed here; an explicit reconnect or
+      // applicationId is handled above. Name allocation below keeps the
+      // company-unique application name valid.
       const requestedName =
         input.name ?? galleryEntry?.name ?? defaultLinkName(input.link ?? "");
-      const recoverableApplicationStatuses = galleryEntry
-        ? (["draft", "archived"] as const)
-        : (["archived"] as const);
-      const [recoverableApplication] = await db
-        .select()
-        .from(toolApplications)
-        .where(
-          and(
-            eq(toolApplications.companyId, companyId),
-            eq(toolApplications.name, requestedName),
-            inArray(toolApplications.status, recoverableApplicationStatuses),
-          ),
-        )
-        .orderBy(desc(toolApplications.updatedAt))
-        .limit(1);
+      const recoverableApplicationStatuses: readonly "draft"[] = galleryEntry ? ["draft"] : [];
+      const [recoverableApplication] = recoverableApplicationStatuses.length
+        ? await db
+            .select()
+            .from(toolApplications)
+            .where(
+              and(
+                eq(toolApplications.companyId, companyId),
+                eq(toolApplications.name, requestedName),
+                inArray(toolApplications.status, recoverableApplicationStatuses),
+              ),
+            )
+            .orderBy(desc(toolApplications.updatedAt))
+            .limit(1)
+        : [undefined];
       const recoverableSource = recoverableApplication?.metadata
         ? (recoverableApplication.metadata.sourceTemplateKey ??
           recoverableApplication.metadata.galleryKey ??
