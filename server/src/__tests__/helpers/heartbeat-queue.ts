@@ -39,6 +39,9 @@ export function createHeartbeatQueueTestDependencies(db: Db): QueueTestDependenc
       getDependencyReadiness: vi.fn<HeartbeatQueueDependencies["issuesSvc"]["getDependencyReadiness"]>(),
       listDependencyReadiness: vi.fn(async () => new Map()),
       listReadyUnassignedChildDependents: vi.fn(async () => []),
+      updateForCompany: vi.fn<HeartbeatQueueDependencies["issuesSvc"]["updateForCompany"]>(async () => {
+        throw new Error("Unexpected task reopen");
+      }),
     },
     treeControlSvc: { getActivePauseHoldGate: vi.fn(async () => null) },
     budgets: { getInvocationBlock: vi.fn(async () => null), getConnectionBlock: vi.fn(async () => null) },

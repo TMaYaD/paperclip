@@ -9,6 +9,20 @@ import { issueTreeControlService } from "./issue-tree-control.js";
 export const ISSUE_BLOCKERS_RESOLVED_WAKE_REASON = "issue_blockers_resolved";
 export const ISSUE_CHILD_READY_FOR_ASSIGNMENT_WAKE_REASON = "issue_child_ready_for_assignment";
 
+export const ISSUE_CHILDREN_COMPLETED_WAKE_REASON = "issue_children_completed";
+
+const DEPENDENCY_RESOLVED_WAKE_REASONS = [ISSUE_BLOCKERS_RESOLVED_WAKE_REASON, ISSUE_CHILDREN_COMPLETED_WAKE_REASON];
+
+export const dependencyResolvedWakePayloadSql =
+  sql`${agentWakeupRequests.payload}#>>'{_paperclipWakeContext,wakeReason}' in (${sql.join(
+    DEPENDENCY_RESOLVED_WAKE_REASONS.map(reason => sql`${reason}`), sql`, `)})`;
+
+export function isDependencyResolvedWakePayload(payload: Record<string, unknown> | null | undefined): boolean {
+  const context = payload?._paperclipWakeContext;
+  return context !== null && typeof context === "object" && !Array.isArray(context)
+    && DEPENDENCY_RESOLVED_WAKE_REASONS.includes(String((context as Record<string, unknown>).wakeReason));
+}
+
 /**
  * Whether moving an issue into `blocked` should immediately wake its assignee
  * because every recorded blocker is already resolved ("blockers restored").

@@ -87,11 +87,11 @@ describe("passive Codex quota observations", () => {
 
 describe("native Codex quota event forwarding", () => {
   it("preserves the producer timestamp and rejects unrelated event sources", () => {
-    const event = { sourceKind: "runner" as const, eventType: "harness.diagnostic", emittedAt: now.toISOString(), payload: { code: "codex_quota_updated", rateLimits: info } };
+    const event = { sourceKind: "runner" as const, eventType: "harness.diagnostic" as const, emittedAt: now.toISOString(), payload: { code: "codex_quota_updated", rateLimits: info } };
     expect(nativeCodexQuotaObservation("codex", event)).toEqual({ kind: "codex_rate_limits", info, observedAt: now.toISOString() });
     expect(nativeCodexQuotaObservation("claude_managed", event)).toBeNull();
     expect(nativeCodexQuotaObservation("codex", { ...event, sourceKind: "control_plane" })).toBeNull();
-    expect(nativeCodexQuotaObservation("codex", { ...event, eventType: "item.completed" })).toBeNull();
+    expect(nativeCodexQuotaObservation("codex", { ...event, eventType: "item.completed" as const })).toBeNull();
     expect(nativeCodexQuotaObservation("codex", { ...event, payload: { code: "other" } })).toBeNull();
   });
 });

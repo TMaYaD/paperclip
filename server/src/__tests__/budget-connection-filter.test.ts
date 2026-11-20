@@ -32,7 +32,7 @@ const support = await getEmbeddedPostgresTestSupport();
     const architectId = randomUUID(), engineerId = randomUUID(), reviewerId = randomUUID(), coderId = randomUUID();
     const claudeId = randomUUID(), minimaxId = randomUUID(), claudeGrant = randomUUID(), minimaxGrant = randomUUID();
     await db.insert(companies).values({ id: companyId, name: "Connections", issuePrefix: `C${companyId.slice(0, 6).toUpperCase()}` });
-    await db.insert(toolApplications).values({ id: applicationId, companyId, name: applicationId, type: "custom" });
+    await db.insert(toolApplications).values({ id: applicationId, companyId, name: applicationId, type: "rest_api" });
     await db.insert(toolConnections).values([
       { id: claudeId, companyId, applicationId, name: "My Claude subscription", uid: claudeId, connectionPurpose: "ai", transport: "runtime_auth",
         status: "active", enabled: true, config: { ai: { provider: "anthropic", method: "subscription" } } },

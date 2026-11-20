@@ -7,13 +7,8 @@ const PROVIDER_ONLY_KEYS: ReadonlySet<string> = new Set([
   ...AGENT_OBSERVABILITY_ENV_KEYS,
 ]);
 const IDENTITY_KEYS = ["PAPERCLIP_AGENT_KEY_ID", "PAPERCLIP_AGENT_PUBLIC_KEY", "PAPERCLIP_AGENT_PRIVATE_KEY"];
-// Run-scoped Paperclip tokens that Codex shells need despite matching the
-// secret-name exclusions: the skill's API token, and the GitHub launcher's
-// broker capability and bridge token. Without the GitHub pair, managed Git
-// reports capability_missing and runs without credentials.
-export const CODEX_SHELL_SCOPED_TOKEN_KEYS: readonly string[] = [
-  "PAPERCLIP_API_KEY", "PAPERCLIP_GITHUB_BROKER_TOKEN", "PAPERCLIP_GITHUB_BRIDGE_TOKEN",
-];
+// Paperclip's gh and git launchers in the shell fetch the run's GitHub credential with this capability.
+const GITHUB_LAUNCHER_KEYS = ["PAPERCLIP_GITHUB_BROKER_TOKEN", "PAPERCLIP_GITHUB_BRIDGE_TOKEN"];
 
 /** Only resolved adapter configuration can opt a service secret into shell access.
  * The launch environment here is Paperclip-built, never ambient process.env.
@@ -32,7 +27,8 @@ export function codexShellEnvironmentKeys(
   return [...new Set([
     "PATH", "HOME", "LANG", "LANGUAGE", "LC_ALL", "LC_CTYPE", "TZ", "TMPDIR", "TEMP", "TMP", "CODEX_HOME",
     ...Object.keys(environment).filter(key => ENVIRONMENT_NAME.test(key) && !PROVIDER_ONLY_KEYS.has(key.toUpperCase())
-      && (CODEX_SHELL_SCOPED_TOKEN_KEYS.includes(key) || configuredSecrets.has(key) || !SECRET_NAME.test(key))),
+      && (key === "PAPERCLIP_API_KEY" || configuredSecrets.has(key) || !SECRET_NAME.test(key))),
+    ...GITHUB_LAUNCHER_KEYS.filter(key => environment[key]),
     ...(hasAgentIdentity ? IDENTITY_KEYS : []),
   ])].sort();
 }

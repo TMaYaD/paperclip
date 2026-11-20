@@ -13,6 +13,6 @@ permissions:
 
 jobs:
   ci:
-    if: github.event.action != 'labeled' || github.event.label.name == 'profile-ci'
+    if: github.event.action != 'labeled' || github.event.label.name == 'profile-ci' || github.event.label.name == 'full-ci'
     # Execute the protected fork main workflow, not workflow code from the PR.
     uses: TMaYaD/paperclip/.github/workflows/pr-trusted.yml@main
