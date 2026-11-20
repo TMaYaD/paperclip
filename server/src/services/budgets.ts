@@ -416,11 +416,20 @@ async function markApprovalStatus(
 /** Owner transactions read eligibility or append work. Only the fenced worker
  * and explicit policy edits evaluate and publish aggregate transitions. */
 export function budgetServiceInTransaction(db: Db, publications: ActivityPublication[] = [],
-  options: { evaluate?: boolean; now?: Date; readQuotaSnapshot?: QuotaSnapshotReader } = {}) {
+  options: {
+    evaluate?: boolean; now?: Date; readQuotaSnapshot?: QuotaSnapshotReader;
+    /**
+     * Root database for reading a managed connection's plan usage. Never the
+     * transaction `db`: a credential read records its use, which a read-only
+     * snapshot rejects and which would abort the caller's transaction. Without
+     * it, summaries show only usage another reader already observed.
+     */
+    usageDb?: Db;
+  } = {}) {
   const now = options.now ?? new Date();
   const readQuotaSnapshot = options.readQuotaSnapshot ?? readSharedQuotaSnapshot;
   const recordActivity = (input: LogActivityInput) => logActivity(db, input, publications);
-  const readConnectionUsage = createConnectionUsageReader(db, { readQuotaSnapshot });
+  const readConnectionUsage = createConnectionUsageReader(options.usageDb ?? null, { readQuotaSnapshot });
   async function pauseScopeForBudget(policy: PolicyRow) {
     const now = new Date();
     if (policy.scopeType === "agent") {
@@ -1672,16 +1681,16 @@ export function budgetService(db: Db, hooks: BudgetServiceHooks = {}) {
     scope?: { scopeType: string; scopeId: string }) => withOperationAccountingTransaction(db, companyId, async (tx, publications) => {
       const now = new Date();
       const policies = await fenceBudgetPolicies(tx, companyId, scope);
-      const result = await work(budgetServiceInTransaction(tx, publications, { evaluate: true, now, readQuotaSnapshot: hooks.readQuotaSnapshot }));
+      const result = await work(budgetServiceInTransaction(tx, publications, { evaluate: true, now, readQuotaSnapshot: hooks.readQuotaSnapshot, usageDb: db }));
       if ((policies.some(policy => policy.windowKind === "calendar_month_utc") || scope) && Date.now() >= currentUtcMonthWindow(now).end.getTime())
         throw Object.assign(new Error("Budget window changed during publication"), { code: "40001" });
       return result;
     });
   return {
     listPolicies: (companyId: string) => withAccountingReadSnapshot(db, companyId,
-      tx => budgetServiceInTransaction(tx).listPolicies(companyId)),
+      tx => budgetServiceInTransaction(tx, [], { usageDb: db, readQuotaSnapshot: hooks.readQuotaSnapshot }).listPolicies(companyId)),
     overview: (companyId: string) => withAccountingReadSnapshot(db, companyId,
-      tx => budgetServiceInTransaction(tx).overview(companyId)),
+      tx => budgetServiceInTransaction(tx, [], { usageDb: db, readQuotaSnapshot: hooks.readQuotaSnapshot }).overview(companyId)),
     evaluateAdmission: (companyId: string, agentId: string | null, context?: AdmissionContext) =>
       withAccountingReadSnapshot(db, companyId, tx => budgetServiceInTransaction(tx).evaluateAdmission(companyId, agentId, context)),
     evaluateAffectedScopes: (companyId: string, agentId: string | null, projectId: string | null) =>

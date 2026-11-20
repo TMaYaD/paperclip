@@ -8,6 +8,14 @@ import {
 import type { Db } from "@paperclipai/db";
 import { aiConnectionService } from "./ai-connections.js";
 import {
+  accountRateLimitedUntil,
+  accountUsageKey,
+  connectionRateLimitedUntil,
+  latestAccountUsage,
+  noteAccountRateLimited,
+  recordAccountUsage,
+} from "./account-usage-observations.js";
+import {
   QUOTA_SNAPSHOT_MAX_STALE_MS,
   QUOTA_SNAPSHOT_TTL_MS,
   readQuotaSnapshot as readSharedQuotaSnapshot,
@@ -43,28 +51,44 @@ export function usageToQuotaResult(usage: AiConnectionUsage): ProviderQuotaResul
   };
 }
 
-type CacheEntry = { expires: number; result: Promise<ProviderQuotaResult | null>; lastGood?: ProviderQuotaResult };
-const cache = new Map<string, CacheEntry>();
+const inFlight = new Map<string, Promise<ProviderQuotaResult | null>>();
 
 export type ConnectionUsageReader = (companyId: string, key: string, grantId?: string | null) => Promise<ProviderQuotaResult | null>;
 
+function staleOrNull(last: ProviderQuotaResult | undefined, maxStaleMs: number, now: number, error: string, rateLimited = false): ProviderQuotaResult | null {
+  const lastAt = last?.observedAt ? new Date(last.observedAt).getTime() : NaN;
+  if (last && Number.isFinite(lastAt) && now - lastAt < maxStaleMs) return { ...last, stale: true, error };
+  return rateLimited ? { provider: last?.provider ?? "", ok: false, rateLimited: true, errorFamily: "rate_limited", error, windows: [] } : null;
+}
+
 /**
  * Reads usage windows for a connection budget key. Local credentials use the
- * host's memoized provider snapshot; a managed connection is probed with its
- * own credential, memoized for the quota snapshot TTL, and keeps its last good
- * read (marked `stale`) while a refresh fails, up to the snapshot stale bound.
+ * host's memoized provider snapshot. A managed connection is probed with its
+ * own credential through `usageDb`, which must be the root database, never a
+ * caller's transaction: reading a credential records its use, which a
+ * read-only snapshot rejects and which would abort the caller's transaction.
+ * Without `usageDb` (and no injected `readUsage`) only shared observations are
+ * returned.
+ *
+ * Observations and 429 backoff are shared per account with the Costs quota
+ * cards (see account-usage-observations.ts): a fresh shared read is reused,
+ * a backing-off account is not probed, and the last good read is returned,
+ * marked `stale`, while refreshes fail, up to the snapshot stale bound.
  */
-export function createConnectionUsageReader(db: Db, deps: {
+export function createConnectionUsageReader(usageDb: Db | null, deps: {
   readQuotaSnapshot?: QuotaSnapshotReader;
   readUsage?: (companyId: string, connectionId: string, grantId?: string | null) => Promise<AiConnectionUsage | null>;
   ttlMs?: number;
   maxStaleMs?: number;
+  now?: () => number;
 } = {}): ConnectionUsageReader {
   const readSnapshot = deps.readQuotaSnapshot ?? readSharedQuotaSnapshot;
-  const readUsage = deps.readUsage ?? ((companyId, connectionId, grantId) => aiConnectionService(db).budgetUsage(companyId, connectionId, grantId));
+  const readUsage = deps.readUsage
+    ?? (usageDb ? (companyId: string, connectionId: string, grantId?: string | null) => aiConnectionService(usageDb).budgetUsage(companyId, connectionId, grantId) : null);
   const ttlMs = deps.ttlMs ?? QUOTA_SNAPSHOT_TTL_MS;
   const maxStaleMs = deps.maxStaleMs ?? QUOTA_SNAPSHOT_MAX_STALE_MS;
-  const store = deps.readUsage ? new Map<string, CacheEntry>() : cache;
+  const clock = deps.now ?? Date.now;
+  const pending = deps.readUsage ? new Map<string, Promise<ProviderQuotaResult | null>>() : inFlight;
   return async (companyId, key, grantId) => {
     const parsed = parseConnectionBudgetKey(key);
     if (!parsed) return null;
@@ -72,36 +96,35 @@ export function createConnectionUsageReader(db: Db, deps: {
       const snapshot = await readSnapshot();
       return snapshot.results.find((row) => row.provider === parsed.provider && row.source !== "managed-connection") ?? null;
     }
-    const cacheKey = `${companyId}:${parsed.connectionId}:${grantId ?? ""}`;
-    const now = Date.now();
-    const existing = store.get(cacheKey);
-    if (existing && existing.expires > now) return existing.result;
-    const entry: CacheEntry = { expires: now + ttlMs, result: Promise.resolve(null), lastGood: existing?.lastGood };
-    entry.result = (async () => {
-      let fresh: ProviderQuotaResult | null = null;
-      try {
-        const usage = await readUsage(companyId, parsed.connectionId, grantId);
-        fresh = usage ? usageToQuotaResult(usage) : null;
-      } catch {
-        fresh = null;
+    const connectionId = parsed.connectionId;
+    const shared = grantId ? latestAccountUsage(accountUsageKey(connectionId, grantId)) : latestAccountUsage({ connectionId });
+    const now = clock();
+    const sharedAt = shared?.observedAt ? new Date(shared.observedAt).getTime() : NaN;
+    if (shared && Number.isFinite(sharedAt) && now - sharedAt < ttlMs) return shared;
+    const limitedUntil = grantId ? accountRateLimitedUntil(accountUsageKey(connectionId, grantId), now) : connectionRateLimitedUntil(connectionId, now);
+    if (limitedUntil) return staleOrNull(shared, maxStaleMs, now, "The provider rate limited the usage check.", true);
+    if (!readUsage) return staleOrNull(shared, maxStaleMs, now, "Usage not read in this context");
+    const cacheKey = `${companyId}:${connectionId}:${grantId ?? ""}`;
+    const existing = pending.get(cacheKey);
+    if (existing) return existing;
+    const read = (async () => {
+      let usage: AiConnectionUsage | null = null;
+      try { usage = await readUsage(companyId, connectionId, grantId); }
+      catch { usage = null; }
+      const result = usage ? usageToQuotaResult(usage) : null;
+      const accountKey = usage ? accountUsageKey(usage.connectionId, usage.grantId) : null;
+      if (result?.ok && accountKey) {
+        recordAccountUsage(accountKey, result, clock());
+        return latestAccountUsage(accountKey) ?? result;
       }
-      const observedAt = new Date().toISOString();
-      if (fresh?.ok) {
-        const good = { ...fresh, observedAt };
-        entry.lastGood = good;
-        return good;
+      if (result?.rateLimited && accountKey) {
+        noteAccountRateLimited(accountKey, clock());
+        return staleOrNull(shared, maxStaleMs, clock(), result.error ?? "The provider rate limited the usage check.", true);
       }
-      const last = entry.lastGood;
-      const lastAt = last?.observedAt ? new Date(last.observedAt).getTime() : NaN;
-      if (last && Number.isFinite(lastAt) && Date.now() - lastAt < maxStaleMs) {
-        return { ...last, stale: true, error: fresh?.error ?? "Usage refresh failed" };
-      }
-      // A throttled probe re-checks sooner than the TTL.
-      if (fresh?.rateLimited) entry.expires = Date.now() + Math.min(ttlMs, 20_000);
-      return fresh;
-    })();
-    if (store.size >= 500 && !store.has(cacheKey)) store.delete(store.keys().next().value!);
-    store.set(cacheKey, entry);
-    return entry.result;
+      return staleOrNull(shared, maxStaleMs, clock(), result?.error ?? "Usage refresh failed") ?? result;
+    })().finally(() => pending.delete(cacheKey));
+    if (pending.size >= 500 && !pending.has(cacheKey)) pending.delete(pending.keys().next().value!);
+    pending.set(cacheKey, read);
+    return read;
   };
 }

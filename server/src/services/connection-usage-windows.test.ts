@@ -1,7 +1,14 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AiConnectionMetadata, AiConnectionUsage } from "@paperclipai/shared";
 import { probeAiConnectionUsage } from "./ai-connection-usage.js";
 import { createConnectionUsageReader, usageToQuotaResult } from "./connection-usage-windows.js";
+import {
+  RATE_LIMIT_BACKOFF_MAX_MS, RATE_LIMIT_BACKOFF_MIN_MS, accountRateLimitedUntil, accountUsageKey, latestAccountUsage,
+  noteAccountRateLimited, recordAccountUsage, resetAccountUsageObservations,
+} from "./account-usage-observations.js";
+
+const CONNECTION = "8e4f0f9c-0a1b-4c55-9b8a-2b6f5e1d7c11";
+beforeEach(() => resetAccountUsageObservations());
 
 const gateway = (baseUrl: string): AiConnectionMetadata => ({
   provider: "anthropic", method: "subscription",
@@ -63,7 +70,7 @@ describe("gateway usage probes", () => {
 });
 
 const usage = (overrides: Partial<AiConnectionUsage>): AiConnectionUsage => ({
-  connectionId: "c", grantId: "g", provider: "anthropic", method: "subscription", status: "ok", checkedAt: new Date().toISOString(),
+  connectionId: CONNECTION, grantId: "g", provider: "anthropic", method: "subscription", status: "ok", checkedAt: new Date().toISOString(),
   source: "test", planType: null, overage: null, limits: [], ...overrides,
 });
 const entry = (windowDurationSeconds: number | null, usedPercent: number | null, scope: string | null = null) => ({
@@ -84,9 +91,9 @@ describe("connection usage windows", () => {
       ttlMs: 0,
       readUsage: async () => ok ? usage({ limits: [entry(18000, 40)] }) : usage({ status: "error", errorCode: "provider_unavailable", message: "down" }),
     });
-    expect((await read("co", "8e4f0f9c-0a1b-4c55-9b8a-2b6f5e1d7c11"))?.windows[0].usedPercent).toBe(40);
+    expect((await read("co", CONNECTION))?.windows[0].usedPercent).toBe(40);
     ok = false;
-    const stale = await read("co", "8e4f0f9c-0a1b-4c55-9b8a-2b6f5e1d7c11");
+    const stale = await read("co", CONNECTION);
     expect(stale).toMatchObject({ ok: true, stale: true });
     expect(stale?.windows[0].usedPercent).toBe(40);
   });
@@ -100,5 +107,62 @@ describe("connection usage windows", () => {
     });
     expect((await read("co", "local:openai"))?.windows[0].usedPercent).toBe(9);
     expect(await read("co", "local:google")).toBeNull();
+  });
+
+  it("backs off after a 429 instead of probing again, and keeps the last good read", async () => {
+    let now = 1_000_000;
+    let rateLimited = false;
+    const readUsage = vi.fn(async () => rateLimited
+      ? usage({ status: "error", errorCode: "rate_limited", message: "429" })
+      : usage({ limits: [entry(18000, 40)] }));
+    const read = createConnectionUsageReader(null, { ttlMs: 60_000, readUsage, now: () => now });
+    expect((await read("co", CONNECTION))?.windows[0].usedPercent).toBe(40);
+    now += 61_000;
+    rateLimited = true;
+    expect(await read("co", CONNECTION)).toMatchObject({ ok: true, stale: true });
+    expect(readUsage).toHaveBeenCalledTimes(2);
+    // Inside the backoff the account is not probed at all.
+    now += RATE_LIMIT_BACKOFF_MIN_MS - 1_000;
+    expect(await read("co", CONNECTION)).toMatchObject({ ok: true, stale: true });
+    expect(readUsage).toHaveBeenCalledTimes(2);
+    now += 2_000;
+    rateLimited = false;
+    expect(await read("co", CONNECTION)).toMatchObject({ ok: true, stale: false });
+    expect(readUsage).toHaveBeenCalledTimes(3);
+  });
+
+  it("reports a rate-limited account with no earlier read as rate limited, not as no data", async () => {
+    const read = createConnectionUsageReader(null, { readUsage: async () => usage({ status: "error", errorCode: "rate_limited", message: "429" }) });
+    expect(await read("co", CONNECTION)).toMatchObject({ ok: false, rateLimited: true });
+  });
+
+  it("reuses a fresh read another reader of the account recorded, without probing", async () => {
+    recordAccountUsage(accountUsageKey(CONNECTION, "g"), { provider: "anthropic", ok: true, windows: [{ key: "seven_day", label: "7d", usedPercent: 83, resetsAt: null, valueLabel: null }] });
+    const readUsage = vi.fn();
+    const read = createConnectionUsageReader(null, { readUsage });
+    expect((await read("co", CONNECTION))?.windows[0].usedPercent).toBe(83);
+    expect(readUsage).not.toHaveBeenCalled();
+  });
+
+  it("never probes without a root database, so a caller's transaction is never used", async () => {
+    const read = createConnectionUsageReader(null, { ttlMs: 0 });
+    expect(await read("co", CONNECTION)).toBeNull();
+    recordAccountUsage(accountUsageKey(CONNECTION, "g"), { provider: "anthropic", ok: true, windows: [] }, Date.now() - 1_000);
+    expect(await read("co", CONNECTION)).toMatchObject({ ok: true, stale: true });
+  });
+});
+
+describe("account usage backoff", () => {
+  it("doubles from 2 to 15 minutes, honours a longer Retry-After, and clears on success", () => {
+    const key = accountUsageKey(CONNECTION, "g");
+    expect(noteAccountRateLimited(key, 0)).toBe(RATE_LIMIT_BACKOFF_MIN_MS);
+    expect(noteAccountRateLimited(key, 0)).toBe(2 * RATE_LIMIT_BACKOFF_MIN_MS);
+    for (let i = 0; i < 5; i += 1) noteAccountRateLimited(key, 0);
+    expect(accountRateLimitedUntil(key, 0)).toBe(RATE_LIMIT_BACKOFF_MAX_MS);
+    expect(noteAccountRateLimited(key, 0, 60 * 60 * 1000)).toBe(60 * 60 * 1000);
+    recordAccountUsage(key, { provider: "anthropic", ok: true, windows: [] }, 0);
+    expect(accountRateLimitedUntil(key, 0)).toBe(0);
+    expect(latestAccountUsage({ connectionId: CONNECTION })?.ok).toBe(true);
+    expect(noteAccountRateLimited(key, 0)).toBe(RATE_LIMIT_BACKOFF_MIN_MS);
   });
 });
