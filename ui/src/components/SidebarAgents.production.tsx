@@ -364,6 +364,16 @@ export function SidebarAgents({ streamlined = false }: { streamlined?: boolean }
     }
     return counts;
   }, [liveRuns]);
+  // The live-runs feed includes queued runs waiting for a concurrency slot;
+  // the row's "N live" badge counts only runs that are executing.
+  const runningCountByAgent = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const run of liveRuns ?? []) {
+      if (run.status !== "running") continue;
+      counts.set(run.agentId, (counts.get(run.agentId) ?? 0) + 1);
+    }
+    return counts;
+  }, [liveRuns]);
   const liveAgentIds = useMemo(() => {
     const ids = new Set<string>();
     for (const [agentId, count] of liveCountByAgent) {
@@ -626,7 +636,7 @@ export function SidebarAgents({ streamlined = false }: { streamlined?: boolean }
       onLeaveAgent={leaveAgent}
       onPauseResume={(targetAgent, action) => pauseResumeAgent.mutate({ agent: targetAgent, action })}
       rail={rail}
-      runCount={liveCountByAgent.get(agent.id) ?? 0}
+      runCount={runningCountByAgent.get(agent.id) ?? 0}
       setSidebarOpen={setSidebarOpen}
       builtInStatus={builtInStatusByAgentId.get(agent.id)}
       starred={isStarredRow || isStarred(membershipsQuery.data, "agent", agent.id)}
