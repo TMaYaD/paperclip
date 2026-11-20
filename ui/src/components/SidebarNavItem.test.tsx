@@ -192,4 +192,22 @@ describe("SidebarNavItem", () => {
 
     expect(link().getAttribute("aria-label")).toBe("Dashboard, 3 live");
   });
+
+  it.each([
+    [{ liveCount: 3 }, "3 live"],
+    [{ liveCount: 3, liveTotal: 3 }, "3 live"],
+    [{ liveCount: 4, liveTotal: 9 }, "4/9 live"],
+    [{ liveCount: 0, liveTotal: 5 }, "0/5 live"],
+  ])("labels live and queued runs %o as %s", (counts, text) => {
+    render(<SidebarNavItem to="/dashboard" label="Dashboard" icon={Inbox} {...counts} />);
+
+    expect(container.textContent).toContain(text);
+  });
+
+  it("surfaces the running/total split in the rail aria-label", () => {
+    sidebarState.collapsed = true;
+    render(<SidebarNavItem to="/dashboard" label="Dashboard" icon={Inbox} liveCount={4} liveTotal={9} />);
+
+    expect(link().getAttribute("aria-label")).toBe("Dashboard, 4/9 live");
+  });
 });

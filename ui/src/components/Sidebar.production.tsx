@@ -77,7 +77,9 @@ export function Sidebar() {
     refetchInterval: sharedLiveRuns.refetchInterval,
   });
   usePublishSharedQueryData(sharedLiveRuns, liveRuns, liveRunsUpdatedAt);
-  const liveRunCount = liveRuns?.length ?? 0;
+  // The feed includes queued runs waiting for a concurrency slot.
+  const liveRunTotal = liveRuns?.length ?? 0;
+  const liveRunCount = (liveRuns ?? []).filter((run) => run.status === "running").length;
   const showWorkspacesLink = experimentalSettings?.enableIsolatedWorkspaces === true;
   const showApps = experimentalSettings?.enableApps === true;
   const showStatusCards = experimentalSettings?.enableStatusCards === true;
@@ -151,7 +153,7 @@ export function Sidebar() {
               collapsed rail, where the old header icon was dropped entirely.
               Cmd/Ctrl+K remains the keyboard path (command palette). */}
           <SidebarNavItem to="/search" label="Search" icon={Search} />
-          <SidebarNavItem to="/dashboard" label="Dashboard" icon={LayoutDashboard} liveCount={liveRunCount} />
+          <SidebarNavItem to="/dashboard" label="Dashboard" icon={LayoutDashboard} liveCount={liveRunCount} liveTotal={liveRunTotal} />
           <SidebarNavItem
             to="/inbox"
             label="Inbox"
