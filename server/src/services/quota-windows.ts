@@ -10,6 +10,7 @@ import { fetchCodexQuota } from "@paperclipai/adapter-codex-local/server";
 import { fetchClaudeQuota } from "@paperclipai/adapter-claude-local/server";
 import { aiConnectionService } from "./ai-connections.js";
 import { trackIdleWork } from "./task-admission.js";
+import { accountRateLimitedUntil, accountUsageKey, latestAccountUsage, noteAccountRateLimited, recordAccountUsage } from "./account-usage-observations.js";
 
 const accountRequests = new Map<string, { expires: number; result: Promise<ProviderQuotaResult> }>();
 const publicError = "Subscription quota is currently unavailable. Check usage with your provider.";
@@ -55,8 +56,16 @@ export async function fetchCompanyQuotaWindows(db: Db, companyId: string, userId
       const controller = new AbortController();
       // The HTTP deadline can expire while an OAuth exchange still needs to
       // save its consumed token. Track the actual work, not its timeout wrapper.
+      const sharedKey = accountUsageKey(row.connection.id, row.grant.id);
       const result = trackIdleWork((async (): Promise<ProviderQuotaResult> => {
         let credentialResolved = false;
+        // Every reader of this account backs off together after a 429; while it
+        // does, show the last good read instead of probing again.
+        if (accountRateLimitedUntil(sharedKey)) {
+          const last = latestAccountUsage(sharedKey);
+          return last ? { ...base, ok: true, windows: last.windows, capturedAt: last.capturedAt, observedAt: last.observedAt, stale: true, error: publicError }
+            : { ...base, ok: false, windows: [], error: publicError, errorFamily: "provider_unavailable", rateLimited: true };
+        }
         try {
           const value = await service.credential(row);
           controller.signal.throwIfAborted();
@@ -97,9 +106,12 @@ export async function fetchCompanyQuotaWindows(db: Db, companyId: string, userId
           } else {
             windows = await fetchClaudeQuota(value, controller.signal);
           }
-          return { ...base, ok: true, windows, capturedAt: new Date().toISOString() };
+          const observed = { ...base, ok: true, windows, capturedAt: new Date().toISOString() };
+          recordAccountUsage(sharedKey, observed);
+          return observed;
         } catch (error) {
           const message = error instanceof Error ? error.message : "Quota unavailable";
+          if (/\b429\b/.test(message)) noteAccountRateLimited(sharedKey);
           const missing = message === "credentials_unavailable";
           const invalid = message === "authentication_required" || (credentialResolved && /\b401\b|refresh_token_(?:reused|expired|invalidated)/i.test(message));
           const errorFamily = missing ? "credentials_unavailable" : invalid ? "authentication_required"
