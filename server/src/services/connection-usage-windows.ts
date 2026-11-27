@@ -21,6 +21,7 @@ import {
   readQuotaSnapshot as readSharedQuotaSnapshot,
   type QuotaSnapshotReader,
 } from "./quota-windows.js";
+import { recordQuotaObservation } from "./quota-observation-history.js";
 
 /**
  * Account-wide usage windows of one AI connection, keyed by length so that
@@ -115,6 +116,9 @@ export function createConnectionUsageReader(usageDb: Db | null, deps: {
       const accountKey = usage ? accountUsageKey(usage.connectionId, usage.grantId) : null;
       if (result?.ok && accountKey) {
         recordAccountUsage(accountKey, result, clock());
+        if (usageDb && usage) {
+          await recordQuotaObservation(usageDb, { companyId, connectionId: usage.connectionId, grantId: usage.grantId, result, now: clock() });
+        }
         return latestAccountUsage(accountKey) ?? result;
       }
       if (result?.rateLimited && accountKey) {
