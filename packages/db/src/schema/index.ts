@@ -263,6 +263,7 @@ export { userCompanyPreferences } from "./user_company_preferences.js";
 
 export { chatSlackManagerGrants } from "./chat_slack_manager_grants.js";
 export { aiSubscriptions, aiSubscriptionPrices, aiSubscriptionConnections } from "./ai_subscriptions.js";
+export { aiQuotaObservations } from "./ai_quota_observations.js";
 export * from "./muse_runner.js";
 
 export { executionWorkspaceRepositories } from "./execution_workspace_repositories.js";

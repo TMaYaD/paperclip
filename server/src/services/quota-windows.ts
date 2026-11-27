@@ -11,6 +11,7 @@ import { fetchClaudeQuota } from "@paperclipai/adapter-claude-local/server";
 import { aiConnectionService } from "./ai-connections.js";
 import { trackIdleWork } from "./task-admission.js";
 import { accountRateLimitedUntil, accountUsageKey, latestAccountUsage, noteAccountRateLimited, recordAccountUsage } from "./account-usage-observations.js";
+import { recordQuotaObservation } from "./quota-observation-history.js";
 
 const accountRequests = new Map<string, { expires: number; result: Promise<ProviderQuotaResult> }>();
 const publicError = "Subscription quota is currently unavailable. Check usage with your provider.";
@@ -108,6 +109,7 @@ export async function fetchCompanyQuotaWindows(db: Db, companyId: string, userId
           }
           const observed = { ...base, ok: true, windows, capturedAt: new Date().toISOString() };
           recordAccountUsage(sharedKey, observed);
+          await recordQuotaObservation(db, { companyId, connectionId: row.connection.id, grantId: row.grant.id, result: observed });
           return observed;
         } catch (error) {
           const message = error instanceof Error ? error.message : "Quota unavailable";

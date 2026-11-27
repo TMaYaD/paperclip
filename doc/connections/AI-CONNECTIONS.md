@@ -295,6 +295,16 @@ Credential resolution checks its version after any database wait and reloads a
 rotated value before giving it to a new run. Unknown utilization has no progress
 bar, but any provider-reported reset time remains visible.
 
+Successful managed-connection reads, from the Costs dashboard and from
+subscription budget gates, are also kept in `ai_quota_observations`: one row
+per window with a reported percentage, its reset time, and the observation
+time. The history adds no provider reads, because providers rate limit their
+usage endpoints. It keeps a changed reading at once and an unchanged one at most
+every 30 minutes. Rows older than 90 days are deleted while writing. A failed
+write is logged and never fails the quota read. Host-login (local) snapshots
+are instance-wide and are not kept. The history exists so operators can relate
+plan-usage percentages to recorded token usage in `cost_events`.
+
 Verification:
 
 ```sh
